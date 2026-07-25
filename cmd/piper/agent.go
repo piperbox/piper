@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/user"
@@ -77,10 +79,35 @@ var piperdPath = func() (string, error) {
 }
 
 // runningAgentVersion asks the control API which build is actually serving.
-// Short timeout: status is a glance, and a wedged daemon must not hang it. A
-// var so tests can stub it.
+// Short timeout: status is a glance, and a wedged daemon must not hang it.
+//
+// The bearer is not optional in practice. piperd serves its local listener
+// tokenless only on a loopback bind; the documented LAN setup
+// (PIPER_API_ADDR=0.0.0.0:8088) wraps it in RequireToken, so a bare dial 401s —
+// which is exactly how v0.8.6 shipped, reporting "unreachable" about a daemon
+// that had answered. The token comes from this CLI's own config, and only when
+// it was issued for the box being asked: `piper agent status` on a laptop whose
+// CLI points at a Pi must not hand the Pi's credential to the laptop's daemon.
+//
+// A var so tests can stub it.
 var runningAgentVersion = func(apiAddr string) (string, error) {
-	return client.New("http://"+dialableAddr(apiAddr), "").WithTimeout(2 * time.Second).AgentVersion()
+	target := dialableAddr(apiAddr)
+	token := ""
+	if cc, err := config.LoadClient(); err == nil && sameBox(cc.Addr, target) {
+		token = cc.Token
+	}
+	return client.New("http://"+target, token).WithTimeout(2 * time.Second).AgentVersion()
+}
+
+// sameBox reports whether a configured client address (a URL) points at the
+// same host:port as target (a bare host:port), after both are normalized for
+// wildcard binds.
+func sameBox(configured, target string) bool {
+	u, err := url.Parse(configured)
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return dialableAddr(u.Host) == target
 }
 
 // installedPiperdVersion runs the on-disk piperd's own --version. This is the
@@ -121,10 +148,18 @@ func printAgentVersions(stdout io.Writer, apiAddr string) {
 	running, rerr := runningAgentVersion(apiAddr)
 	disk, derr := installedPiperdVersion()
 
+	var se *client.StatusError
 	switch {
 	case rerr == nil:
 	case errors.Is(rerr, client.ErrVersionUnsupported):
 		running = "unknown (agent too old to report it)"
+	case errors.As(rerr, &se) && se.Code == http.StatusUnauthorized:
+		// A daemon that answered, not one that could not be reached. Conflating
+		// the two sent a live investigation looking at systemd and sockets while
+		// the control API was fine.
+		running = "unknown (control API needs a token — run `piper login`)"
+	case errors.As(rerr, &se):
+		running = fmt.Sprintf("unknown (control API error: %v)", rerr)
 	default:
 		fmt.Fprintf(stdout, "  version      unknown (control API unreachable at %s)\n", apiAddr)
 		return
