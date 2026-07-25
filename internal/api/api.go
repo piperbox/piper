@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/piperbox/piper/internal/domain"
+	"github.com/piperbox/piper/internal/source"
 	"github.com/piperbox/piper/internal/source/github"
 	"github.com/piperbox/piper/internal/store"
 )
@@ -297,6 +298,15 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Repo == "" || in.Branch == "" {
 			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		// Everything downstream of a link assumes owner/name — the relay cuts
+		// the owner off to match installation targets, push routing compares
+		// against the payload's full_name, and tarball fetch builds
+		// /repos/<repo>/tarball/<ref>. A bare name breaks all three silently,
+		// so it is rejected here rather than stored (#333).
+		if !source.ValidRepo(in.Repo) {
+			http.Error(w, "repo must be "+source.RepoShape+" (e.g. octocat/hello-world)", http.StatusBadRequest)
 			return
 		}
 		rootDir, ok := cleanRootDir(in.RootDir)

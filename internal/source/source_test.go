@@ -19,6 +19,23 @@ func TestKindString(t *testing.T) {
 	}
 }
 
+func TestValidRepo(t *testing.T) {
+	valid := []string{"octo/blog", "Alice/My_Repo.js", "a/b"}
+	for _, r := range valid {
+		if !source.ValidRepo(r) {
+			t.Errorf("ValidRepo(%q) = false, want true", r)
+		}
+	}
+	// "next" is the shape that motivated this (#333): accepted at link time,
+	// then silently breaks every consumer downstream.
+	invalid := []string{"next", "", "/", "next/", "/next", "octo/blog/extra"}
+	for _, r := range invalid {
+		if source.ValidRepo(r) {
+			t.Errorf("ValidRepo(%q) = true, want false", r)
+		}
+	}
+}
+
 func TestStatusInactiveDistinct(t *testing.T) {
 	all := []source.Status{
 		source.StatusPending, source.StatusSuccess,

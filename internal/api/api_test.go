@@ -483,6 +483,50 @@ func TestLinkAppRejectsEscapingRootDir(t *testing.T) {
 	}
 }
 
+// A repo without an owner/ prefix is accepted by nothing downstream — the
+// relay's installation match, webhook full_name routing and tarball fetch all
+// assume owner/name — so the link boundary must reject it rather than store a
+// binding that silently deploys nowhere (#333).
+func TestLinkAppRejectsRepoWithoutOwner(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateApp("blog", 8080)
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil)
+	for _, bad := range []string{"next", "next/", "/next", "octo/blog/extra"} {
+		body := strings.NewReader(`{"repo":"` + bad + `","branch":"main"}`)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/blog/link", body))
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("repo %q: code = %d, want 400", bad, rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), "owner/name") {
+			t.Errorf("repo %q: error %q does not name the expected shape", bad, rec.Body.String())
+		}
+		if _, err := s.GetApp("blog"); err == nil {
+			if got, _ := s.GetApp("blog"); got.Repo != "" {
+				t.Errorf("repo %q: link was persisted as %q", bad, got.Repo)
+			}
+		}
+	}
+}
+
+// A rejected link must not have reached the relay either: a binding for a repo
+// nothing can match is worse than no binding at all.
+func TestLinkAppRejectsBadRepoBeforeBinding(t *testing.T) {
+	s := newTestStore(t)
+	s.CreateApp("blog", 8080)
+	fb := &fakeBinder{}
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, fb, nil, nil)
+	body := strings.NewReader(`{"repo":"next","branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/blog/link", body))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code = %d, want 400", rec.Code)
+	}
+	if fb.calls != 0 {
+		t.Fatalf("binder called %d times for a rejected link", fb.calls)
+	}
+}
+
 type fakeBinder struct {
 	app, repo, branch string
 	calls             int
