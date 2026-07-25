@@ -382,9 +382,18 @@ func (m *Manager) Set(domainName, provider, token string) (Status, error) {
 		return Status{}, err
 	}
 	m.issueMu.Unlock()
+	// Snapshot the just-written "issuing" state BEFORE spawning: Status()
+	// re-reads the store, so reading it after the spawn races the loop to
+	// activation and can hand the caller an "active" it never asked about
+	// (#354). The config is already persisted, so this is the same read —
+	// only ordered so no loop can have moved it on yet.
+	st, err := m.Status()
+	if err != nil {
+		return Status{}, err
+	}
 	gen := m.nextGen()
 	m.spawn(func() { m.issueLoop(d, gen) })
-	return m.Status()
+	return st, nil
 }
 
 // issueLoop drives one config to activation with capped-backoff retries. It
