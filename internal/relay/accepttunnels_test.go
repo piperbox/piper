@@ -88,17 +88,27 @@ func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
 		s, ok := router.Lookup(customDomain)
 		return ok && s.BaseDomain == en.BaseDomain
 	})
+	first, _ := router.Lookup(customDomain)
 
+	// The rebind must not wait on the old session being swept: serveTunnel
+	// re-derives custom domains for every connect, so the new session's
+	// registration overwrites the entry whatever state the old one is in.
+	//
+	// Deliberately NOT asserted here: that the entry disappears in between.
+	// Unregistration is driven by the relay observing the peer's close, and TCP
+	// does not promise that promptly — a socket closed with unread data in
+	// flight can produce no FIN at all, only an RST once the kernel reaps the
+	// orphan (macOS net.inet.tcp.msl, 15s). That is what made this test flaky
+	// on a loaded box (#368); it was pinning transport timing, not relay
+	// behaviour. The invariant that actually matters — the stale session's late
+	// Unregister must not evict its successor — is proven directly and
+	// deterministically by TestUnregisterKeepsSuccessorEntries.
 	sess1.Close()
-	waitFor("custom domain unregistration", func() bool {
-		_, ok := router.Lookup(customDomain)
-		return !ok
-	})
 
 	sess2 := connect()
 	waitFor("custom domain rebind after reconnect", func() bool {
 		s, ok := router.Lookup(customDomain)
-		return ok && s.BaseDomain == en.BaseDomain
+		return ok && s != first && s.BaseDomain == en.BaseDomain
 	})
 
 	sess2.Close()
