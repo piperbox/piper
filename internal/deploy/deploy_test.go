@@ -1888,6 +1888,88 @@ func TestResumeRoutesTerminatedReArmsAssignedHostname(t *testing.T) {
 	}
 }
 
+// TestResumeRoutesReArmsRunningPreview pins the preview half of #376. #372
+// covered production hosts only, because ResumeRoutes iterates LatestRunning,
+// which is pr=0 by design — so a live preview URL went blank on a piperd
+// restart and stayed blank until the PR pushed again.
+func TestResumeRoutesReArmsRunningPreview(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	d := New(s, rt, newFakeCaddy(), "public.getpiper.co")
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	rt.RunResultVal = runtime.RunResult{ContainerID: "c-pr7", HostPort: 40007}
+	if _, err := d.DeployPreview(context.Background(), "blog", 7, t.TempDir()); err != nil {
+		t.Fatalf("DeployPreview: %v", err)
+	}
+
+	routes := newFakeCaddy() // Caddy came back with no routes
+	New(s, rt, routes, "public.getpiper.co").ResumeRoutes()
+
+	if routes.upserts["pr-7-blog.public.getpiper.co"] != 40007 {
+		t.Fatalf("routes = %+v, want pr-7-blog.public.getpiper.co -> 40007", routes.upserts)
+	}
+	if routes.upserts["blog.public.getpiper.co"] != 40001 {
+		t.Errorf("the production host was not re-armed too: %+v", routes.upserts)
+	}
+}
+
+// The relay-terminated case: a preview must come back on its relay-assigned
+// hostname, not the LAN-shaped pr-<N>-<app>.<base>, or the relay routes to a
+// host Caddy does not know — the same trap #372 hit for production hosts.
+func TestResumeRoutesTerminatedReArmsPreviewHostname(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c-pr7", HostPort: 40007},
+	}
+	reg := &fakeRegistrar{}
+	d := New(s, rt, newFakeCaddy(), "public.getpiper.co")
+	d.SetHostnameRegistrar(reg)
+	if _, err := d.DeployPreview(context.Background(), "blog", 7, t.TempDir()); err != nil {
+		t.Fatalf("DeployPreview: %v", err)
+	}
+
+	routes := newFakeCaddy()
+	d2 := New(s, rt, routes, "public.getpiper.co")
+	d2.SetHostnameRegistrar(reg)
+	d2.ResumeRoutes()
+
+	if routes.upserts["pr7-hash-blog-alice.public.getpiper.co"] != 40007 {
+		t.Fatalf("routes = %+v, want the relay-assigned preview hostname -> 40007", routes.upserts)
+	}
+	if _, ok := routes.upserts["pr-7-blog.public.getpiper.co"]; ok {
+		t.Errorf("routed the base-domain preview host too: %+v", routes.upserts)
+	}
+}
+
+// A stopped preview stays down, exactly as a stopped app does.
+func TestResumeRoutesSkipsStoppedPreview(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c-pr7", HostPort: 40007},
+	}
+	d := New(s, rt, newFakeCaddy(), "public.getpiper.co")
+	if _, err := d.DeployPreview(context.Background(), "blog", 7, t.TempDir()); err != nil {
+		t.Fatalf("DeployPreview: %v", err)
+	}
+	if _, err := d.TeardownPreview(context.Background(), "blog", 7); err != nil {
+		t.Fatalf("TeardownPreview: %v", err)
+	}
+
+	routes := newFakeCaddy()
+	New(s, rt, routes, "public.getpiper.co").ResumeRoutes()
+
+	if _, ok := routes.upserts["pr-7-blog.public.getpiper.co"]; ok {
+		t.Fatalf("routed a torn-down preview: %+v", routes.upserts)
+	}
+}
+
 // TestResumeRoutesSkipsStoppedApp keeps a deliberately stopped app down: routing
 // it again would resurrect a URL the owner took offline.
 func TestResumeRoutesSkipsStoppedApp(t *testing.T) {

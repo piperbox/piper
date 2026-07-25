@@ -232,6 +232,61 @@ func TestLatestRunningIgnoresPreviews(t *testing.T) {
 	}
 }
 
+// RunningPreviews is what lets a restart re-arm preview routes and a reconnect
+// re-announce preview hostnames: LatestRunning is pr=0 only, so previews were
+// invisible to both (#376). It must return every live preview across all apps
+// and nothing else — no production rows, no superseded previews.
+func TestRunningPreviews(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateDeployment("blog", "img", "main-c", 40000, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePreviewDeployment("blog", 3, "img", "pr3-c", 41000, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePreviewDeployment("blog", 4, "img", "pr4-old", 41001, "stopped", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePreviewDeployment("shop", 9, "img", "pr9-c", 42000, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.RunningPreviews()
+	if err != nil {
+		t.Fatalf("RunningPreviews: %v", err)
+	}
+	byContainer := map[string]Deployment{}
+	for _, d := range got {
+		byContainer[d.ContainerID] = d
+	}
+	if len(got) != 2 || byContainer["pr3-c"].PR != 3 || byContainer["pr9-c"].PR != 9 {
+		t.Fatalf("RunningPreviews = %+v, want the two running previews", got)
+	}
+	if byContainer["pr3-c"].App != "blog" || byContainer["pr3-c"].HostPort != 41000 {
+		t.Errorf("preview row = %+v", byContainer["pr3-c"])
+	}
+}
+
+// A second deploy of the same PR supersedes the first: only the newest running
+// row may come back, or a restart re-arms the route to a dead container.
+func TestRunningPreviewsReturnsOnlyTheNewestPerPR(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreatePreviewDeployment("blog", 3, "img", "pr3-old", 41000, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePreviewDeployment("blog", 3, "img", "pr3-new", 41002, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.RunningPreviews()
+	if err != nil {
+		t.Fatalf("RunningPreviews: %v", err)
+	}
+	if len(got) != 1 || got[0].ContainerID != "pr3-new" {
+		t.Fatalf("RunningPreviews = %+v, want only pr3-new", got)
+	}
+}
+
 func TestTokenCreateAuthenticateRevoke(t *testing.T) {
 	s := openTemp(t)
 	tok, err := s.CreateToken("laptop", "admin")

@@ -333,6 +333,37 @@ func (s *Store) PreviewRunning(app string, pr int) (Deployment, error) {
 	return d, nil
 }
 
+// RunningPreviews returns the newest running preview deployment for every
+// (app, pr) pair on the box. LatestRunning is deliberately pr=0 only, which
+// left previews invisible to the restart and reconnect paths that rebuild
+// routing (#376): a live preview URL went blank on a piperd restart and stayed
+// blank until the PR pushed again. Superseded rows are filtered by taking the
+// highest rowid per pair, so a redeployed preview never resurfaces its dead
+// predecessor's port.
+func (s *Store) RunningPreviews() ([]Deployment, error) {
+	rows, err := s.db.Query(
+		`SELECT id, app, image_id, container_id, host_port, status, created_at, pr
+		 FROM deployments WHERE pr > 0 AND status='running'
+		   AND rowid IN (SELECT MAX(rowid) FROM deployments
+		                 WHERE pr > 0 AND status='running' GROUP BY app, pr)
+		 ORDER BY rowid`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var deps []Deployment
+	for rows.Next() {
+		var d Deployment
+		var ts string
+		if err := rows.Scan(&d.ID, &d.App, &d.ImageID, &d.ContainerID, &d.HostPort, &d.Status, &ts, &d.PR); err != nil {
+			return nil, err
+		}
+		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)
+		deps = append(deps, d)
+	}
+	return deps, rows.Err()
+}
+
 func (s *Store) pruneDeploymentLogs(app string) error {
 	_, err := s.db.Exec(
 		`UPDATE deployments SET logs='' WHERE app=? AND logs != '' AND id NOT IN (
