@@ -1830,3 +1830,110 @@ func TestDeleteTerminatedReleasesPreviewHostnames(t *testing.T) {
 		t.Errorf("deregistered = %v, want both the preview and production hosts", reg.deregs)
 	}
 }
+
+// deployedThenRestarted deploys app and returns a fresh Deployer over the same
+// store with an empty route table — the state piperd is in after a restart,
+// since it embeds Caddy and reloads a bare base config on every start.
+func deployedThenRestarted(t *testing.T, reg HostnameRegistrar) (*store.Store, *fakeCaddy, *Deployer) {
+	t.Helper()
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	d := New(s, rt, newFakeCaddy(), "public.getpiper.co")
+	if reg != nil {
+		d.SetHostnameRegistrar(reg)
+	}
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	fresh := newFakeCaddy() // Caddy came back with no routes
+	d2 := New(s, rt, fresh, "public.getpiper.co")
+	if reg != nil {
+		d2.SetHostnameRegistrar(reg)
+	}
+	return s, fresh, d2
+}
+
+// TestResumeRoutesReArmsRunningApp pins #371: piperd embeds Caddy and reloads a
+// bare base config on every start, dropping every route. Custom domains are
+// re-armed by the domain manager's resume; the app's own host route had nothing
+// restoring it, so a running app answered Caddy's empty-200 no-route fallback
+// until it was redeployed.
+func TestResumeRoutesReArmsRunningApp(t *testing.T) {
+	_, routes, d := deployedThenRestarted(t, nil)
+
+	d.ResumeRoutes()
+
+	if routes.upserts["blog.public.getpiper.co"] != 40001 {
+		t.Fatalf("routes = %+v, want blog.public.getpiper.co -> 40001", routes.upserts)
+	}
+}
+
+// TestResumeRoutesTerminatedReArmsAssignedHostname is the relay-terminated case
+// — the one that broke live: the route must be the relay-assigned hostname, not
+// <app>.<base>, or the relay routes traffic to a host Caddy does not know.
+func TestResumeRoutesTerminatedReArmsAssignedHostname(t *testing.T) {
+	_, routes, d := deployedThenRestarted(t, &fakeRegistrar{})
+
+	d.ResumeRoutes()
+
+	if routes.upserts["hash-blog-alice.public.getpiper.co"] != 40001 {
+		t.Fatalf("routes = %+v, want hash-blog-alice.public.getpiper.co -> 40001", routes.upserts)
+	}
+	if _, ok := routes.upserts["blog.public.getpiper.co"]; ok {
+		t.Errorf("routed the base-domain host too: %+v", routes.upserts)
+	}
+}
+
+// TestResumeRoutesSkipsStoppedApp keeps a deliberately stopped app down: routing
+// it again would resurrect a URL the owner took offline.
+func TestResumeRoutesSkipsStoppedApp(t *testing.T) {
+	s, routes, d := deployedThenRestarted(t, nil)
+	if err := d.Stop(context.Background(), "blog"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, err := s.LatestRunning("blog"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("LatestRunning after Stop: %v, want ErrNotFound", err)
+	}
+
+	d.ResumeRoutes()
+
+	if len(routes.upserts) != 0 {
+		t.Fatalf("routed a stopped app: %+v", routes.upserts)
+	}
+}
+
+// TestResumeRoutesSkipsNeverDeployedApp covers an app row with no deployment at
+// all — there is no port to route to, and it must not abort the whole sweep.
+func TestResumeRoutesSkipsNeverDeployedApp(t *testing.T) {
+	s, routes, d := deployedThenRestarted(t, nil)
+	if _, err := s.CreateApp("fresh", 3000); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+
+	d.ResumeRoutes()
+
+	if _, ok := routes.upserts["fresh.public.getpiper.co"]; ok {
+		t.Errorf("routed a never-deployed app: %+v", routes.upserts)
+	}
+	if routes.upserts["blog.public.getpiper.co"] != 40001 {
+		t.Errorf("the deployed app was not re-armed: %+v", routes.upserts)
+	}
+}
+
+// TestResumeRoutesUnresolvableHostnameDoesNotStopSweep: in terminated mode
+// primaryHost needs the relay, and a failing Register must not strand the rest.
+func TestResumeRoutesUnresolvableHostnameDoesNotStopSweep(t *testing.T) {
+	reg := &fakeRegistrar{}
+	_, routes, d := deployedThenRestarted(t, reg)
+	reg.failing = true
+
+	d.ResumeRoutes() // must not panic or abort
+
+	if len(routes.upserts) != 0 {
+		t.Fatalf("routed despite an unresolvable hostname: %+v", routes.upserts)
+	}
+}

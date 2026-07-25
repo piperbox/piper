@@ -530,6 +530,13 @@ func main() {
 				domMgr.OnRelayConnect() // gated like Resume: box-wide API configs exist only here
 			}
 			repushRelayApps(st, tc, cfg.Terminated)
+			if cfg.Terminated {
+				// Caddy comes up with a bare config, so a running app's own
+				// host route needs re-arming too — and in terminated mode
+				// primaryHost resolves through the registrar, so this can only
+				// run once the tunnel is up (#371).
+				dep.ResumeRoutes()
+			}
 		}
 		go tc.Run(ctx, cfg.RelayAddr, cfg.RelayToken, cfg.BaseDomain, dialLocal)
 		if cfg.Terminated {
@@ -563,6 +570,13 @@ func main() {
 		default:
 			wh.start()
 		}
+	}
+
+	// A box without relay-terminated hostnames re-arms at startup instead: its
+	// hosts are "<app>.<base>", so primaryHost needs no registrar and there is
+	// no tunnel to wait for (#371).
+	if !cfg.Terminated {
+		dep.ResumeRoutes()
 	}
 
 	// The local listener: tokenless on a loopback bind — whoever can run the
