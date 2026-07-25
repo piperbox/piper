@@ -283,8 +283,30 @@ func (c *Client) LinkApp(name, repo, branch, rootDir string) error {
 	return nil
 }
 
+// actionTimeout bounds the mutating calls that do real work on the box. Start
+// re-runs a container and waits up to 30s for its health check, and Stop waits
+// out Docker's 10s stop grace (both in internal/runtime) — far outside the 5s
+// the TUI applies to its poll loop. That short timeout aborted the client while
+// the box went on to finish, so the TUI reported failure for an action that had
+// actually succeeded (#379).
+//
+// Bounded rather than unbounded (cf. Deploy's exemption) because the box bounds
+// these itself: a blackholed box still surfaces instead of hanging the UI.
+const actionTimeout = 60 * time.Second
+
+// forAction returns an HTTP client generous enough for a container stop/start.
+// It only ever raises the caller's timeout — a client with none (the plain CLI)
+// keeps waiting indefinitely, and a longer one is left alone.
+func (c *Client) forAction() *http.Client {
+	h := *c.http
+	if h.Timeout != 0 && h.Timeout < actionTimeout {
+		h.Timeout = actionTimeout
+	}
+	return &h
+}
+
 func (c *Client) StopApp(name string) error {
-	resp, err := c.do(http.MethodPost, "/v1/apps/"+name+"/stop", "", nil)
+	resp, err := c.doWith(c.forAction(), http.MethodPost, "/v1/apps/"+name+"/stop", "", nil)
 	if err != nil {
 		return err
 	}
@@ -296,7 +318,7 @@ func (c *Client) StopApp(name string) error {
 }
 
 func (c *Client) StartApp(name string) error {
-	resp, err := c.do(http.MethodPost, "/v1/apps/"+name+"/start", "", nil)
+	resp, err := c.doWith(c.forAction(), http.MethodPost, "/v1/apps/"+name+"/start", "", nil)
 	if err != nil {
 		return err
 	}
