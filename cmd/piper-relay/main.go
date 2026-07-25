@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -8,13 +9,21 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/piperbox/piper/internal/relay"
 	"github.com/piperbox/piper/internal/version"
 )
+
+// shutdownGrace bounds how long a SIGTERM waits for in-flight webhook
+// deliveries to finish or park. One attempt is capped at the delivery timeout,
+// so this only has to cover that plus the parking write.
+const shutdownGrace = 35 * time.Second
 
 // versionRequested reports whether args ask for the build version. Kept
 // separate so it can be unit-tested; it also gives piper-relay a symbol that
@@ -230,10 +239,28 @@ func main() {
 	var delivery *relay.TunnelDelivery
 	if ghApp != nil {
 		delivery = relay.NewTunnelDelivery(st, router)
+		// Retries parked events for boxes that are connected but were not
+		// accepting deliveries; without it such an event waits for a reconnect
+		// or another webhook that may never come (#294).
+		delivery.StartSweeper(0)
 		outer := http.NewServeMux()
 		outer.Handle("POST /gh", relay.NewGitHubIngress(st, ghApp, delivery))
 		outer.Handle("/", apiHandler)
 		ctrl = outer
+
+		// A restart mid-burst used to drop every in-flight delivery: GitHub had
+		// already been sent its 202, so nothing would ever retry them. Draining
+		// the pool on SIGTERM/SIGINT lets each one park instead (#295).
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		go func() {
+			s := <-sig
+			log.Printf("piper-relay: %s — draining in-flight webhook deliveries", s)
+			ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+			defer cancel()
+			delivery.Shutdown(ctx)
+			os.Exit(0)
+		}()
 	}
 
 	go func() {

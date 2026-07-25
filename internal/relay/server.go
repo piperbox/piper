@@ -151,7 +151,7 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	}
 	router.Register(sess)
 	if delivery != nil {
-		go delivery.DrainFor(context.Background(), sess.BaseDomain)
+		delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, sess.BaseDomain) })
 	}
 	// Re-derive every live custom domain (active + unexpired pending);
 	// expired pending squats are filtered by the store, so they also die
