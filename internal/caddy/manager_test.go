@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -263,6 +264,78 @@ func TestEnsureHTTPSServesTLSAlongsidePlaintext(t *testing.T) {
 			return err
 		}
 		conn.Close()
+		return nil
+	})
+}
+
+// The unit tests assert the JSON we send; this proves a real Caddy accepts it
+// and actually serves the redirect — a visitor typing the bare custom domain
+// gets a 308 to https:// on the plaintext server, path and query preserved,
+// rather than the 404 that automatic_https.disable leaves behind (#357).
+func TestUpsertRouteTLSRedirectServes308OnPlaintext(t *testing.T) {
+	t.Setenv("PATH", "")
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_DATA_HOME", dir)
+
+	admin := "http://" + freeAddr(t)
+	httpListen := freeAddr(t)
+	httpsListen := freeAddr(t)
+
+	m, err := StartManager(admin, httpListen)
+	if err != nil {
+		t.Fatalf("StartManager: %v", err)
+	}
+	defer m.Stop()
+
+	c := NewClient(admin)
+	if err := c.EnsureHTTPS(httpsListen); err != nil {
+		t.Fatalf("EnsureHTTPS: %v", err)
+	}
+	if err := c.UpsertRouteTLS("myshop.example.com", 40001); err != nil {
+		t.Fatalf("UpsertRouteTLS: %v", err)
+	}
+
+	// Never follow the redirect: the target is a domain with no DNS here.
+	cl := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	var resp *http.Response
+	retryBriefly(t, "plaintext GET on the custom domain", func() error {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+httpListen+"/pricing?ref=x", nil)
+		req.Host = "myshop.example.com"
+		r, err := cl.Do(req)
+		if err != nil {
+			return err
+		}
+		resp = r
+		return nil
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusPermanentRedirect {
+		t.Fatalf("status = %d, want 308", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Location"); got != "https://myshop.example.com/pricing?ref=x" {
+		t.Fatalf("Location = %q, want the same host, path and query over https", got)
+	}
+
+	// Teardown drops the redirect with the route: :80 must stop redirecting to
+	// a domain that no longer serves.
+	if err := c.RemoveRoute("myshop.example.com"); err != nil {
+		t.Fatalf("RemoveRoute: %v", err)
+	}
+	retryBriefly(t, "plaintext GET after RemoveRoute", func() error {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+httpListen+"/", nil)
+		req.Host = "myshop.example.com"
+		r, err := cl.Do(req)
+		if err != nil {
+			return err
+		}
+		defer r.Body.Close()
+		if r.StatusCode == http.StatusPermanentRedirect {
+			return fmt.Errorf("still redirecting after RemoveRoute")
+		}
 		return nil
 	})
 }
