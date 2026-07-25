@@ -906,3 +906,53 @@ func TestStatusErrorUnauthorized(t *testing.T) {
 		t.Fatal("500 StatusError should not report Unauthorized")
 	}
 }
+
+// TestStopStartOutliveTheShortPollTimeout pins #379: the TUI applies a 5s
+// timeout to the whole client so a blackholed box reads as unreachable, but
+// Stop and Start do real work on the box — Start re-runs a container and waits
+// up to 30s for its health check, Stop waits out Docker's 10s stop grace. The
+// short poll timeout aborted the client while the box completed the work, so
+// the TUI reported failure for an action that had actually succeeded.
+//
+// The handler here sleeps past the client's configured timeout; the call must
+// still succeed.
+func TestStopStartOutliveTheShortPollTimeout(t *testing.T) {
+	const pollTimeout = 50 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(4 * pollTimeout) // the box is busy stopping/starting a container
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name string
+		call func(*Client) error
+	}{
+		{"stop", func(c *Client) error { return c.StopApp("blog") }},
+		{"start", func(c *Client) error { return c.StartApp("blog") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := New(srv.URL, "").WithTimeout(pollTimeout)
+			if err := tc.call(c); err != nil {
+				t.Fatalf("%s aborted by the poll timeout: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+// TestReadsKeepTheShortPollTimeout guards the reason the timeout exists: a
+// blackholed box must still surface as unreachable rather than hanging the
+// TUI's poll loop.
+func TestReadsKeepTheShortPollTimeout(t *testing.T) {
+	const pollTimeout = 50 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(4 * pollTimeout)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "").WithTimeout(pollTimeout)
+	if _, err := c.ListApps(); err == nil {
+		t.Fatal("ListApps returned nil, want the poll timeout to still bound reads")
+	}
+}
