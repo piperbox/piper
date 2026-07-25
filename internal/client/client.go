@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -63,6 +64,36 @@ func (c *Client) doWith(h *http.Client, method, path, contentType string, body i
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
 	return h.Do(req)
+}
+
+// ErrVersionUnsupported means the agent answered 404: it predates the version
+// endpoint. Distinguishing that from an unreachable box matters, because "too
+// old to tell you" is the single most useful thing to print when someone is
+// wondering whether their upgrade actually took (#375).
+var ErrVersionUnsupported = errors.New("agent does not report its version")
+
+// AgentVersion returns the build of the piperd that is actually running —
+// which is not necessarily the piperd binary on disk, nor this CLI's own
+// version.
+func (c *Client) AgentVersion() (string, error) {
+	resp, err := c.do(http.MethodGet, "/v1/version", "", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrVersionUnsupported
+	}
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		return "", responseError("version", resp)
+	}
+	var out struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	return out.Version, nil
 }
 
 func (c *Client) CreateApp(name string, port int) error {

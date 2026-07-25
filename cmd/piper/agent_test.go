@@ -9,6 +9,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/piperbox/piper/internal/client"
 )
 
 func TestAgentUnsupportedGOOS(t *testing.T) {
@@ -327,6 +329,7 @@ func TestAgentDownSystemEscalates(t *testing.T) {
 
 func TestAgentStatusLinux(t *testing.T) {
 	onLinux(t)
+	stubVersions(t, "0.8.5", nil, "0.8.5", nil) // hermetic: no real dial, no real piperd exec
 	unit, _, restore := rootlessPaths(t)
 	defer restore()
 	os.MkdirAll(filepath.Dir(unit), 0o755)
@@ -356,6 +359,7 @@ func TestAgentStatusLinux(t *testing.T) {
 
 func TestAgentStatusLinuxShowsAddresses(t *testing.T) {
 	onLinux(t)
+	stubVersions(t, "0.8.5", nil, "0.8.5", nil)
 	unit, _, restore := rootlessPaths(t)
 	defer restore()
 	os.MkdirAll(filepath.Dir(unit), 0o755)
@@ -387,6 +391,105 @@ func TestAgentStatusLinuxShowsAddresses(t *testing.T) {
 	}
 }
 
+// stubVersions makes a running/on-disk pair, restoring both afterwards.
+func stubVersions(t *testing.T, running string, rerr error, disk string, derr error) {
+	t.Helper()
+	oldRunning, oldDisk := runningAgentVersion, installedPiperdVersion
+	runningAgentVersion = func(string) (string, error) { return running, rerr }
+	installedPiperdVersion = func() (string, error) { return disk, derr }
+	t.Cleanup(func() { runningAgentVersion, installedPiperdVersion = oldRunning, oldDisk })
+}
+
+// statusOutput runs `piper agent status` against a live rootless unit.
+func statusOutput(t *testing.T) string {
+	t.Helper()
+	unit, _, restore := rootlessPaths(t)
+	t.Cleanup(restore)
+	os.MkdirAll(filepath.Dir(unit), 0o755)
+	os.WriteFile(unit, []byte("x"), 0o644)
+
+	oldRun := systemctlRun
+	systemctlRun = func(args ...string) (string, error) { return "active\n", nil }
+	t.Cleanup(func() { systemctlRun = oldRun })
+
+	var out, errb bytes.Buffer
+	if code := agent([]string{"status"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, errb.String())
+	}
+	return out.String()
+}
+
+// The whole point of #375: `piper agent daemonize` installs a new binary but
+// leaves the old process running, so an upgrade silently does not take and
+// looks exactly like a fix that did not work. Status must say so.
+func TestAgentStatusFlagsUnrestartedUpgrade(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.8.4", nil, "0.8.5", nil)
+
+	got := statusOutput(t)
+	for _, want := range []string{"0.8.4", "0.8.5 is installed on disk", "restart piperd"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// Matching versions must not nag — a warning that fires when nothing is wrong
+// is one people learn to ignore.
+func TestAgentStatusQuietWhenVersionsMatch(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.8.5", nil, "0.8.5", nil)
+
+	got := statusOutput(t)
+	if !strings.Contains(got, "version      0.8.5") {
+		t.Errorf("status missing the version line:\n%s", got)
+	}
+	if strings.Contains(got, "⚠") {
+		t.Errorf("warned about a matching version:\n%s", got)
+	}
+}
+
+// An agent predating the endpoint still reports usefully — and this is exactly
+// when the on-disk hint matters most, since anything that old is behind.
+func TestAgentStatusOldAgentStillFlagsDisk(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "", client.ErrVersionUnsupported, "0.8.6", nil)
+
+	got := statusOutput(t)
+	for _, want := range []string{"too old to report", "0.8.6 is installed on disk"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// systemd says active but the control API does not answer: report that plainly
+// rather than inventing a version or hanging on a wedged daemon.
+func TestAgentStatusUnreachableControlAPI(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "", errFake, "0.8.6", nil)
+
+	got := statusOutput(t)
+	if !strings.Contains(got, "control API unreachable") {
+		t.Errorf("status missing the unreachable note:\n%s", got)
+	}
+}
+
+func TestDialableAddrRewritesWildcardBinds(t *testing.T) {
+	for addr, want := range map[string]string{
+		"0.0.0.0:8088":   "127.0.0.1:8088",
+		":8088":          "127.0.0.1:8088",
+		"[::]:8088":      "127.0.0.1:8088",
+		"127.0.0.1:8088": "127.0.0.1:8088",
+		"192.168.1.6:80": "192.168.1.6:80",
+		"garbage":        "garbage",
+	} {
+		if got := dialableAddr(addr); got != want {
+			t.Errorf("dialableAddr(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}
+
 func TestAgentStatusLinuxNotSetUp(t *testing.T) {
 	onLinux(t)
 	_, _, restore := rootlessPaths(t)
@@ -403,6 +506,7 @@ func TestAgentStatusLinuxNotSetUp(t *testing.T) {
 
 func TestAgentStatusSystem(t *testing.T) {
 	onLinux(t)
+	stubVersions(t, "0.8.5", nil, "0.8.5", nil)
 	daemonized(t)
 
 	oldRun := systemctlRun

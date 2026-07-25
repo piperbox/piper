@@ -944,6 +944,42 @@ func TestMutatingCallsOutliveTheShortPollTimeout(t *testing.T) {
 	}
 }
 
+func TestAgentVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/version" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		writeJSONTest(w, map[string]string{"version": "0.8.5"})
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "").AgentVersion()
+	if err != nil {
+		t.Fatalf("AgentVersion: %v", err)
+	}
+	if got != "0.8.5" {
+		t.Errorf("version = %q, want 0.8.5", got)
+	}
+}
+
+// An agent from before the endpoint existed answers 404. That is not an error
+// to shout about — it is itself the answer ("too old to say"), and the caller
+// needs to tell it apart from a real failure, so it comes back as a sentinel.
+func TestAgentVersionOldAgentReportsUnsupported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "").AgentVersion()
+	if !errors.Is(err, ErrVersionUnsupported) {
+		t.Fatalf("err = %v, want ErrVersionUnsupported", err)
+	}
+	if got != "" {
+		t.Errorf("version = %q, want empty", got)
+	}
+}
+
 // TestReadsKeepTheShortPollTimeout guards the reason the timeout exists: a
 // blackholed box must still surface as unreachable rather than hanging the
 // TUI's poll loop.

@@ -19,6 +19,7 @@ import (
 	"github.com/piperbox/piper/internal/source"
 	"github.com/piperbox/piper/internal/source/github"
 	"github.com/piperbox/piper/internal/store"
+	"github.com/piperbox/piper/internal/version"
 )
 
 type Deployerer interface {
@@ -127,6 +128,14 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			return
 		}
 		writeJSON(w, http.StatusCreated, App{App: app})
+	})
+	// The running daemon's own build. Nothing else can answer this: the piperd
+	// binary on disk may already have been replaced by an upgrade that has not
+	// been restarted into, and the piper asking is a separate build on a
+	// separate machine. Without it a half-applied upgrade is indistinguishable
+	// from a fix that did not work (#375).
+	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"version": version.String()})
 	})
 	mux.HandleFunc("GET /v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		apps, err := s.ListApps()
