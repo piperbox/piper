@@ -151,6 +151,19 @@ func (c *TunnelClient) GitHubToken(repo string) (string, error) {
 	return resp.Token, nil
 }
 
+// controlTimeout bounds one control round-trip. Without it the reply read was
+// unbounded, so a relay that accepted the stream and then went quiet hung the
+// caller until the session itself died — which yamux only detects on its 30s
+// keepalive, or later still if the peer vanished without a clean close. That
+// left every registrar-backed path (Stop, Start, Delete, ResumeRoutes, every
+// deploy, since primaryHost registers) hanging on one wedged relay (#386).
+//
+// Generous because the slowest legitimate op is gh-token, where the relay
+// mints an installation token against GitHub behind its own 30s HTTP timeout.
+// Anything past that is the relay failing to answer, not working slowly.
+// A var so tests can shrink it.
+var controlTimeout = 45 * time.Second
+
 func (c *TunnelClient) control(req tunnel.ControlRequest) (tunnel.ControlResponse, error) {
 	sess := c.current()
 	if sess == nil {
@@ -161,6 +174,10 @@ func (c *TunnelClient) control(req tunnel.ControlRequest) (tunnel.ControlRespons
 		return tunnel.ControlResponse{}, err
 	}
 	defer stream.Close()
+	// Covers the write too: a stalled relay can also stop reading.
+	if err := stream.SetDeadline(time.Now().Add(controlTimeout)); err != nil {
+		return tunnel.ControlResponse{}, err
+	}
 	if err := tunnel.WriteMsg(stream, req); err != nil {
 		return tunnel.ControlResponse{}, err
 	}

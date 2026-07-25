@@ -164,6 +164,59 @@ func TestTunnelClientRegister(t *testing.T) {
 	}
 }
 
+// TestTunnelClientControlTimesOut pins #386: a relay that accepts the control
+// stream and then never answers must not hang the caller. The read had no
+// deadline, so the only thing that ever unblocked it was the session dying —
+// and yamux only notices a dead peer on its 30s keepalive, or later. That put
+// every registrar-backed path (Stop, Start, Delete, ResumeRoutes, every deploy)
+// one wedged relay away from hanging indefinitely.
+func TestTunnelClientControlTimesOut(t *testing.T) {
+	old := controlTimeout
+	controlTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { controlTimeout = old })
+
+	addr, sessCh := fakeRelay(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var c TunnelClient
+	go c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
+		return net.Dial("tcp", "127.0.0.1:9") // unused in this test
+	})
+	relaySess := <-sessCh
+
+	// A relay that reads the request and then goes quiet — connected, but wedged.
+	go func() {
+		_, stream, err := relaySess.AcceptKind()
+		if err != nil {
+			return
+		}
+		var req tunnel.ControlRequest
+		_ = tunnel.ReadMsg(stream, &req)
+		<-ctx.Done()
+		stream.Close()
+	}()
+
+	// Wait for Run to publish its session, then time the wedged call.
+	deadline := time.Now().Add(2 * time.Second)
+	var err error
+	for time.Now().Before(deadline) {
+		started := time.Now()
+		_, err = c.Register("blog", 0)
+		if errors.Is(err, ErrNotConnected) {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if err == nil {
+			t.Fatal("Register succeeded against a relay that never answered")
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("Register took %v to give up, want ~%v", elapsed, controlTimeout)
+		}
+		return
+	}
+	t.Fatalf("Register never returned a timeout error: %v", err)
+}
+
 func TestServeStreamsStopsOnContextCancellation(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	t.Cleanup(func() { clientConn.Close(); serverConn.Close() })
