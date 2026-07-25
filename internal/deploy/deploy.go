@@ -449,6 +449,44 @@ func (d *Deployer) primaryHost(appName string) (string, bool) {
 	return host, err == nil
 }
 
+// ResumeRoutes re-arms the primary host route for every app whose latest
+// production deployment is running. piperd embeds Caddy and reloads a bare base
+// config on every start, so a restart drops every route added since the last
+// one. The domain manager's resume restores custom domains; nothing restored
+// the app's own host, so a still-running app answered Caddy's empty-200
+// no-route fallback until it was redeployed (#371) — the mirror, one layer
+// down, of the relay forgetting the same hostnames on reconnect (#369).
+//
+// Best-effort per app: one app's failure must not strand the rest. In
+// relay-terminated mode primaryHost resolves through the registrar, so callers
+// run this after the tunnel connects; an unreachable relay leaves the route
+// unarmed for the next attempt rather than routing a wrong host.
+func (d *Deployer) ResumeRoutes() {
+	apps, err := d.store.ListApps()
+	if err != nil {
+		log.Printf("resume routes: list apps: %v", err)
+		return
+	}
+	for _, a := range apps {
+		dep, err := d.store.LatestRunning(a.Name)
+		if errors.Is(err, store.ErrNotFound) {
+			continue // stopped, failed, or never deployed: nothing to route
+		}
+		if err != nil {
+			log.Printf("resume routes: %s: %v", a.Name, err)
+			continue
+		}
+		host, ok := d.primaryHost(a.Name)
+		if !ok {
+			log.Printf("resume routes: %s: cannot resolve hostname (relay unreachable?)", a.Name)
+			continue
+		}
+		if err := d.routes.UpsertRoute(host, dep.HostPort); err != nil {
+			log.Printf("resume routes: %s -> %s: %v", a.Name, host, err)
+		}
+	}
+}
+
 // RouteAppDomain arms the exact-host TLS route for a per-app custom domain
 // that goes active while its app is already running (the domain manager's
 // backfill; a deploy arms routes itself). Nothing running is a no-op — the
