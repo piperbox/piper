@@ -181,3 +181,36 @@ func TestRouterCustomDomain(t *testing.T) {
 		t.Fatal("base domain should be swept by Unregister")
 	}
 }
+
+// TestUnregisterKeepsSuccessorEntries pins the invariant that makes a late
+// unregister harmless: when an agent reconnects before the relay has noticed
+// the old session dying, the new session overwrites every entry, and the old
+// session's Unregister — which may land seconds later — must sweep only its
+// own. Unregister matches on session identity, so this holds, and it is why
+// the reconnect path never has to wait for the dead session to be reaped
+// (#368; the delay there was TCP declining to report the peer's close for a
+// full macOS MSL).
+func TestUnregisterKeepsSuccessorEntries(t *testing.T) {
+	r := NewRouter()
+	base := "alice.example.com"
+	old := &tunnel.Session{BaseDomain: base}
+	fresh := &tunnel.Session{BaseDomain: base}
+
+	for _, s := range []*tunnel.Session{old, fresh} {
+		r.Register(s)
+		r.RegisterHost("blog-alice.public.getpiper.co", s)
+		r.RegisterCustom("shop.dev", s)
+	}
+
+	r.Unregister(old)
+
+	if s, ok := r.Lookup(base); !ok || s != fresh {
+		t.Fatalf("base domain = %v (%p), want the reconnected session %p", ok, s, fresh)
+	}
+	if s, ok := r.LookupHost("blog-alice.public.getpiper.co"); !ok || s != fresh {
+		t.Fatalf("terminated hostname = %v (%p), want the reconnected session %p", ok, s, fresh)
+	}
+	if s, ok := r.LookupCustom("shop.dev"); !ok || s != fresh {
+		t.Fatalf("custom domain = %v (%p), want the reconnected session %p", ok, s, fresh)
+	}
+}

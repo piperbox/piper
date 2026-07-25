@@ -81,6 +81,7 @@ type relayTokenStore interface {
 // relayAppStore is the store slice the per-connect app re-push needs.
 type relayAppStore interface {
 	ListApps() ([]store.App, error)
+	RunningPreviews() ([]store.Deployment, error)
 }
 
 // relayAppAnnouncer is the tunnel-client slice the per-connect app re-push
@@ -124,6 +125,24 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 			if _, err := tc.Register(a.Name, 0); err != nil {
 				log.Printf("relay: re-register %s: %v", a.Name, err)
 			}
+		}
+	}
+	if !terminated {
+		return
+	}
+	// Previews hold relay-assigned hostnames from the same register op, and are
+	// missed by the loop above: they live on their own (app, pr) deployment rows,
+	// not on the app row's single Hostname (#376). Without this a live PR-preview
+	// URL goes dark on a relay restart and stays dark until the PR pushes again.
+	// A failed lookup here must not cost the box the hostnames already restored.
+	previews, err := st.RunningPreviews()
+	if err != nil {
+		log.Printf("relay: re-push previews: %v", err)
+		return
+	}
+	for _, p := range previews {
+		if _, err := tc.Register(p.App, p.PR); err != nil {
+			log.Printf("relay: re-register %s PR %d: %v", p.App, p.PR, err)
 		}
 	}
 }

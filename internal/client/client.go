@@ -290,13 +290,20 @@ func (c *Client) LinkApp(name, repo, branch, rootDir string) error {
 // the box went on to finish, so the TUI reported failure for an action that had
 // actually succeeded (#379).
 //
+// Delete and RemoveAppDomain are the same shape: Delete pays that stop grace
+// once per running deployment, tears every route and relay hostname down and
+// then prunes the app's images, and RemoveAppDomain makes a relay round-trip
+// before removing the route, cert and directory. AddAppDomain deliberately is
+// not here — it writes a pending row, spawns the issuance loop and returns, so
+// it is a fast call by construction.
+//
 // Bounded rather than unbounded (cf. Deploy's exemption) because the box bounds
 // these itself: a blackholed box still surfaces instead of hanging the UI.
 const actionTimeout = 60 * time.Second
 
-// forAction returns an HTTP client generous enough for a container stop/start.
-// It only ever raises the caller's timeout — a client with none (the plain CLI)
-// keeps waiting indefinitely, and a longer one is left alone.
+// forAction returns an HTTP client generous enough for work the box measures in
+// tens of seconds. It only ever raises the caller's timeout — a client with none
+// (the plain CLI) keeps waiting indefinitely, and a longer one is left alone.
 func (c *Client) forAction() *http.Client {
 	h := *c.http
 	if h.Timeout != 0 && h.Timeout < actionTimeout {
@@ -330,7 +337,7 @@ func (c *Client) StartApp(name string) error {
 }
 
 func (c *Client) DeleteApp(name string) error {
-	resp, err := c.do(http.MethodDelete, "/v1/apps/"+name, "", nil)
+	resp, err := c.doWith(c.forAction(), http.MethodDelete, "/v1/apps/"+name, "", nil)
 	if err != nil {
 		return err
 	}
@@ -382,7 +389,7 @@ func (c *Client) AddAppDomain(app, dom string) (domain.AppDomainStatus, error) {
 
 // RemoveAppDomain detaches dom from app.
 func (c *Client) RemoveAppDomain(app, dom string) error {
-	resp, err := c.do(http.MethodDelete, "/v1/apps/"+app+"/domains/"+dom, "", nil)
+	resp, err := c.doWith(c.forAction(), http.MethodDelete, "/v1/apps/"+app+"/domains/"+dom, "", nil)
 	if err != nil {
 		return err
 	}
