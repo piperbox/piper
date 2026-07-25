@@ -52,6 +52,20 @@ func TestLinkFormEmptyRepoRejected(t *testing.T) {
 	}
 }
 
+// Free text always submits, so the form is where a bare repo name gets caught
+// before it becomes a broken binding — the agent rejects it too, but a form
+// error names the shape without a round trip (#333).
+func TestLinkFormRepoWithoutOwnerRejected(t *testing.T) {
+	v := typeLinkRepo(t, newLinkForm("blog"), "next")
+	next, cmd := v.Update(keyEnter())
+	if cmd != nil {
+		t.Fatal("a repo without an owner/ prefix should not emit a cmd")
+	}
+	if !strings.Contains(next.(linkFormView).View(), "owner/name") {
+		t.Fatalf("expected the error to name owner/name, got:\n%s", next.(linkFormView).View())
+	}
+}
+
 func TestLinkAppRootRunsClientAndPops(t *testing.T) {
 	rec := &apiCalls{}
 	m := NewModel("pi4", "a", false, fakeAPI{rec: rec})

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 )
 
 type Kind int
@@ -68,3 +69,17 @@ type Provider interface {
 // ErrBadSignature is returned by Parse when signature verification fails; the
 // webhook handler maps it to HTTP 401.
 var ErrBadSignature = errors.New("source: bad webhook signature")
+
+// RepoShape is the human-readable form ValidRepo accepts, for error messages.
+const RepoShape = "owner/name"
+
+// ValidRepo reports whether repo is shaped like an Event.Repo — exactly one
+// "/" with both halves non-empty. Everything downstream of a link assumes it:
+// the relay cuts the owner off to match installation target logins, push
+// events are matched against the payload's full_name, and tarball fetches
+// build /repos/<repo>/tarball/<ref>. A bare name satisfies none of those and
+// fails silently rather than loudly, so it is rejected where it enters (#333).
+func ValidRepo(repo string) bool {
+	owner, name, ok := strings.Cut(repo, "/")
+	return ok && owner != "" && name != "" && !strings.Contains(name, "/")
+}
