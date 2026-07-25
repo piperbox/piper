@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/piperbox/piper/internal/client"
 	"github.com/piperbox/piper/internal/config"
 )
 
@@ -72,6 +74,66 @@ var piperdPath = func() (string, error) {
 		}
 	}
 	return exec.LookPath("piperd")
+}
+
+// runningAgentVersion asks the control API which build is actually serving.
+// Short timeout: status is a glance, and a wedged daemon must not hang it. A
+// var so tests can stub it.
+var runningAgentVersion = func(apiAddr string) (string, error) {
+	return client.New("http://"+dialableAddr(apiAddr), "").WithTimeout(2 * time.Second).AgentVersion()
+}
+
+// installedPiperdVersion runs the on-disk piperd's own --version. This is the
+// half that catches the daemonize trap: `piper agent daemonize` installs a new
+// binary but leaves the old process running, so disk and running disagree and
+// the upgrade silently has not taken (#375). A var so tests can stub it.
+var installedPiperdVersion = func() (string, error) {
+	p, err := piperdPath()
+	if err != nil {
+		return "", err
+	}
+	out, err := exec.Command(p, "--version").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// dialableAddr turns a listen address into one a client can connect to: a
+// wildcard bind (the documented PIPER_API_ADDR=0.0.0.0:8088 LAN flow) is where
+// the daemon listens, not an address to dial.
+func dialableAddr(addr string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return addr
+}
+
+// printAgentVersions reports the running build, and flags a piperd on disk that
+// differs — the state a restart-less upgrade leaves behind, which otherwise
+// reads as "the fix didn't work".
+func printAgentVersions(stdout io.Writer, apiAddr string) {
+	running, rerr := runningAgentVersion(apiAddr)
+	disk, derr := installedPiperdVersion()
+
+	switch {
+	case rerr == nil:
+	case errors.Is(rerr, client.ErrVersionUnsupported):
+		running = "unknown (agent too old to report it)"
+	default:
+		fmt.Fprintf(stdout, "  version      unknown (control API unreachable at %s)\n", apiAddr)
+		return
+	}
+	if derr == nil && disk != running {
+		fmt.Fprintf(stdout, "  version      %s  ⚠ %s is installed on disk — restart piperd to apply\n", running, disk)
+		return
+	}
+	fmt.Fprintf(stdout, "  version      %s\n", running)
 }
 
 // launchctlRun runs `launchctl <args...>` and returns combined output; a var so
@@ -397,7 +459,9 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 		// The system piperd's /proc environ is root-only, so env is usually nil
 		// here and the system unit's known defaults apply.
 		env := agentEnviron()
-		fmt.Fprintf(stdout, "  control API  http://%s\n", envOr(env, "PIPER_API_ADDR", "127.0.0.1:8088"))
+		apiAddr := envOr(env, "PIPER_API_ADDR", "127.0.0.1:8088")
+		printAgentVersions(stdout, apiAddr)
+		fmt.Fprintf(stdout, "  control API  http://%s\n", apiAddr)
 		fmt.Fprintf(stdout, "  http/https   %s / %s\n", envOr(env, "PIPER_HTTP_ADDR", ":80"), envOr(env, "PIPER_HTTPS_ADDR", ":443"))
 		fmt.Fprintf(stdout, "  data dir     %s\n", envOr(env, "PIPER_DATA_DIR", "/var/lib/piper"))
 		return 0
@@ -418,7 +482,9 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "piperd: running")
 	env := agentEnviron("--user")
-	fmt.Fprintf(stdout, "  control API  http://%s\n", envOr(env, "PIPER_API_ADDR", "127.0.0.1:8088"))
+	apiAddr := envOr(env, "PIPER_API_ADDR", "127.0.0.1:8088")
+	printAgentVersions(stdout, apiAddr)
+	fmt.Fprintf(stdout, "  control API  http://%s\n", apiAddr)
 	// http/https are set by the user unit (:8080/:8443); only shown when we
 	// could read them, since piperd's built-in :80/:443 defaults would misreport
 	// a rootless instance.
@@ -566,6 +632,9 @@ func agentStatus(stdout, stderr io.Writer) int {
 	}
 	if strings.Contains(out, "state = running") {
 		fmt.Fprintln(stdout, "piperd: running")
+		// The LaunchAgent pins high ports but leaves the control API on
+		// piperd's default, so there is no plist env to consult.
+		printAgentVersions(stdout, "127.0.0.1:8088")
 	} else {
 		fmt.Fprintln(stdout, "piperd: loaded (not running)")
 	}
