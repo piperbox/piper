@@ -4,6 +4,13 @@ dist/
 build/
 bin/
 *.exe
+# `go build ./cmd/<binary>/` with no -o drops the binary in the repo root, where
+# `git add -A` will happily commit tens of MB of it. The Makefile targets write
+# to bin/, so a root-level copy only ever exists by accident. Anchored so the
+# cmd/ source directories of the same name are untouched.
+/piper
+/piperd
+/piper-relay
 
 # secrets / env
 .env
