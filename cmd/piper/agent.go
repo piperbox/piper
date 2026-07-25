@@ -110,6 +110,16 @@ func sameBox(configured, target string) bool {
 	return dialableAddr(u.Host) == target
 }
 
+// binaryVersion runs a piper binary's own --version. A var so tests can stub
+// it: the fake binaries they write are not executable programs.
+var binaryVersion = func(path string) (string, error) {
+	out, err := exec.Command(path, "--version").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // installedPiperdVersion runs the on-disk piperd's own --version. This is the
 // half that catches the daemonize trap: `piper agent daemonize` installs a new
 // binary but leaves the old process running, so disk and running disagree and
@@ -119,11 +129,45 @@ var installedPiperdVersion = func() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	out, err := exec.Command(p, "--version").Output()
-	if err != nil {
-		return "", err
+	return binaryVersion(p)
+}
+
+// versionNewer reports whether a is a strictly newer X.Y.Z than b. Unparseable
+// input is never "newer", so an unknown build can't win a comparison it should
+// not be in.
+func versionNewer(a, b string) bool {
+	av, aok := parseVersion(a)
+	bv, bok := parseVersion(b)
+	if !aok || !bok {
+		return false
 	}
-	return strings.TrimSpace(string(out)), nil
+	for i := range av {
+		if av[i] != bv[i] {
+			return av[i] > bv[i]
+		}
+	}
+	return false
+}
+
+// parseVersion reads the leading X.Y.Z of a version string, ignoring any
+// pre-release suffix.
+func parseVersion(s string) ([3]int, bool) {
+	var out [3]int
+	parts := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(s), "v"), ".", 3)
+	if len(parts) != 3 {
+		return out, false
+	}
+	for i, p := range parts {
+		if i == 2 {
+			p, _, _ = strings.Cut(p, "-")
+		}
+		n, err := strconv.Atoi(p)
+		if err != nil {
+			return out, false
+		}
+		out[i] = n
+	}
+	return out, true
 }
 
 // dialableAddr turns a listen address into one a client can connect to: a
@@ -752,18 +796,43 @@ func agentDaemonize(undo bool, stdout, stderr io.Writer) int {
 	}
 	for _, name := range []string{"piperd", "piper"} {
 		dst := filepath.Join(systemBinDir, name)
+		src := ""
 		if home != "" {
-			if src := filepath.Join(home, ".local", "bin", name); fileExists(src) {
+			if cand := filepath.Join(home, ".local", "bin", name); fileExists(cand) {
+				src = cand
+			}
+		}
+		switch {
+		case src == "" && !fileExists(dst):
+			fmt.Fprintf(stderr, "error: %s not found in %s or ~/.local/bin — run the installer first (see README)\n", name, systemBinDir)
+			return 1
+		case src == "":
+			// Already installed system-wide; nothing to promote.
+		case !fileExists(dst):
+			if err := copyFile(src, dst, 0o755); err != nil {
+				fmt.Fprintf(stderr, "error: installing %s to %s: %v\n", name, systemBinDir, err)
+				return 1
+			}
+		default:
+			// Both exist. Copying unconditionally here silently downgraded a
+			// box: a stale ~/.local/bin/piperd overwrote the version the
+			// installer had just written to /usr/local/bin, and three upgrades
+			// in a row appeared not to take. Promote only what is actually
+			// newer, and say when an older copy was left behind.
+			sv, serr := binaryVersion(src)
+			dv, derr := binaryVersion(dst)
+			switch {
+			case serr == nil && derr == nil && sv == dv:
+				// Same build; the copy would be a no-op.
+			case serr == nil && derr == nil && !versionNewer(sv, dv):
+				fmt.Fprintf(stdout, "keeping %s %s — %s is older (%s); remove it if it is shadowing your PATH\n",
+					dst, dv, src, sv)
+			default:
 				if err := copyFile(src, dst, 0o755); err != nil {
 					fmt.Fprintf(stderr, "error: installing %s to %s: %v\n", name, systemBinDir, err)
 					return 1
 				}
-				continue
 			}
-		}
-		if !fileExists(dst) {
-			fmt.Fprintf(stderr, "error: %s not found in %s or ~/.local/bin — run the installer first (see README)\n", name, systemBinDir)
-			return 1
 		}
 	}
 
