@@ -1937,3 +1937,73 @@ func TestResumeRoutesUnresolvableHostnameDoesNotStopSweep(t *testing.T) {
 		t.Fatalf("routed despite an unresolvable hostname: %+v", routes.upserts)
 	}
 }
+
+// TestStopMarksStoppedEvenWhenUnrouteFails pins #377: Stop halts the container
+// first and writes the row last, so a route-teardown failure in between used to
+// return early and leave the deployment marked "running" while its container was
+// already gone. Start only acts on a "stopped" row, so that state was
+// unrecoverable through the CLI/TUI/dashboard — stop reported an error but
+// really stopped the app, and start then silently did nothing forever. Only a
+// redeploy rewrote the row.
+func TestStopMarksStoppedEvenWhenUnrouteFails(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	routes := newFakeCaddy()
+	d := New(s, rt, routes, "piper.localhost")
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	routes.removeErr = errors.New("caddy remove route: status 500")
+	err := d.Stop(context.Background(), "blog")
+
+	// The failure must still be reported — routing really did not get cleaned up.
+	if err == nil {
+		t.Fatal("Stop returned nil, want the unroute failure surfaced")
+	}
+	// ...but the row must match reality: the container is down.
+	if _, err := s.LatestRunning("blog"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("deployment still marked running after Stop: %v", err)
+	}
+}
+
+// TestStartRecoversAfterFailedUnroute is the half that matters to the user: once
+// the row is honest, the app can be started again from the UI instead of needing
+// a redeploy.
+func TestStartRecoversAfterFailedUnroute(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	routes := newFakeCaddy()
+	d := New(s, rt, routes, "piper.localhost")
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	routes.removeErr = errors.New("caddy remove route: status 500")
+	_ = d.Stop(context.Background(), "blog")
+	routes.removeErr = nil // the transient Caddy problem clears
+
+	// A genuinely fresh container, so "Start did something" can't be confused
+	// with "the row was never updated and still describes the old one".
+	rt.RunResultVal = runtime.RunResult{ContainerID: "c2", HostPort: 40002}
+
+	if err := d.Start(context.Background(), "blog"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	got, err := s.LatestRunning("blog")
+	if err != nil {
+		t.Fatalf("app did not come back up: %v", err)
+	}
+	if got.ContainerID != "c2" {
+		t.Errorf("container = %q, want c2 — Start did not re-run it", got.ContainerID)
+	}
+	if routes.upserts["blog.piper.localhost"] != 40002 {
+		t.Errorf("route not re-armed to the new port: %+v", routes.upserts)
+	}
+}
