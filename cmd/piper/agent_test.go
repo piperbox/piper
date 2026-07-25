@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -11,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/piperbox/piper/internal/client"
+	"github.com/piperbox/piper/internal/config"
 )
 
 func TestAgentUnsupportedGOOS(t *testing.T) {
@@ -473,6 +478,91 @@ func TestAgentStatusUnreachableControlAPI(t *testing.T) {
 	if !strings.Contains(got, "control API unreachable") {
 		t.Errorf("status missing the unreachable note:\n%s", got)
 	}
+}
+
+// v0.8.6 shipped this broken on exactly the box it was built for. The
+// documented LAN setup sets PIPER_API_ADDR=0.0.0.0:8088, and piperd's local
+// listener requires a bearer on any non-loopback bind — so the bare dial 401'd
+// and `piper agent status` reported "control API unreachable" about a daemon
+// that had answered perfectly well.
+func TestRunningAgentVersionUsesSavedTokenForThisBox(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		if gotAuth != "Bearer lan-token" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.8.7"})
+	}))
+	defer srv.Close()
+	if err := config.SaveClient(config.ClientConfig{Addr: srv.URL, Token: "lan-token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := runningAgentVersion(hostPort(t, srv.URL))
+	if err != nil {
+		t.Fatalf("runningAgentVersion: %v (auth sent: %q)", err, gotAuth)
+	}
+	if got != "0.8.7" {
+		t.Errorf("version = %q, want 0.8.7", got)
+	}
+}
+
+// The token belongs to the box it was issued for. `piper agent status` on a
+// laptop whose CLI points at a Pi must not hand the Pi's credential to the
+// laptop's own daemon.
+func TestRunningAgentVersionWithholdsAnotherBoxToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.8.7"})
+	}))
+	defer srv.Close()
+	// Configured box is somewhere else entirely.
+	if err := config.SaveClient(config.ClientConfig{Addr: "http://192.168.1.6:8088", Token: "other-box-token"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runningAgentVersion(hostPort(t, srv.URL)); err != nil {
+		t.Fatalf("runningAgentVersion: %v", err)
+	}
+	if gotAuth != "" {
+		t.Errorf("sent %q to a different box's daemon, want no Authorization header", gotAuth)
+	}
+}
+
+// A 401 is a daemon that answered, not one that could not be reached. Saying
+// "unreachable" sent this investigation looking at systemd and sockets when the
+// control API was fine — the message has to name the actual problem.
+func TestAgentStatusUnauthorizedIsNotReportedAsUnreachable(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "", &client.StatusError{Code: http.StatusUnauthorized}, "0.8.6", nil)
+
+	got := statusOutput(t)
+	if strings.Contains(got, "unreachable") {
+		t.Errorf("a 401 must not be reported as unreachable:\n%s", got)
+	}
+	if !strings.Contains(got, "piper login") {
+		t.Errorf("status should say how to fix a 401:\n%s", got)
+	}
+}
+
+// hostPort strips the scheme from a test server URL, matching what
+// PIPER_API_ADDR carries.
+func hostPort(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host
 }
 
 func TestDialableAddrRewritesWildcardBinds(t *testing.T) {
