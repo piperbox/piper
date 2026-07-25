@@ -8,6 +8,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/piperbox/piper/internal/config"
+	"github.com/piperbox/piper/internal/source"
 )
 
 // pickRepo is one repo-picker entry: the owner/name to link and the
@@ -126,6 +127,13 @@ func (v linkFormView) submit() (tea.Model, tea.Cmd) {
 	repo := strings.TrimSpace(v.repo.Value())
 	if repo == "" {
 		v.err = fmt.Errorf("repo is required")
+		return v, nil
+	}
+	// Free text always submits (a relay outage must never block linking by
+	// hand), so this is where a bare name is caught: the agent rejects it too,
+	// but naming the shape here saves a round trip (#333).
+	if !source.ValidRepo(repo) {
+		v.err = fmt.Errorf("repo must be %s (e.g. octocat/hello-world)", source.RepoShape)
 		return v, nil
 	}
 	branch := strings.TrimSpace(v.branch.Value())
