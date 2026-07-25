@@ -83,12 +83,19 @@ CREATE TABLE IF NOT EXISTS repo_bindings (
 
 CREATE INDEX IF NOT EXISTS repo_bindings_repo ON repo_bindings(repo);
 
+-- attempts counts failed delivery attempts for this slot (a park only happens
+-- after one has failed, so it starts at 1); next_try_at is the earliest time
+-- the retry sweep may pick the row up, so a permanently-failing box backs off
+-- instead of being retried every sweep forever. Both use the fixed-width
+-- pendingTimeLayout, so string comparison is chronological.
 CREATE TABLE IF NOT EXISTS pending_events (
-    agent_name TEXT NOT NULL REFERENCES agents(name),
-    app        TEXT NOT NULL,
-    ref        TEXT NOT NULL,
-    event      TEXT NOT NULL,
-    payload    BLOB NOT NULL,
-    created_at TEXT NOT NULL,
+    agent_name  TEXT NOT NULL REFERENCES agents(name),
+    app         TEXT NOT NULL,
+    ref         TEXT NOT NULL,
+    event       TEXT NOT NULL,
+    payload     BLOB NOT NULL,
+    created_at  TEXT NOT NULL,
+    attempts    INTEGER NOT NULL,
+    next_try_at TEXT NOT NULL,
     PRIMARY KEY (agent_name, app, ref)
 );

@@ -15,12 +15,13 @@ import (
 )
 
 type capturingDeliverer struct {
-	mu      sync.Mutex
-	calls   []Binding
-	done    chan struct{}
-	fail    bool // when set, Deliver reports failure instead of succeeding
-	drains  []string
-	drained chan string
+	mu         sync.Mutex
+	calls      []Binding
+	done       chan struct{}
+	fail       bool // when set, Deliver reports failure instead of succeeding
+	drains     []string
+	drained    chan string
+	dispatched int
 }
 
 func (c *capturingDeliverer) Deliver(_ context.Context, b Binding, _ string, _ []byte) error {
@@ -36,6 +37,21 @@ func (c *capturingDeliverer) Deliver(_ context.Context, b Binding, _ string, _ [
 		return fmt.Errorf("simulated delivery failure")
 	}
 	return nil
+}
+
+// Dispatch runs fn on its own goroutine, as the real pool does, so the
+// ingress's asynchrony is still exercised.
+func (c *capturingDeliverer) Dispatch(fn func(ctx context.Context)) {
+	c.mu.Lock()
+	c.dispatched++
+	c.mu.Unlock()
+	go fn(context.Background())
+}
+
+func (c *capturingDeliverer) dispatchCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dispatched
 }
 
 func (c *capturingDeliverer) DrainFor(_ context.Context, agentName string) {

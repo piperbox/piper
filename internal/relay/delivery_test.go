@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,4 +236,291 @@ func TestDrainForReparksFailedReplay(t *testing.T) {
 	if string(got[0].Payload) != `{"after":"x"}` {
 		t.Fatalf("payload = %s, want the original", got[0].Payload)
 	}
+	// The re-park carries the failure forward so the sweep can back off (#294).
+	if got[0].Attempts != 2 {
+		t.Fatalf("attempts = %d, want 2 (parked once, replay failed once)", got[0].Attempts)
+	}
+}
+
+// boxReturning answers count tunnel requests with status, so a delivery can be
+// made to fail deterministically. It reports how many it served.
+func boxReturning(t *testing.T, sess *tunnel.Session, status string, count int) func() int {
+	t.Helper()
+	served := make(chan struct{}, count+8)
+	go func() {
+		for i := 0; i < count; i++ {
+			kind, conn, err := sess.AcceptKind()
+			if err != nil || kind != tunnel.KindHTTP {
+				return
+			}
+			req, err := http.ReadRequest(bufio.NewReader(conn))
+			if err != nil {
+				conn.Close()
+				return
+			}
+			_, _ = io.Copy(io.Discard, req.Body)
+			_, _ = io.WriteString(conn, "HTTP/1.1 "+status+"\r\nContent-Length: 0\r\n\r\n")
+			conn.Close()
+			served <- struct{}{}
+		}
+	}()
+	return func() int { return len(served) }
+}
+
+// The failure #294 describes: the box is up and its tunnel is registered, but
+// it is rejecting deliveries. The event parks, the box never disconnects (so no
+// reconnect drain), and no further webhook arrives for it (so no ingress
+// re-drain). Nothing retried it — the box sat on an undelivered tip commit
+// forever. The sweep is what closes that hole.
+func TestSweepRetriesParkedEventForAConnectedBox(t *testing.T) {
+	sess, _, _, base, st, router := startTestRelay(t, nil, nil)
+	served := boxReturning(t, sess, "202 Accepted", 1)
+
+	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{"after":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh park is not due yet; make it due, as the backoff would in time.
+	if err := st.setNextTryForTest(base, time.Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewTunnelDelivery(st, router)
+	d.sweep()
+	waitFor(t, "sweep to deliver the parked event", func() bool { return served() == 1 })
+
+	d.Shutdown(context.Background())
+	left, err := st.DrainEvents(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 0 {
+		t.Fatalf("%d events still parked after a successful sweep, want 0", len(left))
+	}
+}
+
+// The sweep must not consume a slot that is still backing off: draining it
+// would deliver early, and re-parking it would reset nothing but churn.
+func TestSweepSkipsEventsStillBackingOff(t *testing.T) {
+	sess, _, _, base, st, router := startTestRelay(t, nil, nil)
+	served := boxReturning(t, sess, "202 Accepted", 1)
+
+	// A fresh park is due one backoff period out, so the sweep must pass.
+	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{"after":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewTunnelDelivery(st, router)
+	d.sweep()
+	d.Shutdown(context.Background())
+
+	if served() != 0 {
+		t.Fatalf("sweep delivered %d events that were still backing off, want 0", served())
+	}
+	left, err := st.DrainEvents(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 {
+		t.Fatalf("%d events parked, want the backing-off one left alone", len(left))
+	}
+}
+
+// A box that is permanently rejecting deliveries must back off rather than be
+// retried at sweep frequency forever: each attempt costs a stream and up to
+// deliveryTimeout.
+func TestRepeatedFailuresBackOff(t *testing.T) {
+	if got, want := retryDelay(1), retryBackoffBase; got != want {
+		t.Errorf("retryDelay(1) = %v, want %v", got, want)
+	}
+	if got, want := retryDelay(3), 4*retryBackoffBase; got != want {
+		t.Errorf("retryDelay(3) = %v, want %v", got, want)
+	}
+	if got := retryDelay(50); got != retryBackoffMax {
+		t.Errorf("retryDelay(50) = %v, want the cap %v", got, retryBackoffMax)
+	}
+
+	sess, _, _, base, st, router := startTestRelay(t, nil, nil)
+	boxReturning(t, sess, "500 Internal Server Error", 4)
+	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{"after":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewTunnelDelivery(st, router)
+	// Force each round due, so only the recorded attempt count grows.
+	for i := 0; i < 3; i++ {
+		if err := st.setNextTryForTest(base, time.Now().Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		d.drain(context.Background(), base, true)
+	}
+	d.Shutdown(context.Background())
+
+	got, err := st.DrainEvents(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d events, want the still-undelivered one", len(got))
+	}
+	if got[0].Attempts != 4 {
+		t.Fatalf("attempts = %d, want 4 (one park + three failed replays)", got[0].Attempts)
+	}
+}
+
+// A box that never comes back would otherwise hold its capped slots forever,
+// and a replay of a long-dead push is not something anyone wants deployed.
+func TestExpiredPendingEventsArePurgedAndNeverReplayed(t *testing.T) {
+	st := openTestStore(t)
+	_, base := enrolledAgent(t, st, "1001", "alice")
+
+	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{"after":"old"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ParkEvent(base, "blog", "dev", "push", []byte(`{"after":"new"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Age the "main" slot past the TTL.
+	if err := st.setCreatedAtForTest(base, "main", time.Now().Add(-pendingEventTTL-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A drain must not hand back the stale one even before a purge runs.
+	got, err := st.DrainEvents(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Ref != "dev" {
+		t.Fatalf("drain returned %+v, want only the unexpired dev event", got)
+	}
+
+	// And the purge reclaims the slots of a box that never drains at all.
+	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{"after":"old"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.setCreatedAtForTest(base, "main", time.Now().Add(-pendingEventTTL-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := st.PurgeExpiredPending()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("purged %d rows, want 1", n)
+	}
+}
+
+// Deliveries must not outnumber the pool: one webhook fans out to every
+// binding for the repo, and a burst of pushes multiplies that (#295).
+func TestDispatchBoundsConcurrency(t *testing.T) {
+	st := openTestStore(t)
+	d := NewTunnelDelivery(st, NewRouter())
+
+	var mu sync.Mutex
+	inFlight, peak := 0, 0
+	release := make(chan struct{})
+	for i := 0; i < maxConcurrentDeliveries*3; i++ {
+		d.Dispatch(func(context.Context) {
+			mu.Lock()
+			inFlight++
+			if inFlight > peak {
+				peak = inFlight
+			}
+			mu.Unlock()
+			<-release
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		})
+	}
+	// Let the pool fill, then let everything through.
+	waitFor(t, "the pool to saturate", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return peak >= maxConcurrentDeliveries
+	})
+	close(release)
+	d.Shutdown(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	if peak > maxConcurrentDeliveries {
+		t.Fatalf("peak concurrency = %d, want at most %d", peak, maxConcurrentDeliveries)
+	}
+}
+
+// A relay restart mid-burst used to drop every in-flight delivery: GitHub had
+// already been sent its 202, so nothing would ever retry them. Shutdown must
+// wait for each dispatched unit to finish parking instead (#295).
+func TestShutdownWaitsForInFlightDeliveriesToPark(t *testing.T) {
+	st := openTestStore(t)
+	_, base := enrolledAgent(t, st, "1001", "alice")
+	d := NewTunnelDelivery(st, NewRouter())
+
+	started := make(chan struct{})
+	d.Dispatch(func(ctx context.Context) {
+		close(started)
+		<-ctx.Done() // still running when Shutdown is called
+		if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{"after":"x"}`)); err != nil {
+			t.Errorf("park during shutdown: %v", err)
+		}
+	})
+	<-started
+
+	d.Shutdown(context.Background())
+
+	// Shutdown returned, so the park must already be durable.
+	got, err := st.DrainEvents(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("%d events parked after shutdown, want 1 — the in-flight one was dropped", len(got))
+	}
+}
+
+// Work handed to a shut-down pool must still park rather than vanish.
+func TestDispatchAfterShutdownStillRuns(t *testing.T) {
+	st := openTestStore(t)
+	d := NewTunnelDelivery(st, NewRouter())
+	d.Shutdown(context.Background())
+
+	ran := false
+	d.Dispatch(func(ctx context.Context) {
+		ran = true
+		if ctx.Err() == nil {
+			t.Error("a post-shutdown dispatch should get a cancelled context")
+		}
+	})
+	if !ran {
+		t.Fatal("dispatch after shutdown dropped the work instead of running it")
+	}
+}
+
+// setNextTryForTest makes every parked event for agentName due at t, standing
+// in for the passage of a real backoff period.
+func (s *Store) setNextTryForTest(agentName string, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE pending_events SET next_try_at=? WHERE agent_name=?`,
+		at.UTC().Format(pendingTimeLayout), agentName)
+	return err
+}
+
+// setCreatedAtForTest ages one parked slot, standing in for the passage of the
+// TTL.
+func (s *Store) setCreatedAtForTest(agentName, ref string, at time.Time) error {
+	_, err := s.db.Exec(`UPDATE pending_events SET created_at=? WHERE agent_name=? AND ref=?`,
+		at.UTC().Format(pendingTimeLayout), agentName, ref)
+	return err
+}
+
+// waitFor polls cond until it holds or ~3s passes.
+func waitFor(t *testing.T, desc string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for %s", desc)
 }

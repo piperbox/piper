@@ -18,6 +18,9 @@ const maxWebhookBody = 5 << 20
 type Deliverer interface {
 	Deliver(ctx context.Context, b Binding, eventType string, payload []byte) error
 	DrainFor(ctx context.Context, agentName string)
+	// Dispatch runs fn on the bounded delivery pool, tracked so shutdown waits
+	// for it and cancelled through fn's context when the relay stops.
+	Dispatch(fn func(ctx context.Context))
 }
 
 // ghEnvelope is the slice of a GitHub webhook the relay needs to route. Payload
@@ -106,9 +109,16 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 		// agent's decision, exactly as in BYO mode; two components filtering the
 		// same condition is how pushes end up deploying nowhere.
 		w.WriteHeader(http.StatusAccepted)
+		ref := strings.TrimPrefix(env.Ref, "refs/heads/")
+		if env.Number > 0 {
+			ref = "pr-" + strconv.Itoa(env.Number)
+		}
 		for _, b := range bindings {
-			go func(b Binding) {
-				err := d.Deliver(context.Background(), b, event, body)
+			// Dispatch, not a bare go: one webhook fans out to every binding
+			// for the repo, so the pool is what bounds a burst, and it is what
+			// lets shutdown wait for these to park rather than dropping them.
+			d.Dispatch(func(ctx context.Context) {
+				err := d.Deliver(ctx, b, event, body)
 				if err == nil {
 					return
 				}
@@ -119,10 +129,6 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 				if !errors.Is(err, ErrAgentOffline) {
 					log.Printf("relay: deliver %s to %s/%s: %v (parking)", event, b.AgentName, b.App, err)
 				}
-				ref := strings.TrimPrefix(env.Ref, "refs/heads/")
-				if env.Number > 0 {
-					ref = "pr-" + strconv.Itoa(env.Number)
-				}
 				if err := st.ParkEvent(b.AgentName, b.App, ref, event, body); err != nil {
 					log.Printf("relay: park %s for %s/%s: %v", event, b.AgentName, b.App, err)
 					return
@@ -130,9 +136,12 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 				// Close the park/drain race: the box may have reconnected while
 				// the delivery was failing, in which case its reconnect drain
 				// already ran and missed this event. DrainFor no-ops while the
-				// agent is still offline.
-				d.DrainFor(context.Background(), b.AgentName)
-			}(b)
+				// agent is still offline. Skipped once shutting down — the
+				// event is parked, and the sweep or a reconnect will take it.
+				if ctx.Err() == nil {
+					d.DrainFor(ctx, b.AgentName)
+				}
+			})
 		}
 	})
 }

@@ -106,7 +106,7 @@ func TestReparkEventDoesNotClobberNewerEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := time.Now().UTC().Add(-time.Hour).Format(pendingTimeLayout)
-	if err := st.ReparkEvent(agent, "blog", "main", "push", []byte(`{"after":"old"}`), stale); err != nil {
+	if err := st.ReparkEvent(agent, "blog", "main", "push", []byte(`{"after":"old"}`), stale, 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -153,7 +153,7 @@ func TestReparkEventEnforcesTheCap(t *testing.T) {
 	}
 
 	for i, ev := range drained {
-		if err := st.ReparkEvent(agent, ev.App, ev.Ref, ev.Event, ev.Payload, ev.CreatedAt); err != nil {
+		if err := st.ReparkEvent(agent, ev.App, ev.Ref, ev.Event, ev.Payload, ev.CreatedAt, ev.Attempts+1); err != nil {
 			t.Fatalf("ReparkEvent %d: %v", i, err)
 		}
 	}
