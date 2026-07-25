@@ -485,6 +485,29 @@ func (d *Deployer) ResumeRoutes() {
 			log.Printf("resume routes: %s -> %s: %v", a.Name, host, err)
 		}
 	}
+	d.resumePreviewRoutes()
+}
+
+// resumePreviewRoutes is the preview half of the sweep. It is a separate query
+// rather than part of the loop above because LatestRunning is pr=0 by design;
+// previews live on their own (app, pr) rows and an app may have several at
+// once. Same best-effort contract as ResumeRoutes (#376).
+func (d *Deployer) resumePreviewRoutes() {
+	previews, err := d.store.RunningPreviews()
+	if err != nil {
+		log.Printf("resume routes: list previews: %v", err)
+		return
+	}
+	for _, dep := range previews {
+		host, ok := d.PreviewHost(dep.App, dep.PR)
+		if !ok {
+			log.Printf("resume routes: %s PR %d: cannot resolve hostname (relay unreachable?)", dep.App, dep.PR)
+			continue
+		}
+		if err := d.routes.UpsertRoute(host, dep.HostPort); err != nil {
+			log.Printf("resume routes: %s PR %d -> %s: %v", dep.App, dep.PR, host, err)
+		}
+	}
 }
 
 // RouteAppDomain arms the exact-host TLS route for a per-app custom domain

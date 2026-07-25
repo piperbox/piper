@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -578,13 +579,19 @@ func TestProvisionRelayControlConcurrentSingleMint(t *testing.T) {
 	}
 }
 
-// repushStore is the ListApps slice repushRelayApps needs.
+// repushStore is the store slice repushRelayApps needs.
 type repushStore struct {
-	apps []store.App
-	err  error
+	apps        []store.App
+	previews    []store.Deployment
+	err         error
+	previewsErr error
 }
 
 func (s *repushStore) ListApps() ([]store.App, error) { return s.apps, s.err }
+
+func (s *repushStore) RunningPreviews() ([]store.Deployment, error) {
+	return s.previews, s.previewsErr
+}
 
 // repushAnnouncer records what the re-push announced to the relay.
 type repushAnnouncer struct {
@@ -598,8 +605,10 @@ func (a *repushAnnouncer) BindRepo(app, repo, branch string) error {
 	return nil
 }
 
+// Register records app@pr so a preview re-registration is distinguishable
+// from the production one for the same app.
 func (a *repushAnnouncer) Register(app string, pr int) (string, error) {
-	a.registered = append(a.registered, app)
+	a.registered = append(a.registered, fmt.Sprintf("%s@%d", app, pr))
 	return app + ".relay.example", a.registerErr
 }
 
@@ -617,7 +626,61 @@ func TestRepushRelayAppsReregistersHostnames(t *testing.T) {
 
 	repushRelayApps(st, a, true)
 
-	if want := []string{"test1"}; !reflect.DeepEqual(a.registered, want) {
+	if want := []string{"test1@0"}; !reflect.DeepEqual(a.registered, want) {
+		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	}
+}
+
+// TestRepushRelayAppsReregistersPreviewHostnames is the preview half of #369,
+// carried over as #376: previews get relay-assigned hostnames from the same
+// register op, and they were as invisible to the reconnect re-push as they were
+// to ResumeRoutes. Without this a live PR-preview URL goes dark on a relay
+// restart and stays dark until the PR pushes again.
+func TestRepushRelayAppsReregistersPreviewHostnames(t *testing.T) {
+	st := &repushStore{
+		apps: []store.App{{Name: "test1", Hostname: "855d1432-ozykhan.relay.example"}},
+		previews: []store.Deployment{
+			{App: "test1", PR: 7, Status: "running"},
+			{App: "test1", PR: 9, Status: "running"},
+		},
+	}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, true)
+
+	want := []string{"test1@0", "test1@7", "test1@9"}
+	if !reflect.DeepEqual(a.registered, want) {
+		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	}
+}
+
+// A preview's hostname is claimed by the deploy, so a box with no relay-assigned
+// hostnames must not register previews either — same guard as the app loop.
+func TestRepushRelayAppsSkipsPreviewsWhenNotTerminated(t *testing.T) {
+	st := &repushStore{
+		apps:     []store.App{{Name: "test1", Hostname: "test1.piper.localhost"}},
+		previews: []store.Deployment{{App: "test1", PR: 7, Status: "running"}},
+	}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, false)
+
+	if len(a.registered) != 0 {
+		t.Fatalf("re-registered %v on a non-terminated box, want none", a.registered)
+	}
+}
+
+// A failed preview lookup must not cost the box its production hostnames.
+func TestRepushRelayAppsPreviewErrorKeepsAppHostnames(t *testing.T) {
+	st := &repushStore{
+		apps:        []store.App{{Name: "test1", Hostname: "855d1432-ozykhan.relay.example"}},
+		previewsErr: errors.New("disk"),
+	}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, true)
+
+	if want := []string{"test1@0"}; !reflect.DeepEqual(a.registered, want) {
 		t.Fatalf("re-registered %v, want %v", a.registered, want)
 	}
 }
@@ -665,7 +728,7 @@ func TestRepushRelayAppsRegisterErrorDoesNotStopOthers(t *testing.T) {
 
 	repushRelayApps(st, a, true)
 
-	if want := []string{"test1", "test2"}; !reflect.DeepEqual(a.registered, want) {
+	if want := []string{"test1@0", "test2@0"}; !reflect.DeepEqual(a.registered, want) {
 		t.Fatalf("re-registered %v, want %v", a.registered, want)
 	}
 }
