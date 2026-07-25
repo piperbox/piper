@@ -17,6 +17,7 @@ import (
 
 	"github.com/piperbox/piper/internal/domain"
 	"github.com/piperbox/piper/internal/store"
+	"github.com/piperbox/piper/internal/version"
 )
 
 type fakeDeployer struct {
@@ -88,6 +89,29 @@ func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 	s := newTestStore(t)
 	return New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil)
+}
+
+// The running daemon is the only thing that knows its own version — the
+// binary on disk may already have been replaced, and the CLI asking is a
+// separate build entirely (#375). Reachable over the tunnel like any other
+// /v1 route, which is what lets `piper status --remote` report a box's agent.
+func TestVersionReportsTheRunningDaemon(t *testing.T) {
+	h := newTestHandler(t)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/version", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Version != version.String() {
+		t.Errorf("version = %q, want this build's %q", got.Version, version.String())
+	}
 }
 
 func TestCreateAndListApp(t *testing.T) {

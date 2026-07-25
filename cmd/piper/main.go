@@ -55,6 +55,25 @@ func dialClient(remote string, stderr io.Writer) (*client.Client, bool) {
 	return client.New(cc.Addr, cc.Token), true
 }
 
+// printAgentVersion reports the build of the piperd actually serving this
+// client — over the relay for a remote target, which is the case that matters:
+// the box you are asking about is usually not the machine you are typing on,
+// and its `piper` is a different build again (#375).
+//
+// Best-effort by design. A 404 means an agent old enough to predate the
+// endpoint, which is worth saying out loud. Any other failure prints nothing:
+// the ListApps that follows hits the same box and will report the real problem
+// rather than this reporting it twice.
+func printAgentVersion(c *client.Client, stdout io.Writer) {
+	v, err := c.AgentVersion()
+	switch {
+	case errors.Is(err, client.ErrVersionUnsupported):
+		fmt.Fprintln(stdout, "agent: unknown (too old to report its version)")
+	case err == nil:
+		fmt.Fprintf(stdout, "agent: %s\n", v)
+	}
+}
+
 // appURL renders the URL an app is served on from its stored hostname. A
 // relay-terminated box (remote target) serves over HTTPS; a local/BYO box
 // serves its base-domain host over HTTP. Empty hostname (never deployed)
@@ -384,6 +403,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			}
 			fmt.Fprintf(stdout, "box %s: connected\n", *remote)
 		}
+		printAgentVersion(c, stdout)
 		apps, err := c.ListApps()
 		if err != nil {
 			fmt.Fprintln(stderr, "error:", err)
