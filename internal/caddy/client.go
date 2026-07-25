@@ -19,6 +19,12 @@ func NewClient(adminBase string) *Client {
 
 func routeID(host string) string { return "piper-" + host }
 
+// redirectID is the :80 redirect's stable id for the same host. The ":" is
+// what keeps the two namespaces apart: a hostname cannot contain one, so no
+// host's routeID can ever collide with another host's redirectID (it is also
+// a legal URL path character, and the id is addressed as /id/<id>).
+func redirectID(host string) string { return "piper-redirect:" + host }
+
 // UpsertRoute makes Caddy reverse-proxy host to 127.0.0.1:<port> over HTTP.
 // The route carries a stable @id so re-deploys replace it: existing route is
 // removed by id (404 ignored), then a fresh one is appended.
@@ -27,9 +33,41 @@ func (c *Client) UpsertRoute(host string, upstreamHostPort int) error {
 }
 
 // UpsertRouteTLS is UpsertRoute for the piper-tls server — the runtime-enabled
-// HTTPS listener that serves the BYO custom domain (see EnsureHTTPS).
+// HTTPS listener that serves the BYO custom domain (see EnsureHTTPS) — plus
+// the :80 redirect that sends plaintext visitors to it.
+//
+// The redirect is armed here rather than left to callers because the two are
+// never wanted apart: a host reachable only over https:// 404s for anyone who
+// types the bare domain, and browsers default to http://. The plaintext
+// "piper" server sets automatic_https.disable, so Caddy provisions no redirect
+// of its own — it has to be an explicit route (#357).
 func (c *Client) UpsertRouteTLS(host string, upstreamHostPort int) error {
-	return c.upsertRoute("piper-tls", host, upstreamHostPort)
+	if err := c.upsertRoute("piper-tls", host, upstreamHostPort); err != nil {
+		return err
+	}
+	return c.upsertRedirect(host)
+}
+
+// upsertRedirect appends the 308 to https:// for host on the plaintext "piper"
+// server, under its own stable @id so redeploys replace it in place.
+func (c *Client) upsertRedirect(host string) error {
+	route := map[string]any{
+		"@id":   redirectID(host),
+		"match": []map[string]any{{"host": []string{host}}},
+		"handle": []map[string]any{{
+			"handler":     "static_response",
+			"status_code": 308,
+			// Placeholders keep the port and path/query of the original
+			// request, so a redirect is never lossy.
+			"headers": map[string][]string{
+				"Location": {"https://{http.request.host}{http.request.uri}"},
+			},
+		}},
+	}
+	if err := c.removeByID(redirectID(host)); err != nil {
+		return err
+	}
+	return c.write(http.MethodPost, "/config/apps/http/servers/piper/routes", route)
 }
 
 func (c *Client) upsertRoute(server, host string, upstreamHostPort int) error {
@@ -41,7 +79,9 @@ func (c *Client) upsertRoute(server, host string, upstreamHostPort int) error {
 			"upstreams": []map[string]any{{"dial": fmt.Sprintf("127.0.0.1:%d", upstreamHostPort)}},
 		}},
 	}
-	if err := c.RemoveRoute(host); err != nil {
+	// Only this route's own id: the paired redirect has its own, and
+	// UpsertRouteTLS replaces it separately.
+	if err := c.removeByID(routeID(host)); err != nil {
 		return err
 	}
 	return c.write(http.MethodPost, "/config/apps/http/servers/"+server+"/routes", route)
@@ -87,10 +127,19 @@ func (c *Client) EnsureHTTPS(listen string) error {
 	return nil
 }
 
-// RemoveRoute deletes the route addressed by the host's stable id.
-// A missing route (404) is not an error.
+// RemoveRoute deletes the route addressed by the host's stable id, and the
+// :80 redirect that UpsertRouteTLS pairs with it. A missing route (404) is not
+// an error, so this is a no-op for the hosts that never had a redirect.
 func (c *Client) RemoveRoute(host string) error {
-	url := c.base + "/id/" + routeID(host)
+	if err := c.removeByID(routeID(host)); err != nil {
+		return err
+	}
+	return c.removeByID(redirectID(host))
+}
+
+// removeByID deletes one config object by its @id; 404 is not an error.
+func (c *Client) removeByID(id string) error {
+	url := c.base + "/id/" + id
 	req, _ := http.NewRequest(http.MethodDelete, url, nil)
 	resp, err := c.http.Do(req)
 	if err != nil {

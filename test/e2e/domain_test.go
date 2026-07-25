@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -383,6 +384,26 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	}
 	if customResp == "" {
 		t.Fatal("no response on the per-app custom domain through the relay")
+	}
+
+	// Browsers default to http://, so the bare domain must not dead-end: the
+	// relay's :80 listener carries the request over the tunnel to the box's
+	// plaintext Caddy, which answers 308 to https:// (#357). Without the
+	// redirect route nothing on that server matches the host and the visitor
+	// never reaches the app.
+	httpConn, err := net.Dial("tcp", "127.0.0.1:8880")
+	if err != nil {
+		t.Fatalf("dial relay :80: %v", err)
+	}
+	fmt.Fprintf(httpConn, "GET /pricing HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", custom)
+	hb, _ := io.ReadAll(httpConn)
+	httpConn.Close()
+	redirResp := string(hb)
+	if !strings.Contains(redirResp, "308") {
+		t.Fatalf("http:// on the custom domain did not redirect:\n%s", redirResp)
+	}
+	if !strings.Contains(redirResp, "Location: https://"+custom+"/pricing") {
+		t.Fatalf("redirect must preserve host and path; got:\n%s", redirResp)
 	}
 
 	// Coexistence: the shared-domain URL still serves.
