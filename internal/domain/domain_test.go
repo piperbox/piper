@@ -309,6 +309,33 @@ func TestSetIssuesAndActivates(t *testing.T) {
 	}
 }
 
+// Set documents that it returns the freshly-kicked "issuing" state, but it
+// re-read the store after spawning the issue loop, so a loop that reached
+// active first won the read and Set returned "active" instead (#354 — a CI
+// flake, because a real ACME Obtain takes seconds and the fake one is
+// instant). The genBumpHook seam fires between the snapshot and the spawn,
+// so activating the config there is exactly the interleaving that used to
+// lose: with the snapshot taken up front the return value is unaffected.
+func TestSetReturnsIssuingSnapshot(t *testing.T) {
+	m, st, _, _, _ := newTestManager(t, &fakeIssuer{})
+	m.genBumpHook = func() {
+		if err := st.UpdateDomainStatus("example.com", StatusActive, "", time.Now().Add(24*time.Hour)); err != nil {
+			t.Errorf("activate during bump: %v", err)
+		}
+	}
+
+	status, err := m.Set("example.com", "cloudflare", "tok")
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	if status.Status != StatusIssuing {
+		t.Fatalf("Set returned status %q, want %q", status.Status, StatusIssuing)
+	}
+	if status.Domain != "example.com" {
+		t.Fatalf("Set returned domain %q, want example.com", status.Domain)
+	}
+}
+
 func TestSetValidation(t *testing.T) {
 	m, _, _, _, _ := newTestManager(t, &fakeIssuer{})
 	if _, err := m.Set("not a domain", "cloudflare", "tok"); !errors.Is(err, ErrInvalidDomain) {

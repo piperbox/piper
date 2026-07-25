@@ -104,14 +104,14 @@ func TestEnsureHTTPSIsIdempotent(t *testing.T) {
 }
 
 func TestUpsertRouteTLSTargetsTLSServer(t *testing.T) {
-	var postPath string
+	var postPaths []string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			w.WriteHeader(http.StatusNotFound) // no prior route
 			return
 		}
 		if r.Method == http.MethodPost {
-			postPath = r.URL.Path
+			postPaths = append(postPaths, r.URL.Path)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -119,7 +119,153 @@ func TestUpsertRouteTLSTargetsTLSServer(t *testing.T) {
 	if err := NewClient(ts.URL).UpsertRouteTLS("blog.example.com", 40001); err != nil {
 		t.Fatalf("UpsertRouteTLS: %v", err)
 	}
-	if postPath != "/config/apps/http/servers/piper-tls/routes" {
-		t.Fatalf("posted to %q, want piper-tls routes", postPath)
+	// The reverse proxy goes on piper-tls; the paired :80 redirect goes on
+	// piper (asserted in TestUpsertRouteTLSArmsHTTPRedirect).
+	var sawTLS bool
+	for _, p := range postPaths {
+		if p == "/config/apps/http/servers/piper-tls/routes" {
+			sawTLS = true
+		}
+	}
+	if !sawTLS {
+		t.Fatalf("posted to %q, want a POST to piper-tls routes", postPaths)
+	}
+}
+
+// recordingCaddy captures every admin call so the route/redirect pairing can
+// be asserted as a whole.
+type caddyCall struct{ method, path, body string }
+
+func recordingCaddy(t *testing.T) (*httptest.Server, *[]caddyCall) {
+	t.Helper()
+	var calls []caddyCall
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		calls = append(calls, caddyCall{r.Method, r.URL.Path, string(b)})
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNotFound) // nothing there yet
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+	return ts, &calls
+}
+
+// A host served over the box-terminated :443 must also answer on :80, or a
+// visitor typing the bare domain gets a 404 — browsers default to http://.
+// The "piper" server has automatic_https disabled, so Caddy provisions no
+// redirect of its own and it has to be an explicit route (#357).
+func TestUpsertRouteTLSArmsHTTPRedirect(t *testing.T) {
+	ts, calls := recordingCaddy(t)
+	if err := NewClient(ts.URL).UpsertRouteTLS("myshop.com", 40001); err != nil {
+		t.Fatalf("UpsertRouteTLS: %v", err)
+	}
+
+	var tlsPost, redirPost *caddyCall
+	for i := range *calls {
+		c := &(*calls)[i]
+		if c.method != http.MethodPost {
+			continue
+		}
+		switch c.path {
+		case "/config/apps/http/servers/piper-tls/routes":
+			tlsPost = c
+		case "/config/apps/http/servers/piper/routes":
+			redirPost = c
+		}
+	}
+	if tlsPost == nil {
+		t.Fatalf("no reverse-proxy route posted to piper-tls; got %+v", *calls)
+	}
+	if redirPost == nil {
+		t.Fatalf("no redirect route posted to the plaintext piper server; got %+v", *calls)
+	}
+
+	var route struct {
+		ID     string                    `json:"@id"`
+		Match  []struct{ Host []string } `json:"match"`
+		Handle []struct {
+			Handler    string              `json:"handler"`
+			StatusCode int                 `json:"status_code"`
+			Headers    map[string][]string `json:"headers"`
+		} `json:"handle"`
+	}
+	if err := json.Unmarshal([]byte(redirPost.body), &route); err != nil {
+		t.Fatalf("redirect body not JSON: %v (%s)", err, redirPost.body)
+	}
+	if len(route.Match) != 1 || len(route.Match[0].Host) != 1 || route.Match[0].Host[0] != "myshop.com" {
+		t.Fatalf("redirect must match the exact host; got %+v", route.Match)
+	}
+	if len(route.Handle) != 1 || route.Handle[0].Handler != "static_response" {
+		t.Fatalf("want a static_response handler, got %+v", route.Handle)
+	}
+	if route.Handle[0].StatusCode != 308 {
+		t.Fatalf("status_code = %d, want 308", route.Handle[0].StatusCode)
+	}
+	loc := route.Handle[0].Headers["Location"]
+	if len(loc) != 1 || !strings.HasPrefix(loc[0], "https://") {
+		t.Fatalf("Location = %v, want a single https:// redirect", loc)
+	}
+
+	// The two routes live on different servers under the SAME host, so they
+	// must not share an @id — routeID is keyed on host alone and upsertRoute
+	// deletes by id first, so a shared id would make them evict each other.
+	if route.ID == routeID("myshop.com") {
+		t.Fatalf("redirect reuses the reverse-proxy route id %q; they would evict each other", route.ID)
+	}
+	if !strings.Contains(tlsPost.body, routeID("myshop.com")) {
+		t.Fatalf("tls route missing its own id: %s", tlsPost.body)
+	}
+}
+
+// Re-deploying a custom domain must replace both routes in place, never leave
+// a second copy behind: each upsert deletes its own id first.
+func TestUpsertRouteTLSDeletesBothIDsBeforeAppending(t *testing.T) {
+	ts, calls := recordingCaddy(t)
+	if err := NewClient(ts.URL).UpsertRouteTLS("myshop.com", 40001); err != nil {
+		t.Fatalf("UpsertRouteTLS: %v", err)
+	}
+	deleted := map[string]bool{}
+	for _, c := range *calls {
+		if c.method == http.MethodDelete {
+			deleted[strings.TrimPrefix(c.path, "/id/")] = true
+		}
+	}
+	if !deleted[routeID("myshop.com")] {
+		t.Errorf("reverse-proxy route id never deleted; deletes = %v", deleted)
+	}
+	if !deleted[redirectID("myshop.com")] {
+		t.Errorf("redirect route id never deleted; deletes = %v", deleted)
+	}
+}
+
+// Stop/delete/teardown drop a host through RemoveRoute; the redirect must go
+// with it or :80 keeps redirecting to a domain that no longer serves.
+func TestRemoveRouteDropsTheRedirectToo(t *testing.T) {
+	ts, calls := recordingCaddy(t)
+	if err := NewClient(ts.URL).RemoveRoute("myshop.com"); err != nil {
+		t.Fatalf("RemoveRoute: %v", err)
+	}
+	deleted := map[string]bool{}
+	for _, c := range *calls {
+		if c.method == http.MethodDelete {
+			deleted[strings.TrimPrefix(c.path, "/id/")] = true
+		}
+	}
+	if !deleted[routeID("myshop.com")] || !deleted[redirectID("myshop.com")] {
+		t.Fatalf("RemoveRoute deleted %v, want both the route and the redirect id", deleted)
+	}
+}
+
+// The two id namespaces must not be able to collide: without a separator that
+// cannot occur in a hostname, the redirect for "example.com" and the route for
+// a host literally named "redirect-example.com" would share an id.
+func TestRouteAndRedirectIDsCannotCollide(t *testing.T) {
+	if redirectID("example.com") == routeID("redirect-example.com") {
+		t.Fatalf("id collision: redirectID(example.com) == routeID(redirect-example.com) == %q", redirectID("example.com"))
+	}
+	if strings.ContainsAny(redirectID("example.com"), "/") {
+		t.Fatalf("redirect id %q contains a slash; it is used as a URL path segment", redirectID("example.com"))
 	}
 }
