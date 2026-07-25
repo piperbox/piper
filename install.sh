@@ -146,3 +146,30 @@ case ":$PATH:" in
 	*":$prefix:"*) ;;
 	*) echo "note: $prefix is not on your PATH — add it to use piper" ;;
 esac
+
+# A copy earlier on PATH wins over the one just written, so the install looks
+# successful while the old binary keeps running — three upgrades in a row on a
+# real box read as "the fix didn't work" because of this. Under sudo the check
+# would use root's PATH and miss the invoking user's ~/.local/bin entirely, so
+# that location is probed directly.
+warn_shadow() {
+	name="$1"
+	found="$(command -v "$name" 2>/dev/null || true)"
+	if [ -n "$found" ] && [ "$found" != "$prefix/$name" ]; then
+		echo "warning: $found shadows $prefix/$name on your PATH — that older copy is what will run"
+		echo "         remove it, or put $prefix first in PATH"
+		return 0
+	fi
+	if [ -n "${SUDO_USER:-}" ]; then
+		home="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)"
+		other="$home/.local/bin/$name"
+		if [ -n "$home" ] && [ "$other" != "$prefix/$name" ] && [ -x "$other" ]; then
+			echo "warning: $other shadows $prefix/$name on $SUDO_USER's PATH — that older copy is what will run"
+			echo "         remove it, or put $prefix first in PATH"
+		fi
+	fi
+	return 0
+}
+
+warn_shadow piper
+[ -n "$cli_only" ] || warn_shadow piperd

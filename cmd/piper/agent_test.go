@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -974,6 +975,135 @@ func daemonizeDirs(t *testing.T) (binDir, unitDir, envDir string) {
 	systemBinDir, systemUnitDir, systemEnvDir = binDir, unitDir, envDir
 	t.Cleanup(func() { systemBinDir, systemUnitDir, systemEnvDir = oldBin, oldUnit, oldEnv })
 	return binDir, unitDir, envDir
+}
+
+// stubBinaryVersion maps a binary path to the version it reports.
+func stubBinaryVersion(t *testing.T, versions map[string]string) {
+	t.Helper()
+	old := binaryVersion
+	binaryVersion = func(path string) (string, error) {
+		v, ok := versions[path]
+		if !ok {
+			return "", errors.New("no version for " + path)
+		}
+		return v, nil
+	}
+	t.Cleanup(func() { binaryVersion = old })
+}
+
+// promotionDirs sets up a daemonize run: root, SUDO_USER, a stubbed home with
+// ~/.local/bin binaries, temp system dirs, and a systemctl that reports healthy.
+func promotionDirs(t *testing.T, rootlessBody string) (home, binDir string) {
+	t.Helper()
+	onLinux(t)
+	oldEUID := agentEUID
+	agentEUID = func() int { return 0 }
+	t.Cleanup(func() { agentEUID = oldEUID })
+	t.Setenv("SUDO_USER", "alice")
+
+	home = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".local", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []string{"piperd", "piper"} {
+		if err := os.WriteFile(filepath.Join(home, ".local", "bin", n), []byte(rootlessBody), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldHome := userHomeDir
+	userHomeDir = func(string) (string, error) { return home, nil }
+	t.Cleanup(func() { userHomeDir = oldHome })
+
+	binDir, _, _ = daemonizeDirs(t)
+	t.Cleanup(fastPoll(t))
+	oldRun := systemctlRun
+	systemctlRun = func(args ...string) (string, error) {
+		if len(args) >= 1 && args[0] == "is-active" {
+			return "active", nil
+		}
+		return "", nil
+	}
+	t.Cleanup(func() { systemctlRun = oldRun })
+	return home, binDir
+}
+
+// Observed on a real Pi: `piper agent daemonize` copied a stale 0.8.6 from
+// ~/.local/bin over the 0.8.7 the installer had just written to /usr/local/bin,
+// silently downgrading the system service. Three upgrades in a row appeared not
+// to take.
+func TestDaemonizeDoesNotDowngradeSystemBinary(t *testing.T) {
+	home, binDir := promotionDirs(t, "STALE-0.8.6")
+	for _, n := range []string{"piperd", "piper"} {
+		if err := os.WriteFile(filepath.Join(binDir, n), []byte("FRESH-0.8.7"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubBinaryVersion(t, map[string]string{
+		filepath.Join(home, ".local", "bin", "piperd"): "0.8.6",
+		filepath.Join(home, ".local", "bin", "piper"):  "0.8.6",
+		filepath.Join(binDir, "piperd"):                "0.8.7",
+		filepath.Join(binDir, "piper"):                 "0.8.7",
+	})
+
+	var out, errb bytes.Buffer
+	if code := agent([]string{"daemonize"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, errb.String())
+	}
+	for _, n := range []string{"piperd", "piper"} {
+		if b, _ := os.ReadFile(filepath.Join(binDir, n)); string(b) != "FRESH-0.8.7" {
+			t.Errorf("%s was downgraded: system copy is now %q", n, string(b))
+		}
+	}
+	if !strings.Contains(out.String()+errb.String(), "0.8.6") {
+		t.Errorf("the skipped older copy must be named:\n%s%s", out.String(), errb.String())
+	}
+}
+
+// The promotion path this copy exists for still has to work: a rootless install
+// that is genuinely newer must replace an older system binary.
+func TestDaemonizePromotesNewerRootlessBinary(t *testing.T) {
+	home, binDir := promotionDirs(t, "NEW-0.9.0")
+	for _, n := range []string{"piperd", "piper"} {
+		if err := os.WriteFile(filepath.Join(binDir, n), []byte("OLD-0.8.0"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stubBinaryVersion(t, map[string]string{
+		filepath.Join(home, ".local", "bin", "piperd"): "0.9.0",
+		filepath.Join(home, ".local", "bin", "piper"):  "0.9.0",
+		filepath.Join(binDir, "piperd"):                "0.8.0",
+		filepath.Join(binDir, "piper"):                 "0.8.0",
+	})
+
+	var out, errb bytes.Buffer
+	if code := agent([]string{"daemonize"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, errb.String())
+	}
+	for _, n := range []string{"piperd", "piper"} {
+		if b, _ := os.ReadFile(filepath.Join(binDir, n)); string(b) != "NEW-0.9.0" {
+			t.Errorf("%s not promoted: system copy is %q", n, string(b))
+		}
+	}
+}
+
+func TestVersionNewer(t *testing.T) {
+	for _, c := range []struct {
+		a, b string
+		want bool
+	}{
+		{"0.8.7", "0.8.6", true},
+		{"0.8.6", "0.8.7", false},
+		{"0.9.0", "0.8.99", true},
+		{"1.0.0", "0.99.99", true},
+		{"0.8.7", "0.8.7", false},
+		{"0.8.10", "0.8.9", true}, // numeric, not lexical
+		{"garbage", "0.8.7", false},
+		{"0.8.7", "garbage", false},
+	} {
+		if got := versionNewer(c.a, c.b); got != c.want {
+			t.Errorf("versionNewer(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
 }
 
 func TestDaemonizePromotes(t *testing.T) {

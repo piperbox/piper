@@ -191,6 +191,59 @@ func TestDefaultInstallsBothBinaries(t *testing.T) {
 	}
 }
 
+// A copy earlier on PATH silently wins over the one just installed. On a real
+// Pi this made three consecutive upgrades look like they had not taken: the
+// installer reported success writing 0.8.7 to /usr/local/bin while the shell
+// kept running an 0.8.6 from ~/.local/bin. Reporting "installed" without
+// mentioning the shadow is the installer telling a half-truth.
+func TestWarnsWhenAnotherCopyShadowsThePrefix(t *testing.T) {
+	tag := "v9.9.9"
+	srv := newReleaseServer(t, bothArchives(t, tag), nil)
+
+	// A decoy piper earlier on PATH than the install prefix.
+	shadowDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(shadowDir, "piper"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prefix := t.TempDir()
+	out, err := run(t, nil, map[string]string{
+		"PIPER_BASE_URL": srv.URL,
+		"PIPER_VERSION":  tag,
+		"PIPER_PREFIX":   prefix,
+		"PATH":           shadowDir + ":" + prefix + ":" + os.Getenv("PATH"),
+	})
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, filepath.Join(shadowDir, "piper")) {
+		t.Errorf("installer must name the shadowing copy, got:\n%s", out)
+	}
+	if !strings.Contains(out, "shadow") {
+		t.Errorf("installer must call it a shadow, got:\n%s", out)
+	}
+}
+
+// The warning must not fire when the installed copy is the one that resolves —
+// a caveat printed on every clean install is one people stop reading.
+func TestNoShadowWarningWhenPrefixWins(t *testing.T) {
+	tag := "v9.9.9"
+	srv := newReleaseServer(t, bothArchives(t, tag), nil)
+
+	prefix := t.TempDir()
+	out, err := run(t, nil, map[string]string{
+		"PIPER_BASE_URL": srv.URL,
+		"PIPER_VERSION":  tag,
+		"PIPER_PREFIX":   prefix,
+		"PATH":           prefix + ":" + os.Getenv("PATH"),
+	})
+	if err != nil {
+		t.Fatalf("install failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "shadow") {
+		t.Errorf("no shadow exists; warning must stay quiet:\n%s", out)
+	}
+}
+
 func TestDefaultPrefixIsHomeLocalBin(t *testing.T) {
 	if os.Getuid() == 0 {
 		t.Skip("non-root default prefix requires a non-root user")
