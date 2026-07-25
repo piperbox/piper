@@ -538,10 +538,16 @@ func main() {
 				dep.ResumeRoutes()
 			}
 		}
-		go tc.Run(ctx, cfg.RelayAddr, cfg.RelayToken, cfg.BaseDomain, dialLocal)
+		// The registrar must be installed BEFORE the tunnel starts: OnConnect
+		// calls dep.ResumeRoutes, which reads it. Starting tc.Run first both
+		// races that read and — if the connect won — would resolve primaryHost
+		// with a nil registrar and arm "<app>.<base>" instead of the
+		// relay-assigned hostname, leaving the real URL unrouted. Setting it
+		// here gives the goroutine a happens-before edge (#373).
 		if cfg.Terminated {
 			dep.SetHostnameRegistrar(tc)
 		}
+		go tc.Run(ctx, cfg.RelayAddr, cfg.RelayToken, cfg.BaseDomain, dialLocal)
 		domMgr.SetRelay(tc)
 		if cfg.Terminated {
 			domMgr.Resume() // box-wide API-managed config; env mode has none
