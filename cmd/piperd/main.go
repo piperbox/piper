@@ -78,6 +78,56 @@ type relayTokenStore interface {
 	DeleteToken(label string) error
 }
 
+// relayAppStore is the store slice the per-connect app re-push needs.
+type relayAppStore interface {
+	ListApps() ([]store.App, error)
+}
+
+// relayAppAnnouncer is the tunnel-client slice the per-connect app re-push
+// needs.
+type relayAppAnnouncer interface {
+	BindRepo(app, repo, branch string) error
+	Register(app string, pr int) (string, error)
+}
+
+// repushRelayApps re-announces this box's per-app relay state on every tunnel
+// (re)connect. The relay's router is in-memory, and when a session registers it
+// re-derives only the custom domains it can attribute to that agent. Two things
+// have to come from the box instead:
+//
+//   - repo bindings, which live only in the box's store;
+//   - relay-assigned hostnames (#369) — the relay's hostnames table is keyed by
+//     account, not agent, so it cannot safely hand one box's session the
+//     account's whole app list; only the box knows which apps are its own.
+//     Without this, every <hash>-<user> URL drops TLS after a relay restart or
+//     a tunnel flap until the app is redeployed, while custom domains keep
+//     serving.
+//
+// Only apps that already hold a hostname are re-registered, and registration is
+// idempotent on the relay, so this claims no new hostname and consumes no app
+// quota. terminated is false on a BYO/LAN box, which has no relay-assigned
+// hostnames at all. One app's failure must not strand the rest, so errors are
+// logged and the loop continues; the next connect retries.
+func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
+	apps, err := st.ListApps()
+	if err != nil {
+		log.Printf("relay: re-push apps: %v", err)
+		return
+	}
+	for _, a := range apps {
+		if a.Repo != "" {
+			if err := tc.BindRepo(a.Name, a.Repo, a.Branch); err != nil {
+				log.Printf("relay: re-bind %s: %v", a.Name, err)
+			}
+		}
+		if terminated && a.Hostname != "" {
+			if _, err := tc.Register(a.Name, 0); err != nil {
+				log.Printf("relay: re-register %s: %v", a.Name, err)
+			}
+		}
+	}
+}
+
 // provisionRelayControl mints a control-API token for the relay and pushes it
 // over the tunnel, once per enrollment (agent-push Token B — see the
 // control-stream routing design). The token row itself is the marker: any row
@@ -479,21 +529,7 @@ func main() {
 			if cfg.Terminated {
 				domMgr.OnRelayConnect() // gated like Resume: box-wide API configs exist only here
 			}
-			// The relay restores its routing table from its own store when a
-			// session registers, but repo bindings live only in the box's
-			// store — there is no agent-side hostname re-registration to hook
-			// instead, so every (re)connect re-pushes them here.
-			apps, err := st.ListApps()
-			if err == nil {
-				for _, a := range apps {
-					if a.Repo == "" {
-						continue
-					}
-					if err := tc.BindRepo(a.Name, a.Repo, a.Branch); err != nil {
-						log.Printf("relay: re-bind %s: %v", a.Name, err)
-					}
-				}
-			}
+			repushRelayApps(st, tc, cfg.Terminated)
 		}
 		go tc.Run(ctx, cfg.RelayAddr, cfg.RelayToken, cfg.BaseDomain, dialLocal)
 		if cfg.Terminated {

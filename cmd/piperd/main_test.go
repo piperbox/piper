@@ -577,3 +577,95 @@ func TestProvisionRelayControlConcurrentSingleMint(t *testing.T) {
 		t.Fatalf("minted %d relay tokens under concurrent OnConnect, want exactly 1", s.creates)
 	}
 }
+
+// repushStore is the ListApps slice repushRelayApps needs.
+type repushStore struct {
+	apps []store.App
+	err  error
+}
+
+func (s *repushStore) ListApps() ([]store.App, error) { return s.apps, s.err }
+
+// repushAnnouncer records what the re-push announced to the relay.
+type repushAnnouncer struct {
+	binds       []string
+	registered  []string
+	registerErr error
+}
+
+func (a *repushAnnouncer) BindRepo(app, repo, branch string) error {
+	a.binds = append(a.binds, app+"="+repo+"@"+branch)
+	return nil
+}
+
+func (a *repushAnnouncer) Register(app string, pr int) (string, error) {
+	a.registered = append(a.registered, app)
+	return app + ".relay.example", a.registerErr
+}
+
+// TestRepushRelayAppsReregistersHostnames pins #369: the relay's router keeps
+// relay-assigned hostnames in memory only, and re-derives just custom domains
+// when a session registers — so after a relay restart or tunnel flap every
+// <hash>-<user> URL drops TLS until the app is redeployed. The box re-announces
+// its own hostnames on every (re)connect to close that window.
+func TestRepushRelayAppsReregistersHostnames(t *testing.T) {
+	st := &repushStore{apps: []store.App{
+		{Name: "test1", Hostname: "855d1432-ozykhan.relay.example"},
+		{Name: "test2"}, // never deployed: no hostname to restore
+	}}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, true)
+
+	if want := []string{"test1"}; !reflect.DeepEqual(a.registered, want) {
+		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	}
+}
+
+// TestRepushRelayAppsSkipsHostnamesWhenNotTerminated keeps a BYO/LAN box out of
+// it: with no relay-terminated hostnames, there is nothing to re-register, and
+// registering would claim relay hostnames the box never asked for.
+func TestRepushRelayAppsSkipsHostnamesWhenNotTerminated(t *testing.T) {
+	st := &repushStore{apps: []store.App{
+		{Name: "test1", Hostname: "test1.piper.localhost"},
+	}}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, false)
+
+	if len(a.registered) != 0 {
+		t.Fatalf("re-registered %v on a non-terminated box, want none", a.registered)
+	}
+}
+
+// TestRepushRelayAppsStillBindsRepos guards the pre-existing re-push the
+// hostname restore was folded into.
+func TestRepushRelayAppsStillBindsRepos(t *testing.T) {
+	st := &repushStore{apps: []store.App{
+		{Name: "test1", Repo: "ozykhan/test1", Branch: "main", Hostname: "h.relay.example"},
+		{Name: "test2"}, // no repo: nothing to bind
+	}}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, true)
+
+	if want := []string{"test1=ozykhan/test1@main"}; !reflect.DeepEqual(a.binds, want) {
+		t.Fatalf("re-bound %v, want %v", a.binds, want)
+	}
+}
+
+// TestRepushRelayAppsRegisterErrorDoesNotStopOthers keeps one failing app from
+// stranding the rest of the box's URLs.
+func TestRepushRelayAppsRegisterErrorDoesNotStopOthers(t *testing.T) {
+	st := &repushStore{apps: []store.App{
+		{Name: "test1", Hostname: "a.relay.example"},
+		{Name: "test2", Hostname: "b.relay.example"},
+	}}
+	a := &repushAnnouncer{registerErr: errors.New("relay: quota exceeded")}
+
+	repushRelayApps(st, a, true)
+
+	if want := []string{"test1", "test2"}; !reflect.DeepEqual(a.registered, want) {
+		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	}
+}
