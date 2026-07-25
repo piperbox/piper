@@ -544,15 +544,25 @@ func (d *Deployer) Stop(ctx context.Context, appName string) error {
 		return err
 	}
 	_ = d.runtime.Stop(ctx, dep.ContainerID)
+	// The container is down, so the row must say so even if the route teardown
+	// below fails: Start no-ops on anything but a "stopped" row, so returning
+	// early here left the app stopped-but-marked-running and unstartable from
+	// every UI — only a redeploy rewrote the row (#377). A stale route pointing
+	// at a dead upstream is the lesser evil and the next deploy or stop clears
+	// it. The failure is still reported, just after the row is honest.
+	var routeErr error
 	if host, ok := d.primaryHost(appName); ok {
 		if err := d.routes.RemoveRoute(host); err != nil {
-			return fmt.Errorf("unroute: %w", err)
+			routeErr = fmt.Errorf("unroute: %w", err)
 		}
 	}
-	if err := d.removeCustomDomainRoute(appName); err != nil {
+	if err := d.removeCustomDomainRoute(appName); err != nil && routeErr == nil {
+		routeErr = err
+	}
+	if err := d.store.UpdateDeploymentStatus(dep.ID, "stopped"); err != nil {
 		return err
 	}
-	return d.store.UpdateDeploymentStatus(dep.ID, "stopped")
+	return routeErr
 }
 
 // addCustomDomainRoute re-arms the app's custom-domain routes over the
