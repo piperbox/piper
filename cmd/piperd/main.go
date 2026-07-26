@@ -256,26 +256,47 @@ func loopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+// dialAddr turns one of Caddy's *listen* addresses into a dialable one. Listen
+// addresses are routinely port-only (":8080") or wildcard ("0.0.0.0:8080"), and
+// neither can be dialed as a destination, so an unspecified host becomes
+// loopback. An address that already names a host is returned untouched.
+func dialAddr(listenAddr string) string {
+	host, port, err := net.SplitHostPort(listenAddr)
+	if err != nil {
+		return listenAddr
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		return net.JoinHostPort("127.0.0.1", port)
+	}
+	return listenAddr
+}
+
 // newDialLocal maps relay tunnel stream kinds to local addresses. Control
 // streams go to the authenticated listener (authAddr) — never the tokenless
 // local one, or the relay path would silently lose its bearer gate (#221).
-// KindHTTP is plaintext HTTP for the box's :80 in every mode — Caddy listens
-// there in terminated mode (relay-terminated shared-domain apps) and in BYO
-// mode alike, which is what lets custom-domain port-80 traffic reach the box
+// KindHTTP is plaintext HTTP for the box's HTTP listener in every mode — Caddy
+// listens there in terminated mode (relay-terminated shared-domain apps) and in
+// BYO mode alike, which is what lets custom-domain port-80 traffic reach the box
 // (#228). Passthrough streams whose ClientHello offers acme-tls/1 are
 // TLS-ALPN-01 validations and are spliced to the in-process solver (alpnAddr)
-// instead of Caddy (caddyAddr), with the peeked hello replayed into whichever
+// instead of Caddy (httpsAddr), with the peeked hello replayed into whichever
 // backend is dialed (#226).
-func newDialLocal(authAddr, alpnAddr, caddyAddr string) func(kind byte, stream net.Conn) (net.Conn, error) {
+//
+// httpAddr/httpsAddr come from cfg and are NOT assumed to be :80/:443: a
+// rootless install cannot bind a low port, so the macOS LaunchAgent runs Caddy
+// on :8080/:8443. Hardcoding the privileged ports here made every such box
+// silently unroutable from the relay while its apps were perfectly healthy
+// (#399).
+func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte, stream net.Conn) (net.Conn, error) {
 	return func(kind byte, stream net.Conn) (net.Conn, error) {
 		switch {
 		case kind == tunnel.KindControlAPI:
 			return net.Dial("tcp", authAddr)
 		case kind == tunnel.KindHTTP:
-			return net.Dial("tcp", "127.0.0.1:80")
+			return net.Dial("tcp", httpAddr)
 		default:
 			acme, consumed := agent.PeekALPN(stream)
-			addr := caddyAddr
+			addr := httpsAddr
 			if acme && alpnAddr != "" {
 				addr = alpnAddr
 			}
@@ -514,7 +535,7 @@ func main() {
 	// cert, serves :443, and answers KindPassthrough streams. Control streams go
 	// to the authenticated listener — never the tokenless local one.
 	if cfg.RelayAddr != "" {
-		dialLocal := newDialLocal(authAddr, alpnSolver.Addr(), "127.0.0.1:443")
+		dialLocal := newDialLocal(authAddr, alpnSolver.Addr(), dialAddr(cfg.HTTPAddr), dialAddr(cfg.HTTPSAddr))
 		if !cfg.Terminated {
 			if cfg.TLSCertFile != "" {
 				certPEM, err := os.ReadFile(cfg.TLSCertFile)
