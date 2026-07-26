@@ -120,7 +120,7 @@ Goal: bare `piper` in a TTY opens a full-screen control surface; every existing 
 - ✅ TUI skeleton: bare-piper TTY entry, root model + view stack + 2s poll, status bar, read-only apps table — [#185](https://github.com/piperbox/piper/issues/185)
 - ✅ Drill-down: app detail + live deployments table, per-deployment log viewer with follow, breadcrumb navigation — [#191](https://github.com/piperbox/piper/issues/191)
 - ✅ Actions: new-app form, deploy (confirm → live build), stop/delete confirms — [#194](https://github.com/piperbox/piper/issues/194)
-- ✅ Key discoverability: dim footer legend on nav views + `?` help overlay — [#196](https://github.com/piperbox/piper/issues/196)
+- ✅ Key discoverability: dim footer legend on every view (the `?` help overlay it shipped with is gone — footers cover it) — [#196](https://github.com/piperbox/piper/issues/196)
 - ✅ Boxes view: switcher + add/edit/remove config editor over schema v2 — [#198](https://github.com/piperbox/piper/issues/198)
 - ✅ Wizards: login (LAN token, verify → save to current box), GitHub App setup, link repo; unauth hint on apps home — [#200](https://github.com/piperbox/piper/issues/200)
 - ✅ Per-app domains in the app drilldown: inline list + add (CNAME handoff, live issuance status) / remove — [#285](https://github.com/piperbox/piper/issues/285)

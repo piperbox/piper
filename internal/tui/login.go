@@ -44,7 +44,7 @@ func (v loginView) refresh(API) tea.Cmd { return nil }
 
 func (v loginView) capturesText() bool { return true }
 
-func (v loginView) footer() string { return "↵ verify & save · esc cancel · ? help" }
+func (v loginView) footer() string { return "↵ verify & save · esc cancel" }
 
 // submit verifies the token against the current box and, on success, saves it
 // and emits boxSavedMsg{replacing: box} — the root re-dials the current box via

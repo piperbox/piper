@@ -26,7 +26,7 @@ func (v domainDetailView) Init() tea.Cmd { return nil }
 
 func (v domainDetailView) title() string { return "domain" }
 
-func (v domainDetailView) footer() string { return "esc back · ? help" }
+func (v domainDetailView) footer() string { return "esc back" }
 
 func (v domainDetailView) refresh(c API) tea.Cmd {
 	app, dom := v.app, v.st.Domain

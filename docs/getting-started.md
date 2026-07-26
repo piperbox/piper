@@ -123,7 +123,8 @@ piper            # opens the TUI against the current box
 - **Wizards** — login, `piper connect`, GitHub App setup, and repo linking run
   interactively.
 
-Keys: `↵` open · `esc` back · `t` boxes · `?` help · `q` quit.
+Keys: `↵` open · `esc` back · `t` boxes · `q` quit. Every screen lists its own
+keys in a dim legend along the bottom.
 Run it on the box and it's authless (see below); point it at a remote box with
 `piper --remote <base-domain>`. Non-TTY invocation (scripts, pipes) is
 untouched — bare `piper` with no terminal still prints usage and exits 2.

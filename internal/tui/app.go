@@ -126,11 +126,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.stack = m.stack[:len(m.stack)-1]
 				return m, m.refresh()
-			case "?":
-				if _, ok := m.top().(helpView); !ok {
-					return m, func() tea.Msg { return pushMsg{helpView{}} }
-				}
-				return m, nil
 			case "t":
 				if _, ok := m.top().(boxesView); !ok {
 					return m, func() tea.Msg { return pushMsg{newBoxesView(m.dial)} }

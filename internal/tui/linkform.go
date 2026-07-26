@@ -90,7 +90,7 @@ func loadLinkRepos(relay RelayDialer) tea.Msg {
 func (v linkFormView) capturesText() bool { return true }
 
 func (v linkFormView) footer() string {
-	return "↵ link · tab switch · ↑↓ pick · esc cancel · ? help"
+	return "↵ link · tab switch · ↑↓ pick · esc cancel"
 }
 
 func (v *linkFormView) applyFocus() {
