@@ -26,7 +26,7 @@ func (v appsView) title() string { return "apps" }
 func (v appsView) count() int { return len(v.apps) }
 
 func (v appsView) footer() string {
-	return "n new · L login · g github · t boxes · ↵ open · q quit"
+	return "n new · g github · t boxes · ↵ open · q quit"
 }
 
 func (v appsView) refresh(c API) tea.Cmd {
@@ -74,7 +74,7 @@ func (v appsView) View() string {
 	var b strings.Builder
 	if v.err != nil {
 		if isUnauthorized(v.err) {
-			b.WriteString(" not logged in — press L to log in\n\n")
+			b.WriteString(" " + unauthorizedHint(v.remote) + "\n\n")
 		} else {
 			fmt.Fprintf(&b, " ⚠ %v\n\n", v.err)
 		}

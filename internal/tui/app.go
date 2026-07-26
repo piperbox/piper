@@ -131,11 +131,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, func() tea.Msg { return pushMsg{newBoxesView(m.dial)} }
 				}
 				return m, nil
-			case "L":
-				if _, ok := m.top().(loginView); !ok {
-					return m, func() tea.Msg { return pushMsg{newLoginView(m.dial, m.box)} }
-				}
-				return m, nil
 			case "g":
 				if _, ok := m.top().(githubWizardView); !ok {
 					return m, func() tea.Msg { return pushMsg{newGithubWizard(m.relay)} }
@@ -330,11 +325,21 @@ func (m Model) View() string {
 	return body + "\n\n" + m.statusBar()
 }
 
+// unauthorizedHint names the repair path for a 401: a relay-backed box needs a
+// fresh account credential (the github wizard re-logs-in), a LAN box needs a
+// new agent token pasted into its box entry.
+func unauthorizedHint(remote bool) string {
+	if remote {
+		return "unauthorized — press g to log in again"
+	}
+	return "unauthorized — press t to update this box's token"
+}
+
 func (m Model) statusBar() string {
 	loc := fmt.Sprintf("%s · %s", m.box, m.addr)
 	switch {
 	case m.unauthorized:
-		return fmt.Sprintf(" ○ %s · unauthorized — press L to log in", loc)
+		return fmt.Sprintf(" ○ %s · %s", loc, unauthorizedHint(m.remote))
 	case m.down:
 		return fmt.Sprintf(" ○ %s · unreachable — retrying…", loc)
 	case !m.loaded:

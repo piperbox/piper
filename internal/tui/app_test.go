@@ -177,14 +177,25 @@ func TestModelUnauthorizedShowsAuthStateNotUnreachable(t *testing.T) {
 	if strings.Contains(out, "unreachable") {
 		t.Fatalf("a 401 must not render as unreachable:\n%s", out)
 	}
-	if !strings.Contains(out, "unauthorized") || !strings.Contains(out, "log in") {
-		t.Fatalf("want an auth state pointing at login, got:\n%s", out)
+	if !strings.Contains(out, "unauthorized") || !strings.Contains(out, "press t") {
+		t.Fatalf("want an auth state pointing at the boxes menu, got:\n%s", out)
 	}
 	// authenticating clears it: a later successful poll returns to ●.
 	m.client = fakeAPI{apps: nil}
 	m = pump(t, m, m.refresh())
 	if out := m.View(); !strings.Contains(out, "● default") || strings.Contains(out, "unauthorized") {
 		t.Fatalf("auth state did not clear after a good poll:\n%s", out)
+	}
+}
+
+// A relay-backed box's 401 is an account-credential problem, so the bar points
+// at the github wizard, not the LAN token path.
+func TestModelUnauthorizedRelayPointsAtGithubWizard(t *testing.T) {
+	m := NewModel("pi4", "https://relay.example", true, fakeAPI{err: a401{}})
+	m = pump(t, m, m.refresh())
+	out := m.View()
+	if !strings.Contains(out, "unauthorized") || !strings.Contains(out, "press g") {
+		t.Fatalf("want an auth state pointing at the github wizard, got:\n%s", out)
 	}
 }
 
@@ -360,7 +371,6 @@ func TestNoHelpOverlay(t *testing.T) {
 		newLogsView("blog", "dep-1", "building"),
 		newDomainForm("blog"),
 		newDomainDetailView("blog", fixtureDomains()[0]),
-		newLoginView(nil, "pi4"),
 		newGithubWizard(nil),
 	} {
 		fv, ok := v.(footered)
