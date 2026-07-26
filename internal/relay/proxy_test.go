@@ -310,7 +310,7 @@ func TestControlProxyListAgents(t *testing.T) {
 
 // orgProxyFixture: alice owns org "acme" with an enrolled agent; bob is a
 // member, mallory a stranger.
-func orgProxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router, bobCred, malloryCred, base string) {
+func orgProxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router, aliceCred, bobCred, malloryCred, base string) {
 	t.Helper()
 	st = openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
@@ -318,6 +318,7 @@ func orgProxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router,
 	if err != nil {
 		t.Fatal(err)
 	}
+	aliceCred, _ = st.MintAccountCredential(alice.ID)
 	bob, err := st.UpsertAccount("sub-bob", "bob")
 	if err != nil {
 		t.Fatal(err)
@@ -345,7 +346,7 @@ func orgProxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router,
 }
 
 func TestControlProxyOrgMemberDrivesBox(t *testing.T) {
-	api, st, router, bobCred, malloryCred, base := orgProxyFixture(t)
+	api, st, router, _, bobCred, malloryCred, base := orgProxyFixture(t)
 	relaySess, agentSess := pipeSession(t, base)
 	router.Register(relaySess)
 	go fakeBox(agentSess)
@@ -373,7 +374,7 @@ func TestControlProxyOrgMemberDrivesBox(t *testing.T) {
 }
 
 func TestControlProxyDisabledOrgSeversMembers(t *testing.T) {
-	api, st, router, bobCred, _, base := orgProxyFixture(t)
+	api, st, router, _, bobCred, _, base := orgProxyFixture(t)
 	relaySess, agentSess := pipeSession(t, base)
 	router.Register(relaySess)
 	go fakeBox(agentSess)
@@ -387,7 +388,7 @@ func TestControlProxyDisabledOrgSeversMembers(t *testing.T) {
 }
 
 func TestControlProxyListIncludesOrgAgentsWithOwner(t *testing.T) {
-	api, st, router, bobCred, _, base := orgProxyFixture(t)
+	api, st, router, _, bobCred, _, base := orgProxyFixture(t)
 	relaySess, _ := pipeSession(t, base)
 	router.Register(relaySess)
 
@@ -493,6 +494,41 @@ func TestControlProxyRemoveForeignAgentIs404(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("another tenant removed alice's agent")
+	}
+}
+
+// Enrolling an org's box is owner-only (api.go), so removing one must be too:
+// a plain member gets 403 and the agent survives.
+func TestControlProxyRemoveOrgBoxMemberForbidden(t *testing.T) {
+	api, st, _, _, bobCred, _, base := orgProxyFixture(t)
+
+	rr := proxyDelete(t, api, "/agents/"+base, bobCred)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("member remove: %d, want 403 (body %q)", rr.Code, rr.Body.String())
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("a member's forbidden DELETE removed the org's agent")
+	}
+}
+
+// The org owner can remove the org's box.
+func TestControlProxyRemoveOrgBoxOwnerSucceeds(t *testing.T) {
+	api, st, _, aliceCred, _, _, base := orgProxyFixture(t)
+
+	rr := proxyDelete(t, api, "/agents/"+base, aliceCred)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("owner remove: %d, want 204 (body %q)", rr.Code, rr.Body.String())
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("agent row still present after owner's 204")
 	}
 }
 

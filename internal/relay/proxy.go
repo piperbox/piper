@@ -200,6 +200,16 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 				_, connected := router.Lookup(base)
 				writeJSON(w, http.StatusOK, map[string]any{"agent": base, "connected": connected})
 			case http.MethodDelete:
+				// Enrolling a box is owner-only (api.go); removing one must be
+				// too, or a plain member could permanently destroy a box
+				// nobody can re-create without shell access to the hardware.
+				// CanControl (checked above) is deliberately looser — it grants
+				// drive rights to every member — so removal needs its own,
+				// stricter gate.
+				if ok, err := st.CanManage(acc.ID, ownerID); err != nil || !ok {
+					http.Error(w, "owner role required", http.StatusForbidden)
+					return
+				}
 				// Refuse while the box is live. Removal is irreversible — the
 				// enrollment token is gone and the box must re-enroll — so a
 				// mistyped base domain must not be able to retire a running

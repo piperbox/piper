@@ -388,6 +388,22 @@ func (s *Store) CanControl(callerID, ownerID string) (bool, error) {
 	return n > 0, err
 }
 
+// CanManage reports whether callerID may change ownerID's inventory: the
+// account itself, or an "owner" member of the org. Distinct from CanControl,
+// which grants drive rights to every member — enrolling a box is owner-only
+// (see api.go), so removing one must be too, or a member could permanently
+// destroy a box nobody can re-create without shell access to the hardware.
+func (s *Store) CanManage(callerID, ownerID string) (bool, error) {
+	if callerID == ownerID {
+		return true, nil
+	}
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM org_members WHERE org_id = ? AND account_id = ? AND role = 'owner'`,
+		ownerID, callerID).Scan(&n)
+	return n > 0, err
+}
+
 // OwnedAgent is one row of an account's visible-agents list.
 type OwnedAgent struct {
 	BaseDomain string
