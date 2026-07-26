@@ -39,11 +39,26 @@ only rows genuinely attributable to the agent.
 
 ## What a removal deletes — and what it cannot
 
-Two tables key on `agents(name)` and are unambiguously the agent's
-(`internal/relay/schema.sql`):
+Three tables are unambiguously the agent's (`internal/relay/schema.sql`). Two
+key on `agents(name)`:
 
 - `repo_bindings (agent_name, app)`
 - `pending_events (agent_name, app, ref)`
+
+and one keys on the base domain directly:
+
+- `custom_domains (domain PK, agent_base, status, created_at)`
+
+`custom_domains` must be cleared or the removal creates a **permanent** squat.
+`ClaimDomain` evicts only an *expired pending* claim; an `active` row satisfies
+`liveAt` regardless of age, and the `owner == baseDomain` no-op path cannot match
+because a re-enrolled box gets a fresh random base domain. So a box removed while
+holding `shop.example.com` leaves a row that answers `ErrDomainTaken` forever, to
+its own owner, with no API able to clear it. Note this delete keys on
+`agent_base = baseDomain`, not on the agent name the other two use.
+
+Routing needs no cleanup: the router only holds custom domains for a live
+session, and removal already requires the box to be offline.
 
 `hostnames` is **not** one of them. It keys on `account_id`:
 
@@ -110,8 +125,9 @@ func (s *Store) DeleteAgent(baseDomain string) error
 ```
 
 One transaction, `DeleteOrg`'s shape. Resolve `agents.name` from `base_domain`
-first — both child tables reference the name, not the base domain — then delete
-in FK-safe order: `pending_events`, `repo_bindings`, `agents`.
+first — `repo_bindings` and `pending_events` reference the name, not the base
+domain — then delete in FK-safe order: `pending_events`, `repo_bindings`,
+`custom_domains` (by `agent_base`), `agents`.
 
 A new sentinel `ErrUnknownAgent` is added for the `sql.ErrNoRows` case. The
 existing sentinels do not fit: `ErrUnknownAccount` names a missing *account*, and

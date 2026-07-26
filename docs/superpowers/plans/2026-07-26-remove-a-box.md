@@ -50,7 +50,9 @@ Why a new `internal/relay/agents.go` rather than appending to `accounts.go`: enr
 - Consumes: `openTestStore(t)` from `internal/relay/accounts_test.go`; `Store.UpsertAccount`, `Store.EnrollForAccount`, `Store.Configure` (all existing).
 - Produces: `var ErrUnknownAgent = errors.New("unknown agent")` and `func (s *Store) DeleteAgent(baseDomain string) error`.
 
-The two child tables reference `agents(name)`, not `base_domain`, so the name must be resolved first. `hostnames` keys on `account_id` and is deliberately left alone — see the spec.
+`repo_bindings` and `pending_events` reference `agents(name)`, not `base_domain`, so the name must be resolved first. `hostnames` keys on `account_id` and is deliberately left alone — see the spec.
+
+> **Amended during execution.** The code blocks below omit `custom_domains`, which the original spec missed. That table keys on `agent_base` (the base domain) and IS the agent's, so it must be cleared in the same transaction — otherwise a removed box's `active` custom domain answers `ErrDomainTaken` forever, since `ClaimDomain` evicts only *expired pending* claims. The delivered implementation includes it plus `TestDeleteAgentClearsItsCustomDomains`. Note it keys on `agent_base`, not the agent name the other two deletes use.
 
 - [ ] **Step 1: Write the failing tests**
 
