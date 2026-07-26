@@ -36,13 +36,13 @@ func (v appDetailView) title() string { return v.name }
 
 func (v appDetailView) footer() string {
 	if _, ok := v.selectedDomain(); ok {
-		return "a add domain · x remove · ↵ details · d deploy · esc back · ? help"
+		return "a add domain · x remove · ↵ details · d deploy · esc back"
 	}
 	stopOrStart := "s stop"
 	if v.app.Status == "stopped" {
 		stopOrStart = "s start"
 	}
-	return "d deploy · " + stopOrStart + " · x delete · l link · a domain · ↵ logs · esc back · ? help"
+	return "d deploy · " + stopOrStart + " · x delete · l link · a domain · ↵ logs · esc back"
 }
 
 // selectedDomain returns the domain row under the cursor, if the cursor is in

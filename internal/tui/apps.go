@@ -26,7 +26,7 @@ func (v appsView) title() string { return "apps" }
 func (v appsView) count() int { return len(v.apps) }
 
 func (v appsView) footer() string {
-	return "n new · L login · g github · t boxes · ↵ open · q quit · ? help"
+	return "n new · L login · g github · t boxes · ↵ open · q quit"
 }
 
 func (v appsView) refresh(c API) tea.Cmd {

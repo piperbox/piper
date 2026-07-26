@@ -133,9 +133,11 @@ func (f fakeAPI) RemoveAppDomain(app, dom string) error {
 }
 
 func keyRunes(r rune) tea.KeyMsg { return tea.KeyMsg(tea.Key{Type: tea.KeyRunes, Runes: []rune{r}}) }
-func keyEnter() tea.KeyMsg       { return tea.KeyMsg(tea.Key{Type: tea.KeyEnter}) }
-func keyBackspace() tea.KeyMsg   { return tea.KeyMsg(tea.Key{Type: tea.KeyBackspace}) }
-func keyTab() tea.KeyMsg         { return tea.KeyMsg(tea.Key{Type: tea.KeyTab}) }
+
+func keyEsc() tea.KeyMsg       { return tea.KeyMsg(tea.Key{Type: tea.KeyEsc}) }
+func keyEnter() tea.KeyMsg     { return tea.KeyMsg(tea.Key{Type: tea.KeyEnter}) }
+func keyBackspace() tea.KeyMsg { return tea.KeyMsg(tea.Key{Type: tea.KeyBackspace}) }
+func keyTab() tea.KeyMsg       { return tea.KeyMsg(tea.Key{Type: tea.KeyTab}) }
 
 // pump runs the poll cmd and feeds its message back, like the tea runtime.
 func pump(t *testing.T, m Model, cmd tea.Cmd) Model {
@@ -318,7 +320,7 @@ func TestNavViewsRenderFooterLegend(t *testing.T) {
 	f := fakeAPI{apps: []api.App{{App: store.App{Name: "blog"}, Status: "running"}}}
 	m := NewModel("pi4", "addr", false, f)
 	m = pump(t, m, m.refresh())
-	if out := m.View(); !strings.Contains(out, "n new") || !strings.Contains(out, "? help") {
+	if out := m.View(); !strings.Contains(out, "n new") || !strings.Contains(out, "q quit") {
 		t.Fatalf("apps-list footer missing keys:\n%s", out)
 	}
 
@@ -327,9 +329,46 @@ func TestNavViewsRenderFooterLegend(t *testing.T) {
 	m = m2.(Model)
 	m = pump(t, m, m.refresh())
 	out := m.View()
-	for _, want := range []string{"d deploy", "s stop", "x delete", "esc back", "? help"} {
+	for _, want := range []string{"d deploy", "s stop", "x delete", "esc back"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("app-detail footer missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// Every view carries its own key legend, so there is no help overlay to point
+// at: "?" must stay off the global keymap and out of the footers.
+func TestNoHelpOverlay(t *testing.T) {
+	f := fakeAPI{apps: []api.App{{App: store.App{Name: "blog"}, Status: "running"}}}
+	m := NewModel("pi4", "addr", false, f)
+	m = pump(t, m, m.refresh())
+
+	_, cmd := m.Update(keyRunes('?'))
+	if cmd != nil {
+		if _, ok := cmd().(pushMsg); ok {
+			t.Fatal("? must not push a help overlay")
+		}
+	}
+	if len(m.stack) != 1 {
+		t.Fatalf("? must not change the stack, got depth %d", len(m.stack))
+	}
+
+	for _, v := range []view{
+		m.top(),
+		newAppDetailView("blog", false),
+		newBoxesView(nil),
+		newLogsView("blog", "dep-1", "building"),
+		newDomainForm("blog"),
+		newDomainDetailView("blog", fixtureDomains()[0]),
+		newLoginView(nil, "pi4"),
+		newGithubWizard(nil),
+	} {
+		fv, ok := v.(footered)
+		if !ok {
+			t.Fatalf("%T should offer a key legend", v)
+		}
+		if strings.Contains(fv.footer(), "? help") {
+			t.Fatalf("%T footer still advertises the help overlay: %q", v, fv.footer())
 		}
 	}
 }
@@ -418,7 +457,7 @@ func TestNoLegendAdvertisesRefreshKey(t *testing.T) {
 		"app detail":    newAppDetailView("blog", false).footer(),
 		"domain row":    withDomain.footer(),
 		"domain detail": domainDetailView{}.footer(),
-		"help":          helpView{}.View(),
+		"logs":          newLogsView("blog", "dep-1", "building").footer(),
 	}
 	for where, legend := range legends {
 		if strings.Contains(legend, "refresh") {

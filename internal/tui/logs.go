@@ -8,9 +8,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// chromeHeight is the rows the root spends on header + blank lines + status bar
-// around a view; the log viewport takes the rest of the terminal height.
-const chromeHeight = 6
+// chromeHeight is the rows the root spends on header + footer + blank lines +
+// status bar around a view; the log viewport takes the rest of the terminal
+// height.
+const chromeHeight = 8
 
 // logsView is the depth-2 view: one deployment's build log in a scrollable
 // viewport. Follow re-fetches the log tail each tick while the deployment is
@@ -35,6 +36,8 @@ func newLogsView(app, id, status string) logsView {
 func (v logsView) Init() tea.Cmd { return nil }
 
 func (v logsView) title() string { return "logs" }
+
+func (v logsView) footer() string { return "f follow · ↑/k ↓/j scroll · esc back" }
 
 // refresh fetches the full log once, then only while following. It also reports
 // this deployment's current status so the view can auto-stop follow.

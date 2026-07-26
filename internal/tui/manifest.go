@@ -48,7 +48,7 @@ func (v manifestView) refresh(API) tea.Cmd { return nil }
 
 func (v manifestView) capturesText() bool { return true }
 
-func (v manifestView) footer() string { return "↵ start · esc cancel · ? help" }
+func (v manifestView) footer() string { return "↵ start · esc cancel" }
 
 func (v manifestView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {

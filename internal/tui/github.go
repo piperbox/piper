@@ -69,15 +69,15 @@ func (v githubWizardView) refresh(API) tea.Cmd {
 func (v githubWizardView) footer() string {
 	switch v.state {
 	case wizLogin:
-		return "↵ sign in · m manifest app · esc cancel · ? help"
+		return "↵ sign in · m manifest app · esc cancel"
 	case wizInstall:
-		return "o open install page · esc cancel · ? help"
+		return "o open install page · esc cancel"
 	case wizInstalled:
-		return "↑↓ move · ↵ repos · m manifest app · esc back · ? help"
+		return "↑↓ move · ↵ repos · m manifest app · esc back"
 	case wizByo:
-		return "m manifest app · esc back · ? help"
+		return "m manifest app · esc back"
 	}
-	return "esc cancel · ? help"
+	return "esc cancel"
 }
 
 func (v githubWizardView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -290,9 +290,9 @@ func (v wizardReposView) title() string { return "repos" }
 
 func (v wizardReposView) footer() string {
 	if v.loaded && v.err != nil {
-		return "r retry · esc back · ? help"
+		return "r retry · esc back"
 	}
-	return "esc back · ? help"
+	return "esc back"
 }
 
 // retry clears a completed error load so the next refresh re-arms the request.

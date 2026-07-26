@@ -33,7 +33,7 @@ func (v domainFormView) refresh(API) tea.Cmd { return nil }
 
 func (v domainFormView) capturesText() bool { return true }
 
-func (v domainFormView) footer() string { return "↵ add · esc cancel · ? help" }
+func (v domainFormView) footer() string { return "↵ add · esc cancel" }
 
 func (v domainFormView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {

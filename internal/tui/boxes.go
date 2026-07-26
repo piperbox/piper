@@ -31,7 +31,7 @@ func (v boxesView) Init() tea.Cmd { return nil }
 func (v boxesView) title() string { return "boxes" }
 
 func (v boxesView) footer() string {
-	return "↵ connect · a add · e edit · x remove · esc back · ? help"
+	return "↵ connect · a add · e edit · x remove · esc back"
 }
 
 // refresh reloads the client config off the UI thread.
