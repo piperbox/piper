@@ -97,12 +97,24 @@ type a401 struct{}
 func (a401) Error() string      { return "unauthorized" }
 func (a401) Unauthorized() bool { return true }
 
-func TestAppsUnauthorizedShowsLoginHint(t *testing.T) {
+func TestAppsUnauthorizedLANPointsAtBoxEdit(t *testing.T) {
 	m := NewModel("pi4", "addr", false, fakeAPI{err: a401{}})
 	m = pump(t, m, m.refresh())
 	out := m.View()
-	if !strings.Contains(out, "press L") {
-		t.Fatalf("expected login hint, got:\n%s", out)
+	if !strings.Contains(out, "press t") {
+		t.Fatalf("expected a hint pointing at the boxes menu, got:\n%s", out)
+	}
+	if strings.Contains(out, "⚠") {
+		t.Fatalf("401 should show the hint, not a raw error banner:\n%s", out)
+	}
+}
+
+func TestAppsUnauthorizedRelayPointsAtGithubWizard(t *testing.T) {
+	m := NewModel("pi4", "addr", true, fakeAPI{err: a401{}})
+	m = pump(t, m, m.refresh())
+	out := m.View()
+	if !strings.Contains(out, "press g") {
+		t.Fatalf("expected a hint pointing at the github wizard, got:\n%s", out)
 	}
 	if strings.Contains(out, "⚠") {
 		t.Fatalf("401 should show the hint, not a raw error banner:\n%s", out)
@@ -113,10 +125,18 @@ func TestAppsNonAuthErrorStillBanners(t *testing.T) {
 	m := NewModel("pi4", "addr", false, fakeAPI{err: errors.New("dial tcp: refused")})
 	m = pump(t, m, m.refresh())
 	out := m.View()
-	if strings.Contains(out, "press L") {
-		t.Fatalf("a transport error must not show the login hint:\n%s", out)
+	if strings.Contains(out, "press t to update") {
+		t.Fatalf("a transport error must not show the credential hint:\n%s", out)
 	}
 	if !strings.Contains(out, "⚠") {
 		t.Fatalf("expected an error banner, got:\n%s", out)
+	}
+}
+
+// Login has no standalone view: credential repair lives behind t (LAN token)
+// and g (relay), so the footer must not advertise a login key.
+func TestAppsFooterDoesNotAdvertiseLogin(t *testing.T) {
+	if f := newAppsView(false).footer(); strings.Contains(f, "login") {
+		t.Fatalf("footer still advertises login: %q", f)
 	}
 }
