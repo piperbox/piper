@@ -123,6 +123,36 @@ func TestBoxRemoveBadCredentialSuggestsLogin(t *testing.T) {
 	}
 }
 
+// DeleteAgent also clears custom_domains now, so the success message must not
+// claim custom domains stay attached — only the relay-assigned app URLs do.
+func TestBoxRemoveSuccessMessageReflectsReleasedCustomDomains(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	if err := config.SaveClient(config.ClientConfig{
+		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := boxRemove("b.example", true, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if strings.Contains(out.String(), "only the box slot is freed") {
+		t.Fatalf("stdout = %q, must not claim custom domains stay attached (DeleteAgent releases them)", out.String())
+	}
+	if !strings.Contains(out.String(), "custom domain") {
+		t.Fatalf("stdout = %q, want it to say custom domains are released", out.String())
+	}
+}
+
 // Declining the prompt must make no request at all — the check has to happen
 // before the relay is dialed, or a "no" would still have removed the box.
 func TestBoxRemoveAbortsOnDeclinedPrompt(t *testing.T) {
