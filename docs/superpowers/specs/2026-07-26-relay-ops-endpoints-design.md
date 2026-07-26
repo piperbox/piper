@@ -86,7 +86,8 @@ New code lives in `internal/relay` (an `ops.go` or similar): a `Metrics` struct
 owning the private registry and instruments, plus the ring buffer and the ops
 `http.Handler`. `main` constructs it and passes it into `relay.Serve` as one
 added parameter, matching how `Store`/`Router` already flow. A nil `*Metrics` is
-a no-op everywhere it is threaded, so existing tests need no edits.
+a no-op everywhere it is threaded; existing call sites (including tests) pass
+nil mechanically and behave exactly as before.
 
 Existing surfaces — control API, public TLS/HTTP, tunnel listener — are
 untouched.
