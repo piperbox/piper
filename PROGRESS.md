@@ -63,6 +63,7 @@ Goal: public HTTPS from behind NAT/CGNAT — `piperd` dials an outbound yamux tu
   - ✅ surface the routed public host — persisted on the app row at deploy; in the deploy response + `piper deploy` URL and the apps API + `piper list` — [#93](https://github.com/piperbox/piper/issues/93) [#100](https://github.com/piperbox/piper/issues/100)
   - ⬜ LAN `login` load-mutate-save so it doesn't clobber stored relay creds — [#84](https://github.com/piperbox/piper/issues/84)
   - ⬜ thread `context.Context` through `relayclient` requests — [#85](https://github.com/piperbox/piper/issues/85)
+  - ✅ remove a box — store cascade delete, `DELETE /agents/<base-domain>` (org-owner only), `piper box ls`/`rm`, honest quota error — [#401](https://github.com/piperbox/piper/issues/401)
 - ✅ **Epic [#49](https://github.com/piperbox/piper/issues/49) complete** — the full remote control-plane track: the gate [#72](https://github.com/piperbox/piper/issues/72), control-stream routing [#73](https://github.com/piperbox/piper/issues/73), remote CLI target [#74](https://github.com/piperbox/piper/issues/74), health/metrics [#75](https://github.com/piperbox/piper/issues/75), the onboarding slice [#90](https://github.com/piperbox/piper/issues/90), and the hosted Vercel-like dashboard [#76](https://github.com/piperbox/piper/issues/76).
 
 ## Plan 3 — Git-driven deploys — epic [#11](https://github.com/piperbox/piper/issues/11) ([plan](docs/superpowers/plans/2026-07-05-plan3-git-deploys.md))

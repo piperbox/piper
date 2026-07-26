@@ -208,6 +208,18 @@ only splices SNI) — set `PIPER_BASE_DOMAIN` + cert/DNS config instead of using
 `piper connect`; see [`custom-domains.md`](custom-domains.md). Self-hosters run
 the relay passthrough-only by leaving `PIPER_RELAY_TLS_CERT`/`KEY` unset.
 
+### List and remove boxes
+
+```bash
+piper box ls                                          # base domain, owner, connected
+piper box rm ab12-alice.public.getpiper.dev --yes      # frees the box slot
+```
+
+Removal frees the box slot for a fresh `piper connect`; a connected box must be
+stopped first (the relay refuses with a conflict otherwise). The box's
+relay-assigned `<hash>-<user>.<apex>` app URL stays reserved on the account,
+but any custom domains it held are released and can be re-claimed elsewhere.
+
 ## Drive a box remotely
 
 Any control command (`create`, `deploy`, `list`, `status`, `app link`,
