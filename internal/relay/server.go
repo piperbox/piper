@@ -62,8 +62,9 @@ func (q *connQueue) push(c net.Conn) {
 // relay broker GitHub tokens over the control channel (#289); nil means BYO-only.
 // delivery, when non-nil, drains any webhooks parked for a box while it was
 // disconnected as soon as its tunnel reconnects; nil (no App configured) skips
-// the drain. Blocks until a listener fails.
-func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, router *Router, ctrl http.Handler, ghApp *GitHubApp, delivery *TunnelDelivery) error {
+// the drain. m, when non-nil, receives traffic counters; nil disables
+// instrumentation. Blocks until a listener fails.
+func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, router *Router, ctrl http.Handler, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics) error {
 	var ctrlQ *connQueue
 	if ctrl != nil && tlsCfg != nil {
 		ctrlQ = newConnQueue()
@@ -82,13 +83,13 @@ func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, 
 	if err != nil {
 		return err
 	}
-	go acceptTunnels(tunLn, st, router, ghApp, delivery)
+	go acceptTunnels(tunLn, st, router, ghApp, delivery, m)
 
 	httpLn, err := net.Listen("tcp", httpAddr)
 	if err != nil {
 		return err
 	}
-	go acceptHTTP(httpLn, router)
+	go acceptHTTP(httpLn, router, m)
 
 	tlsLn, err := net.Listen("tcp", tlsAddr)
 	if err != nil {
@@ -99,7 +100,8 @@ func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, 
 		if err != nil {
 			return err
 		}
-		go handlePublic(conn, router, tlsCfg, ctrlHost, ctrlQ)
+		m.ConnAccepted("tls")
+		go handlePublic(conn, router, tlsCfg, ctrlHost, ctrlQ, m)
 	}
 }
 
@@ -127,12 +129,13 @@ func tunnelAuth(st *Store) tunnel.Auth {
 	}
 }
 
-func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp, delivery *TunnelDelivery) {
+func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
+		m.ConnAccepted("tunnel")
 		go serveTunnel(conn, st, router, st.AgentDisabled, ghApp, delivery)
 	}
 }
@@ -336,7 +339,7 @@ func handleControl(stream net.Conn, sess *tunnel.Session, st *Store, router *Rou
 	}
 }
 
-func handlePublic(conn net.Conn, router *Router, tlsCfg *tls.Config, ctrlHost string, ctrlQ *connQueue) {
+func handlePublic(conn net.Conn, router *Router, tlsCfg *tls.Config, ctrlHost string, ctrlQ *connQueue, m *Metrics) {
 	sni, buffered, err := readSNI(conn)
 	if err != nil {
 		conn.Close()
@@ -350,15 +353,19 @@ func handlePublic(conn net.Conn, router *Router, tlsCfg *tls.Config, ctrlHost st
 	}
 	defer conn.Close()
 	if sess, ok := router.LookupHost(sni); ok {
+		m.ConnRouted("tls")
 		if tlsCfg == nil {
 			return // terminated hostname but no wildcard cert configured
 		}
-		terminate(conn, buffered, sess, tlsCfg)
+		terminate(conn, buffered, sess, tlsCfg, m)
 		return
 	}
 	if sess, ok := router.Lookup(sni); ok {
-		pump(conn, buffered, sess, tunnel.KindPassthrough)
+		m.ConnRouted("tls")
+		pump(conn, buffered, sess, tunnel.KindPassthrough, m)
+		return
 	}
+	m.ConnUnrouted("tls")
 }
 
 // pump is the shared byte-splice: open a stream of the given kind on sess,
@@ -366,11 +373,13 @@ func handlePublic(conn net.Conn, router *Router, tlsCfg *tls.Config, ctrlHost st
 // The :443 path uses it as the Plan-2 SNI passthrough (KindPassthrough, the
 // box terminates TLS); the :80 path pumps custom-domain plaintext HTTP down a
 // KindHTTP stream to the box's :80 (#228).
-func pump(conn net.Conn, buffered []byte, sess *tunnel.Session, kind byte) {
+func pump(conn net.Conn, buffered []byte, sess *tunnel.Session, kind byte, m *Metrics) {
 	stream, err := sess.OpenKind(kind)
 	if err != nil {
 		return
 	}
+	m.StreamStart()
+	defer m.StreamEnd()
 	defer stream.Close()
 	if _, err := stream.Write(buffered); err != nil {
 		return

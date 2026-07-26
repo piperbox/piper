@@ -22,13 +22,14 @@ import (
 // deliberately never matched, so their HTTP behavior is unchanged.
 
 // acceptHTTP dispatches connections from the public plain-HTTP listener.
-func acceptHTTP(ln net.Listener, router *Router) {
+func acceptHTTP(ln net.Listener, router *Router, m *Metrics) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go handleHTTP(conn, router)
+		m.ConnAccepted("http")
+		go handleHTTP(conn, router, m)
 	}
 }
 
@@ -36,15 +37,18 @@ func acceptHTTP(ln net.Listener, router *Router) {
 // registered custom domain, splices the connection down that agent's tunnel.
 // Anything else — shared-domain hosts, unknown hosts, non-HTTP bytes — is
 // dropped without a reply, exactly as before the listener existed.
-func handleHTTP(conn net.Conn, router *Router) {
+func handleHTTP(conn net.Conn, router *Router, m *Metrics) {
 	defer conn.Close()
 	host, buffered, err := readHost(conn)
 	if err != nil {
 		return
 	}
 	if sess, ok := router.LookupCustom(host); ok {
-		pump(conn, buffered, sess, tunnel.KindHTTP)
+		m.ConnRouted("http")
+		pump(conn, buffered, sess, tunnel.KindHTTP, m)
+		return
 	}
+	m.ConnUnrouted("http")
 }
 
 // readHost peeks the head of the HTTP request on conn and returns its Host
