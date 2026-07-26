@@ -425,3 +425,85 @@ func TestControlProxyListIncludesOrgAgentsWithOwner(t *testing.T) {
 		t.Errorf("agent[1] = %+v, want %s owner=bob offline", list.Agents[1], personal.BaseDomain)
 	}
 }
+
+// proxyDelete issues a DELETE with the given credential, mirroring proxyGet.
+func proxyDelete(t *testing.T, api http.Handler, path, cred string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodDelete, path, nil)
+	if cred != "" {
+		req.Header.Set("Authorization", "Bearer "+cred)
+	}
+	rr := httptest.NewRecorder()
+	api.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestControlProxyRemoveAgent(t *testing.T) {
+	api, st, _, aliceCred, _, base := proxyFixture(t)
+
+	if rr := proxyDelete(t, api, "/agents/"+base, aliceCred); rr.Code != http.StatusNoContent {
+		t.Fatalf("remove: %d, want 204 (body %q)", rr.Code, rr.Body.String())
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("agent row still present after 204")
+	}
+	// Now genuinely unknown: a second removal is a 404, like any other
+	// unknown agent, with no hint that it ever existed.
+	if rr := proxyDelete(t, api, "/agents/"+base, aliceCred); rr.Code != http.StatusNotFound {
+		t.Fatalf("second remove: %d, want 404", rr.Code)
+	}
+}
+
+// A box holding a live tunnel session is refused rather than evicted: removal
+// is irreversible, so mistyping a base domain must not take down a running box.
+func TestControlProxyRemoveConnectedAgentIsRefused(t *testing.T) {
+	api, st, router, aliceCred, _, base := proxyFixture(t)
+	relaySess, agentSess := pipeSession(t, base)
+	router.Register(relaySess)
+	go fakeBox(agentSess)
+
+	rr := proxyDelete(t, api, "/agents/"+base, aliceCred)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("remove connected: %d, want 409", rr.Code)
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("connected agent was removed despite the 409")
+	}
+}
+
+// Cross-tenant removal is indistinguishable from an unknown agent, and must not
+// delete anything.
+func TestControlProxyRemoveForeignAgentIs404(t *testing.T) {
+	api, st, _, _, malloryCred, base := proxyFixture(t)
+
+	if rr := proxyDelete(t, api, "/agents/"+base, malloryCred); rr.Code != http.StatusNotFound {
+		t.Fatalf("cross-tenant remove: %d, want 404", rr.Code)
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("another tenant removed alice's agent")
+	}
+}
+
+// Adding DELETE must not widen the path to other verbs.
+func TestControlProxyAgentPathStillRejectsOtherMethods(t *testing.T) {
+	api, _, _, aliceCred, _, base := proxyFixture(t)
+	req := httptest.NewRequest(http.MethodPut, "/agents/"+base, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceCred)
+	rr := httptest.NewRecorder()
+	api.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("PUT: %d, want 405", rr.Code)
+	}
+}

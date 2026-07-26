@@ -192,15 +192,36 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 		}
 
 		if tail == "" {
-			// Liveness: answered by the relay itself from its in-memory
-			// session map — never opens a tunnel stream. Offline is an
-			// answer, not an error: 200 with connected:false.
-			if r.Method != http.MethodGet {
+			switch r.Method {
+			case http.MethodGet:
+				// Liveness: answered by the relay itself from its in-memory
+				// session map — never opens a tunnel stream. Offline is an
+				// answer, not an error: 200 with connected:false.
+				_, connected := router.Lookup(base)
+				writeJSON(w, http.StatusOK, map[string]any{"agent": base, "connected": connected})
+			case http.MethodDelete:
+				// Refuse while the box is live. Removal is irreversible — the
+				// enrollment token is gone and the box must re-enroll — so a
+				// mistyped base domain must not be able to retire a running
+				// box. The caller stops piperd on it and retries.
+				if _, connected := router.Lookup(base); connected {
+					http.Error(w, "box is connected; stop piperd on it first", http.StatusConflict)
+					return
+				}
+				if err := st.DeleteAgent(base); err != nil {
+					if errors.Is(err, ErrUnknownAgent) {
+						http.NotFound(w, r)
+						return
+					}
+					log.Printf("relay: remove agent %s: %v", base, err)
+					http.Error(w, "remove failed", http.StatusInternalServerError)
+					return
+				}
+				log.Printf("agent removed: %s", base)
+				w.WriteHeader(http.StatusNoContent)
+			default:
 				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
 			}
-			_, connected := router.Lookup(base)
-			writeJSON(w, http.StatusOK, map[string]any{"agent": base, "connected": connected})
 			return
 		}
 		if !strings.HasPrefix(tail, "v1/") {
