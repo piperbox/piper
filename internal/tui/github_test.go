@@ -346,3 +346,44 @@ func TestRKeyDoesNotDisturbSuccessfulRepoLoad(t *testing.T) {
 		t.Fatal("a successful load must stay loaded-once even after r")
 	}
 }
+
+func TestWizardReposRKeyRetriesAfterError(t *testing.T) {
+	sub := wizardReposView{relay: relayFor(fakeRelay{}), loaded: true, err: errors.New("boom")}
+	next, cmd := sub.Update(keyRunes('r'))
+	if cmd == nil {
+		t.Fatal("r on a failed repo load must re-fire the fetch")
+	}
+	if v := next.(wizardReposView); v.loaded || v.err != nil {
+		t.Fatalf("r must clear the errored load, got loaded=%v err=%v", v.loaded, v.err)
+	}
+}
+
+func TestWizardReposRKeyNoopsAfterSuccess(t *testing.T) {
+	sub := wizardReposView{
+		relay: relayFor(fakeRelay{}), loaded: true,
+		repos: []relayclient.Repo{{FullName: "getpiper/piper"}},
+	}
+	next, cmd := sub.Update(keyRunes('r'))
+	if cmd != nil {
+		t.Fatal("r must not re-fetch a repo list that loaded fine")
+	}
+	if !next.(wizardReposView).loaded {
+		t.Fatal("r must leave a successful load alone")
+	}
+}
+
+func TestRKeyReachesRepoPickerFromRoot(t *testing.T) {
+	m := NewModel("pi4", "a", false, fakeAPI{}).WithRelay(relayFor(fakeRelay{}))
+	next, _ := m.Update(pushMsg{view: wizardReposView{
+		relay: relayFor(fakeRelay{}), loaded: true, err: errors.New("boom"),
+	}})
+	m = next.(Model)
+	next, cmd := m.Update(keyRunes('r'))
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("r at the root must reach the repo picker's retry")
+	}
+	if v, ok := m.top().(wizardReposView); !ok || v.loaded {
+		t.Fatalf("r should have re-armed the picker, got %#v", m.top())
+	}
+}

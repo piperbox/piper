@@ -69,7 +69,7 @@ func (m Model) top() view { return m.stack[len(m.stack)-1] }
 func (m Model) refresh() tea.Cmd { return m.top().refresh(m.client) }
 
 // topCapturesText reports whether the top view wants raw keystrokes (a text
-// field), so the root suppresses its single-letter shortcuts (q, r) for it.
+// field), so the root suppresses its single-letter shortcuts (q, t, …) for it.
 func (m Model) topCapturesText() bool {
 	if c, ok := m.top().(interface{ capturesText() bool }); ok {
 		return c.capturesText()
@@ -125,11 +125,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Quit
 				}
 				m.stack = m.stack[:len(m.stack)-1]
-				return m, m.refresh()
-			case "r":
-				if wv, ok := m.top().(wizardReposView); ok {
-					m.stack[len(m.stack)-1] = wv.retry()
-				}
 				return m, m.refresh()
 			case "?":
 				if _, ok := m.top().(helpView); !ok {

@@ -22,7 +22,7 @@ func TestQuestionMarkPushesHelpOverlay(t *testing.T) {
 	}
 	// the rendered overlay carries the full keymap
 	out := helpView{}.View()
-	for _, want := range []string{"new app", "deploy", "toggle follow", "refresh"} {
+	for _, want := range []string{"new app", "deploy", "toggle follow", "r retry repos"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("help overlay missing %q:\n%s", want, out)
 		}
