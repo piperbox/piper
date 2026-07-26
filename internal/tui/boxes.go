@@ -20,6 +20,7 @@ type boxesView struct {
 	loaded  bool
 	cursor  int
 	err     error
+	notice  string          // why enter was refused; view-local (an errMsg cmd would banner the current box as down), survives reloads, cleared on cursor move
 	reach   map[string]bool // box name -> last probe result; absent = probing
 }
 
@@ -89,10 +90,12 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
+			v.notice = ""
 			if v.cursor > 0 {
 				v.cursor--
 			}
 		case "down", "j":
+			v.notice = ""
 			if v.cursor < len(v.boxes)-1 {
 				v.cursor++
 			}
@@ -101,10 +104,8 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				break
 			}
 			if v.relayOnly(v.cursor) {
-				name := v.boxes[v.cursor].Name
-				return v, func() tea.Msg {
-					return errMsg{fmt.Errorf("%s has no LAN address: relay boxes are driven with `piper --remote <domain>`", name)}
-				}
+				v.notice = fmt.Sprintf("%s has no LAN address: relay boxes are driven with `piper --remote <domain>`", v.boxes[v.cursor].Name)
+				return v, nil
 			}
 			box := v.boxes[v.cursor]
 			return v, func() tea.Msg { return switchBoxMsg{box: box} }
@@ -142,6 +143,9 @@ func (v boxesView) View() string {
 			cursor = "▸ "
 		}
 		fmt.Fprintf(&b, "%s%-16s %-22s %s\n", cursor, box.Name, box.Addr, v.status(i))
+	}
+	if v.notice != "" {
+		fmt.Fprintf(&b, "\n ⚠ %s\n", v.notice)
 	}
 	return b.String()
 }

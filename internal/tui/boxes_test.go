@@ -126,22 +126,38 @@ func TestEnterOnLANBoxWithRelayCredsEmitsSwitch(t *testing.T) {
 
 func TestEnterOnRelayOnlyBoxExplains(t *testing.T) {
 	// A relay-only box (no LAN address) is not switchable here; enter must say
-	// so instead of silently doing nothing.
-	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
-	vv, _ := v.Update(boxesLoadedMsg{
+	// so instead of silently doing nothing. The note is view-local — an errMsg
+	// cmd would reach the root, which reads any errMsg as a failed poll and
+	// banners the healthy current box as unreachable.
+	load := boxesLoadedMsg{
 		boxes:   []config.Box{{Name: "pi4"}, {Name: "cloud", RelayAPI: "https://r.example"}},
 		current: "pi4",
-	})
+	}
+	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
+	vv, _ := v.Update(load)
 	v = vv.(boxesView)
 	vv, _ = v.Update(keyRunes('j'))
 	v = vv.(boxesView)
-	_, cmd := v.Update(keyEnter())
-	if cmd == nil {
-		t.Fatal("enter on a relay-only box should explain, not no-op")
+	vv, cmd := v.Update(keyEnter())
+	v = vv.(boxesView)
+	if cmd != nil {
+		t.Fatalf("enter on a relay-only box must not emit a cmd, got %#v", cmd())
 	}
-	em, ok := cmd().(errMsg)
-	if !ok || !strings.Contains(em.err.Error(), "relay") {
-		t.Fatalf("want errMsg mentioning relay, got %#v", cmd())
+	if out := v.View(); !strings.Contains(out, "relay") {
+		t.Fatalf("view should explain the relay-only refusal:\n%s", out)
+	}
+	// The 2s poll reloads the box list; the note must survive it long enough
+	// to be read, not flash for under a tick.
+	vv, _ = v.Update(load)
+	v = vv.(boxesView)
+	if out := v.View(); !strings.Contains(out, "relay") {
+		t.Fatalf("note should survive a reload:\n%s", out)
+	}
+	// Moving the cursor dismisses it.
+	vv, _ = v.Update(keyRunes('k'))
+	v = vv.(boxesView)
+	if out := v.View(); strings.Contains(out, "relay") {
+		t.Fatalf("note should clear on cursor move:\n%s", out)
 	}
 }
 
