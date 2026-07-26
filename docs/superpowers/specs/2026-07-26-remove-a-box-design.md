@@ -169,8 +169,11 @@ the standard "not logged in to a relay; run `piper login` first" without them.
 
 ### The quota error
 
-`EnrollForAccount`'s message currently names a remedy that does not exist. It
-becomes actionable:
+The misleading text is the CLI's, not the store's: `connect` in
+`cmd/piper/relayonboard.go` maps `relayclient.ErrQuotaExceeded` to its own
+sentence. The store and client sentinels both read "account agent quota
+exceeded" and stay as they are; only the CLI line changes, and it becomes
+actionable:
 
 ```
 error: account agent quota exceeded; run `piper box ls` to see your boxes
