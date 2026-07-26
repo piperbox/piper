@@ -147,8 +147,19 @@ func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp,
 // threaded through to serveControl for token-brokering control ops. delivery,
 // when non-nil, drains any webhooks parked while this box was disconnected.
 func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string) (bool, error), ghApp *GitHubApp, delivery *TunnelDelivery) {
-	sess, err := tunnel.Serve(conn, tunnelAuth(st))
+	// Record what the peer claimed so a rejection can name it. Without this the
+	// relay closed the connection silently and a box with a stale enrollment was
+	// invisible from both sides at once — the agent reported itself connected
+	// (#400) and the relay's own logs never mentioned it. The claimed base
+	// domain is unauthenticated peer input, so it is logged quoted.
+	var claimedBase string
+	auth := func(token, base string) error {
+		claimedBase = base
+		return tunnelAuth(st)(token, base)
+	}
+	sess, err := tunnel.Serve(conn, auth)
 	if err != nil {
+		log.Printf("tunnel handshake rejected for %q from %s: %v", claimedBase, conn.RemoteAddr(), err)
 		conn.Close()
 		return
 	}

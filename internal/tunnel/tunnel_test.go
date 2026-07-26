@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -202,4 +203,65 @@ func TestOpenAcceptKind(t *testing.T) {
 		t.Fatalf("req = %+v", req)
 	}
 	_ = WriteMsg(stream, ControlResponse{Hostname: "blog-alice.public.getpiper.co"})
+}
+
+// Dial must not report success on a handshake the relay rejected. Without an
+// ack it returned a live-looking Session the instant the frame was written, so
+// an agent whose enrollment the relay no longer knows logged "connected" every
+// retry, forever, with the failure invisible on both ends (#400).
+func TestDialFailsWhenServerRejectsAuth(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	go Serve(s, func(token, base string) error { return errors.New("unknown agent") })
+
+	sess, err := Dial(c, "stale-token", "092942b4-alice.example.com")
+	if err == nil {
+		sess.Close()
+		t.Fatal("Dial reported success on a rejected handshake")
+	}
+}
+
+// The rejection must carry a reason the agent can log. "relay closed the
+// connection" is what cost the debugging time; the agent needs to be told the
+// enrollment is the problem.
+func TestDialRejectionCarriesReason(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	go Serve(s, func(token, base string) error { return errors.New("unknown agent") })
+
+	_, err := Dial(c, "stale-token", "092942b4-alice.example.com")
+	if err == nil {
+		t.Fatal("Dial reported success on a rejected handshake")
+	}
+	if !strings.Contains(err.Error(), "rejected") {
+		t.Fatalf("Dial error = %q, want it to say the relay rejected the handshake", err)
+	}
+}
+
+// A relay that accepts the connection but never acks must not pin the agent
+// forever: the reconnect loop can only retry if Dial returns.
+func TestDialBoundsTheAckWait(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	// Server reads the handshake frame and then goes silent — never acks.
+	go func() {
+		_, _ = readFrame(s)
+		select {}
+	}()
+
+	prev := ackReadTimeout
+	ackReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { ackReadTimeout = prev })
+
+	start := time.Now()
+	_, err := Dial(c, "tok", "alice.example.com")
+	if err == nil {
+		t.Fatal("expected Dial to time out waiting for the ack")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Dial blocked %v waiting for an ack (deadline not enforced)", elapsed)
+	}
 }

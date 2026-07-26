@@ -21,6 +21,10 @@ import (
 // path is intentionally not deadlined.
 var preAuthReadTimeout = 10 * time.Second
 
+// ackReadTimeout bounds the agent's wait for the relay's handshake ack. Tests
+// override it to a tiny value.
+var ackReadTimeout = 10 * time.Second
+
 // Auth validates a client's presented token and claimed base domain. A non-nil
 // return rejects the connection.
 type Auth func(token, baseDomain string) error
@@ -85,11 +89,48 @@ func readFrame(r io.Reader) ([]byte, error) {
 	return buf, nil
 }
 
-// Dial performs the client handshake over conn, then starts a yamux client.
+// rejectedReason is the single reason the relay reports for any failed
+// handshake. It is deliberately undifferentiated: the peer is unauthenticated
+// at this point, so telling it whether the token was wrong or the base domain
+// unknown would confirm which enrollments exist. The relay logs the specific
+// cause locally instead.
+const rejectedReason = "unknown or revoked enrollment"
+
+// handshakeAck is the relay's verdict on a handshake, sent before yamux starts.
+// An empty Error means accepted.
+type handshakeAck struct {
+	Error string `json:"error,omitempty"`
+}
+
+// Dial performs the client handshake over conn, waits for the relay's verdict,
+// then starts a yamux client.
+//
+// The ack is what makes a rejection visible. Without it Dial returned a
+// live-looking Session as soon as the handshake frame was written, so an agent
+// whose enrollment the relay had dropped reported "connected" on every retry
+// forever while the relay silently closed each connection — the failure was
+// invisible on both ends (#400). Note the ack proves the handshake was
+// accepted, not that the session will survive: the relay can still evict it
+// afterwards (a disabled account), which it logs itself.
 func Dial(conn net.Conn, token, baseDomain string) (*Session, error) {
 	payload, _ := json.Marshal(handshake{Token: token, BaseDomain: baseDomain})
 	if err := writeFrame(conn, payload); err != nil {
 		return nil, err
+	}
+	// Bound the wait: a relay that accepts the connection and then goes quiet
+	// must not pin the agent, or the reconnect loop can never retry.
+	_ = conn.SetReadDeadline(time.Now().Add(ackReadTimeout))
+	ackPayload, err := readFrame(conn)
+	_ = conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		return nil, fmt.Errorf("awaiting relay handshake ack: %w", err)
+	}
+	var ack handshakeAck
+	if err := json.Unmarshal(ackPayload, &ack); err != nil {
+		return nil, fmt.Errorf("malformed relay handshake ack: %w", err)
+	}
+	if ack.Error != "" {
+		return nil, fmt.Errorf("relay rejected %s: %s", baseDomain, ack.Error)
 	}
 	mux, err := yamux.Client(conn, nil)
 	if err != nil {
@@ -190,6 +231,17 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 		return nil, err
 	}
 	if err := auth(hs.Token, hs.BaseDomain); err != nil {
+		// Best-effort: tell the agent *why* before dropping it, so a stranded
+		// enrollment is self-diagnosing instead of an invisible reconnect loop
+		// (#400). A failed write changes nothing — the connection is going away.
+		_ = conn.SetWriteDeadline(time.Now().Add(ackReadTimeout))
+		ackPayload, _ := json.Marshal(handshakeAck{Error: rejectedReason})
+		_ = writeFrame(conn, ackPayload)
+		_ = conn.SetWriteDeadline(time.Time{})
+		return nil, err
+	}
+	ackPayload, _ := json.Marshal(handshakeAck{})
+	if err := writeFrame(conn, ackPayload); err != nil {
 		return nil, err
 	}
 	mux, err := yamux.Server(conn, nil)
