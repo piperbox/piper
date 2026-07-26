@@ -1436,3 +1436,80 @@ func TestCopyFileOverwritesAndSetsMode(t *testing.T) {
 		t.Errorf("mode = %o, want 755", fi.Mode().Perm())
 	}
 }
+
+// stateSequence stubs systemctlRun to return each state in turn, repeating the
+// last one once exhausted. Restores via t.Cleanup.
+func stateSequence(t *testing.T, states ...string) {
+	t.Helper()
+	old := systemctlRun
+	var n int
+	systemctlRun = func(args ...string) (string, error) {
+		s := states[min(n, len(states)-1)]
+		n++
+		return s, nil
+	}
+	t.Cleanup(func() { systemctlRun = old })
+}
+
+// One `active` sample proves nothing: a Type=simple unit reports active the
+// instant ExecStart forks, so a piperd that dies immediately reads as active
+// and only drops to activating/failed once Restart= backoff kicks in. status
+// sampled once and called that "running" — while `piper agent up`, a few
+// functions away, already polled for exactly this reason (#392).
+func TestAgentStatusLinuxDoesNotTrustOneActiveSample(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.8.5", nil, "0.8.5", nil)
+	defer fastPoll(t)()
+	unit, _, restore := rootlessPaths(t)
+	defer restore()
+	os.MkdirAll(filepath.Dir(unit), 0o755)
+	os.WriteFile(unit, []byte("x"), 0o644)
+
+	for _, c := range []struct {
+		name    string
+		states  []string
+		want    string
+		notWant string
+	}{
+		{"crash loop", []string{"active\n", "activating\n"}, "piperd: restarting", "piperd: running"},
+		{"dies into failed", []string{"active\n", "failed\n"}, "piperd: failed", "piperd: running"},
+		{"steady", []string{"active\n"}, "piperd: running", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stateSequence(t, c.states...)
+			var out, errb bytes.Buffer
+			if code := agent([]string{"status"}, &out, &errb); code != 0 {
+				t.Fatalf("code = %d", code)
+			}
+			if !strings.Contains(out.String(), c.want) {
+				t.Errorf("stdout = %q, want %q", out.String(), c.want)
+			}
+			if c.notWant != "" && strings.Contains(out.String(), c.notWant) {
+				t.Errorf("stdout = %q, must not contain %q", out.String(), c.notWant)
+			}
+		})
+	}
+}
+
+// The system-service branch has the same single-sample bug and the same fix.
+func TestAgentStatusSystemDoesNotTrustOneActiveSample(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.8.5", nil, "0.8.5", nil)
+	daemonized(t)
+	defer fastPoll(t)()
+	oldEnv := agentEnviron
+	agentEnviron = func(scope ...string) map[string]string { return nil }
+	defer func() { agentEnviron = oldEnv }()
+
+	stateSequence(t, "active\n", "activating\n")
+	var out, errb bytes.Buffer
+	if code := agent([]string{"status"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if strings.Contains(out.String(), "piperd: running") {
+		t.Fatalf("crash-looping system unit reported as running:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "restarting") {
+		t.Fatalf("want the crash loop named, got:\n%s", out.String())
+	}
+}

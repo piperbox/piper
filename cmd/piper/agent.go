@@ -238,6 +238,7 @@ var systemctlRun = func(args ...string) (string, error) {
 var (
 	activePollAttempts = 12
 	activePollDelay    = 150 * time.Millisecond
+	statusPollAttempts = 3
 )
 
 // waitActive reports whether the unit reaches and holds `active`, returning the
@@ -248,9 +249,19 @@ var (
 // is the systemctl scope prefix (nil for the system manager, {"--user"} for the
 // per-user one).
 func waitActive(scope ...string) (string, bool) {
+	return pollActive(activePollAttempts, scope...)
+}
+
+// pollActive samples `is-active` up to attempts times, returning on the first
+// non-active sample. Callers differ in how long they can afford to watch:
+// `up` has just started the unit and takes the full activePollAttempts, while
+// `status` must stay snappy and takes statusPollAttempts — enough to catch a
+// unit cycling through Restart= backoff, since a flapping unit shows a
+// non-active sample almost at once (#392).
+func pollActive(attempts int, scope ...string) (string, bool) {
 	args := append(append([]string{}, scope...), "is-active", userUnitName)
 	var state string
-	for i := 0; i < activePollAttempts; i++ {
+	for i := 0; i < attempts; i++ {
 		if i > 0 {
 			time.Sleep(activePollDelay)
 		}
@@ -261,6 +272,33 @@ func waitActive(scope ...string) (string, bool) {
 		}
 	}
 	return state, true
+}
+
+// printRestartHint explains a crash loop, which is the one state a user cannot
+// act on from the word alone: "restarting" without context reads like a
+// transient blip rather than a unit that will never come up. journalCmd is the
+// scope-correct journal invocation, since the rootless unit needs --user.
+func printRestartHint(stdout io.Writer, state, journalCmd string) {
+	if state != "activating" {
+		return
+	}
+	fmt.Fprintf(stdout, "  the unit is cycling through Restart= backoff — see `%s`\n", journalCmd)
+}
+
+// unitStateWord names what systemd settled on for a unit that is not reliably
+// active. "activating" is the one that matters: reached after an "active"
+// sample it means the unit is cycling through Restart= backoff, which is
+// neither running nor stopped, and collapsing it into "stopped" hides an
+// actively failing box almost as badly as calling it "running".
+func unitStateWord(state string) string {
+	switch state {
+	case "activating":
+		return "restarting"
+	case "failed":
+		return "failed"
+	default:
+		return "stopped"
+	}
 }
 
 // userUnitPath returns the installed systemd user-unit path; a var so tests can
@@ -529,9 +567,9 @@ func envOr(env map[string]string, key, def string) string {
 
 func agentStatusLinux(stdout, stderr io.Writer) int {
 	if systemTier() {
-		out, _ := systemctlRun("is-active", userUnitName)
-		if strings.TrimSpace(out) != "active" {
-			fmt.Fprintln(stdout, "piperd: stopped (system service)")
+		if state, ok := pollActive(statusPollAttempts); !ok {
+			fmt.Fprintf(stdout, "piperd: %s (system service)\n", unitStateWord(state))
+			printRestartHint(stdout, state, "journalctl -u "+userUnitName)
 			return 0
 		}
 		fmt.Fprintln(stdout, "piperd: running (system service)")
@@ -554,9 +592,9 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "piperd: not set up (run `piper agent up`)")
 		return 0
 	}
-	out, _ := systemctlRun("--user", "is-active", userUnitName)
-	if strings.TrimSpace(out) != "active" {
-		fmt.Fprintln(stdout, "piperd: stopped")
+	if state, ok := pollActive(statusPollAttempts, "--user"); !ok {
+		fmt.Fprintln(stdout, "piperd:", unitStateWord(state))
+		printRestartHint(stdout, state, "journalctl --user -u "+userUnitName)
 		return 0
 	}
 	fmt.Fprintln(stdout, "piperd: running")
