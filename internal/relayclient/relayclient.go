@@ -280,3 +280,76 @@ func (c *Client) GitHubRepos(ctx context.Context, accountCredential, installatio
 		return nil, fmt.Errorf("relay github repos: %s", resp.Status)
 	}
 }
+
+// Agent is one box on the account, as the relay's /agents listing reports it.
+// Connected is the relay's in-memory view of the tunnel session, so it is a
+// live answer rather than a stored flag.
+type Agent struct {
+	BaseDomain string `json:"agent"`
+	Name       string `json:"name"`
+	Owner      string `json:"owner"`
+	Connected  bool   `json:"connected"`
+}
+
+// ErrAgentConnected means the box still holds a live tunnel session. Removal is
+// irreversible, so the relay refuses rather than evicting it.
+var ErrAgentConnected = errors.New("box is connected; stop piperd on it first")
+
+// ErrNoAgent means the relay has no such box for this account. Unknown and
+// another tenant's box are indistinguishable by design.
+var ErrNoAgent = errors.New("no such box")
+
+// Agents lists the boxes the account may drive — its own plus any org's it
+// belongs to.
+func (c *Client) Agents(ctx context.Context, accountCredential string) ([]Agent, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/agents", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accountCredential)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, ErrBadCredential
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("relay agents: %s", resp.Status)
+	}
+	var body struct {
+		Agents []Agent `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	return body.Agents, nil
+}
+
+// RemoveAgent retires baseDomain, freeing its agent slot. The relay refuses
+// while the box is connected.
+func (c *Client) RemoveAgent(ctx context.Context, accountCredential, baseDomain string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+url.PathEscape(baseDomain), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+accountCredential)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil
+	case http.StatusConflict:
+		return ErrAgentConnected
+	case http.StatusNotFound:
+		return ErrNoAgent
+	case http.StatusUnauthorized:
+		return ErrBadCredential
+	default:
+		return fmt.Errorf("relay remove box: %s", resp.Status)
+	}
+}

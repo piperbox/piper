@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -265,5 +266,69 @@ func TestRequestRespectsContextCancellation(t *testing.T) {
 	cancel()
 	if _, err := New(srv.URL).LoginDevice(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("LoginDevice err = %v, want context.Canceled", err)
+	}
+}
+
+func TestAgentsDecodesTheListing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agents" || r.Method != http.MethodGet {
+			t.Errorf("got %s %s", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cred-1" {
+			t.Errorf("auth = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"agents":[
+			{"agent":"a1.example","name":"a1.example","owner":"alice","connected":true},
+			{"agent":"a2.example","name":"a2.example","owner":"alice","connected":false}]}`)
+	}))
+	defer srv.Close()
+
+	agents, err := New(srv.URL).Agents(context.Background(), "cred-1")
+	if err != nil {
+		t.Fatalf("Agents: %v", err)
+	}
+	if len(agents) != 2 {
+		t.Fatalf("got %d agents, want 2", len(agents))
+	}
+	if agents[0].BaseDomain != "a1.example" || !agents[0].Connected {
+		t.Errorf("agents[0] = %+v", agents[0])
+	}
+	if agents[1].Owner != "alice" || agents[1].Connected {
+		t.Errorf("agents[1] = %+v", agents[1])
+	}
+}
+
+func TestRemoveAgentStatusMapping(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		status int
+		want   error
+	}{
+		{"removed", http.StatusNoContent, nil},
+		{"connected", http.StatusConflict, ErrAgentConnected},
+		{"unknown or foreign", http.StatusNotFound, ErrNoAgent},
+		{"bad credential", http.StatusUnauthorized, ErrBadCredential},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodDelete || r.URL.Path != "/agents/box.example" {
+					t.Errorf("got %s %s", r.Method, r.URL.Path)
+				}
+				w.WriteHeader(c.status)
+			}))
+			defer srv.Close()
+
+			err := New(srv.URL).RemoveAgent(context.Background(), "cred-1", "box.example")
+			if c.want == nil {
+				if err != nil {
+					t.Fatalf("RemoveAgent = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, c.want) {
+				t.Fatalf("RemoveAgent = %v, want %v", err, c.want)
+			}
+		})
 	}
 }
