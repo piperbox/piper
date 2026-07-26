@@ -75,10 +75,17 @@ func TestLogsViewShowsContextAndFollowTag(t *testing.T) {
 	}
 }
 
+func TestLogsFooterListsFollow(t *testing.T) {
+	v := newLogsView("blog", "dep-123456789abc", "building")
+	if !strings.Contains(v.footer(), "f follow") {
+		t.Fatalf("logs footer must advertise follow, got %q", v.footer())
+	}
+}
+
 func TestLogsFKeyTogglesFollowAndIsNotForwarded(t *testing.T) {
 	v := newLogsView("blog", "dep-123456789abc", "building")
-	// Height 9 → viewport height 3 (chromeHeight 6); 20 lines overflow it.
-	m, _ := v.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+	// Height 11 → viewport height 3 (chromeHeight 8); 20 lines overflow it.
+	m, _ := v.Update(tea.WindowSizeMsg{Width: 80, Height: 11})
 	// Load overflowing content; the loaded handler GotoBottoms (YOffset at max).
 	m, _ = m.Update(logsLoadedMsg{logs: strings.Repeat("line\n", 20), status: "building"})
 	// Scroll up off the bottom so PageDown ('f') would have room to move.
@@ -101,8 +108,8 @@ func TestLogsFKeyTogglesFollowAndIsNotForwarded(t *testing.T) {
 
 func TestLogsResizePreservesScrollUnlessFollowing(t *testing.T) {
 	v := newLogsView("blog", "dep-123456789abc", "building")
-	// Height 9 → viewport height 3 (chromeHeight 6); 20 lines overflow it.
-	m, _ := v.Update(tea.WindowSizeMsg{Width: 80, Height: 9})
+	// Height 11 → viewport height 3 (chromeHeight 8); 20 lines overflow it.
+	m, _ := v.Update(tea.WindowSizeMsg{Width: 80, Height: 11})
 	m, _ = m.Update(logsLoadedMsg{logs: strings.Repeat("line\n", 20), status: "building"})
 	// Scroll up away from the bottom so a later GotoBottom would be visible.
 	for i := 0; i < 5; i++ {
@@ -115,14 +122,14 @@ func TestLogsResizePreservesScrollUnlessFollowing(t *testing.T) {
 
 	// follow=false: a resize must preserve the manual scroll position.
 	m, _ = m.Update(keyRunes('f'))
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
 	if m.(logsView).vp.YOffset != yAfterScroll {
 		t.Fatalf("resize moved scroll when not following: %d → %d", yAfterScroll, m.(logsView).vp.YOffset)
 	}
 
 	// follow=true: a resize should jump to the bottom.
 	m, _ = m.Update(keyRunes('f'))
-	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m, _ = m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
 	// 20 trailing-newline lines render as 21 logical lines; viewport height 4 → bottom YOffset is 17.
 	if m.(logsView).vp.YOffset != 17 {
 		t.Fatalf("resize should jump to bottom when following, got YOffset %d", m.(logsView).vp.YOffset)
