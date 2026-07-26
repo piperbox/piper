@@ -255,9 +255,8 @@ func main() {
 		opsHandler := relay.NewOpsHandler(metrics, ring)
 		go func() {
 			log.Printf("piper-relay: ops endpoint %s (metrics=%v logs=%v)", opsAddr, metricsOn, logsOn)
-			// Fatal like the control API: a silently-missing metrics endpoint
-			// would defeat its orchestration purpose.
-			if err := http.ListenAndServe(opsAddr, opsHandler); err != nil {
+			srv := &http.Server{Addr: opsAddr, Handler: opsHandler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+			if err := srv.ListenAndServe(); err != nil {
 				log.Fatalf("ops endpoint: %v", err)
 			}
 		}()
