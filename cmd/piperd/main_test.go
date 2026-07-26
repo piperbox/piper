@@ -365,7 +365,7 @@ func TestDialLocalControlGoesToAuthListener(t *testing.T) {
 		}
 	}()
 
-	dial := newDialLocal(ln.Addr().String(), "", "127.0.0.1:443")
+	dial := newDialLocal(ln.Addr().String(), "", "127.0.0.1:80", "127.0.0.1:443")
 	conn, err := dial(tunnel.KindControlAPI, nil)
 	if err != nil {
 		t.Fatalf("dial control: %v", err)
@@ -410,7 +410,7 @@ func TestDialLocalPassthroughACMEGoesToSolver(t *testing.T) {
 		}).Handshake()
 	}()
 
-	dial := newDialLocal("127.0.0.1:1", solver.Addr().String(), "127.0.0.1:443")
+	dial := newDialLocal("127.0.0.1:1", solver.Addr().String(), "127.0.0.1:80", "127.0.0.1:443")
 	conn, err := dial(tunnel.KindPassthrough, server)
 	if err != nil {
 		t.Fatalf("dial passthrough: %v", err)
@@ -474,7 +474,7 @@ func TestDialLocalPassthroughNonACMEGoesToCaddy(t *testing.T) {
 		}).Handshake()
 	}()
 
-	dial := newDialLocal("127.0.0.1:1", solver.Addr().String(), caddy.Addr().String())
+	dial := newDialLocal("127.0.0.1:1", solver.Addr().String(), "127.0.0.1:80", caddy.Addr().String())
 	conn, err := dial(tunnel.KindPassthrough, server)
 	if err != nil {
 		t.Fatalf("dial passthrough: %v", err)
@@ -730,5 +730,97 @@ func TestRepushRelayAppsRegisterErrorDoesNotStopOthers(t *testing.T) {
 
 	if want := []string{"test1@0", "test2@0"}; !reflect.DeepEqual(a.registered, want) {
 		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	}
+}
+
+// A relay-terminated KindHTTP stream must reach the box's *configured* HTTP
+// listener, not a hardcoded :80. A rootless install (the macOS LaunchAgent sets
+// PIPER_HTTP_ADDR=":8080" because it cannot bind a low port) otherwise refuses
+// every relay-forwarded request while its app is perfectly healthy (#399).
+func TestDialLocalHTTPGoesToConfiguredListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		c.Close()
+		accepted <- struct{}{}
+	}()
+
+	dial := newDialLocal("127.0.0.1:1", "", ln.Addr().String(), "127.0.0.1:1")
+	conn, err := dial(tunnel.KindHTTP, nil)
+	if err != nil {
+		t.Fatalf("dial http: %v", err)
+	}
+	conn.Close()
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("KindHTTP stream did not reach the configured HTTP listener")
+	}
+}
+
+// A passthrough stream must reach the configured HTTPS listener for the same
+// reason — a rootless box serves TLS on :8443, not :443 (#399).
+func TestDialLocalPassthroughGoesToConfiguredListener(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	accepted := make(chan struct{}, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		c.Close()
+		accepted <- struct{}{}
+	}()
+
+	client, server := net.Pipe()
+	defer client.Close()
+	go func() {
+		_ = tls.Client(client, &tls.Config{
+			ServerName:         "app.relay.example",
+			NextProtos:         []string{"h2", "http/1.1"},
+			InsecureSkipVerify: true,
+		}).Handshake()
+	}()
+
+	dial := newDialLocal("127.0.0.1:1", "", "127.0.0.1:1", ln.Addr().String())
+	conn, err := dial(tunnel.KindPassthrough, server)
+	if err != nil {
+		t.Fatalf("dial passthrough: %v", err)
+	}
+	defer conn.Close()
+	select {
+	case <-accepted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("passthrough stream did not reach the configured HTTPS listener")
+	}
+}
+
+// cfg.HTTPAddr/HTTPSAddr are *listen* addresses, so they are routinely
+// port-only (":8080") or wildcard ("0.0.0.0:8080"). Neither is dialable as-is
+// — ":8080" dials nothing and "0.0.0.0:8080" is not a destination — so they
+// must be rewritten to loopback before the tunnel dials back into them (#399).
+func TestDialAddrRewritesListenAddrToLoopback(t *testing.T) {
+	for _, tc := range []struct{ listen, want string }{
+		{":80", "127.0.0.1:80"},
+		{":8080", "127.0.0.1:8080"},
+		{"0.0.0.0:8443", "127.0.0.1:8443"},
+		{"[::]:8080", "127.0.0.1:8080"},
+		{"127.0.0.1:8080", "127.0.0.1:8080"},
+	} {
+		if got := dialAddr(tc.listen); got != tc.want {
+			t.Errorf("dialAddr(%q) = %q, want %q", tc.listen, got, tc.want)
+		}
 	}
 }
