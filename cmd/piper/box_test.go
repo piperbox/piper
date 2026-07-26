@@ -2,8 +2,12 @@ package main
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/piperbox/piper/internal/config"
 )
 
 func TestCmdBoxRejectsUnknownSubcommand(t *testing.T) {
@@ -70,6 +74,52 @@ func TestCmdBoxRmAcceptsPositionalThenFlag(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "not logged in") {
 		t.Fatalf("stderr = %q, want the not-logged-in message proving boxRemove ran with yes=true (no confirmation prompt)", errb.String())
+	}
+}
+
+// A relay rejecting the stored account credential must point at `piper
+// login`, the same remedy `connect` already gives — not the bare
+// "error: relay rejected account credential" a generic error branch would print.
+func TestBoxListBadCredentialSuggestsLogin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	if err := config.SaveClient(config.ClientConfig{
+		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "stale-cred",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := boxList(&out, &errb); code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "piper login") {
+		t.Fatalf("stderr = %q, want a `piper login` hint", errb.String())
+	}
+}
+
+// Same remedy for `box rm` hitting a rejected credential.
+func TestBoxRemoveBadCredentialSuggestsLogin(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	if err := config.SaveClient(config.ClientConfig{
+		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "stale-cred",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := boxRemove("b.example", true, &out, &errb); code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "piper login") {
+		t.Fatalf("stderr = %q, want a `piper login` hint", errb.String())
 	}
 }
 

@@ -100,6 +100,10 @@ func boxList(stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	agents, err := relayclient.New(api).Agents(ctx, cred)
+	if errors.Is(err, relayclient.ErrBadCredential) {
+		fmt.Fprintln(stderr, "error: relay rejected your account credential; run `piper login` again")
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
@@ -142,6 +146,9 @@ func boxRemove(baseDomain string, yes bool, stdout, stderr io.Writer) int {
 		return 1
 	case errors.Is(err, relayclient.ErrNoAgent):
 		fmt.Fprintf(stderr, "error: no box %s on this account — run `piper box ls` to see them\n", baseDomain)
+		return 1
+	case errors.Is(err, relayclient.ErrBadCredential):
+		fmt.Fprintln(stderr, "error: relay rejected your account credential; run `piper login` again")
 		return 1
 	default:
 		fmt.Fprintln(stderr, "error:", err)
