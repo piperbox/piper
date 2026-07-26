@@ -286,7 +286,8 @@ func connect(o connectOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error: relay rejected your account credential; run `piper login` again")
 		return 1
 	case errors.Is(err, relayclient.ErrQuotaExceeded):
-		fmt.Fprintln(stderr, "error: account agent quota exceeded; remove an existing box or upgrade")
+		fmt.Fprintln(stderr, "error: account agent quota exceeded")
+		fmt.Fprintln(stderr, "run `piper box ls` to see your boxes, then `piper box rm <base-domain>` to free a slot")
 		return 1
 	case err != nil:
 		fmt.Fprintln(stderr, "error:", err)
