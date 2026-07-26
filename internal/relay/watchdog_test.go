@@ -81,7 +81,7 @@ func TestDisabledWatchdogEvictsLiveSession(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil)
 
 	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
 	defer sess.Close()
@@ -129,7 +129,7 @@ func TestDeletedAgentWatchdogEvictsLiveSession(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil)
 
 	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
 	defer sess.Close()
@@ -217,7 +217,7 @@ func TestPostDisableRedialRejected(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil)
 
 	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
 	defer sess.Close()

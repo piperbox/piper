@@ -16,6 +16,7 @@ require (
 	github.com/hashicorp/yamux v0.1.2
 	github.com/moby/go-archive v0.2.0
 	github.com/moby/patternmatcher v0.6.0
+	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/sys v0.45.0
 	golang.org/x/term v0.43.0
 	golang.org/x/time v0.15.0
@@ -121,7 +122,6 @@ require (
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pires/go-proxyproto v0.12.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.5 // indirect
 	github.com/prometheus/otlptranslator v1.0.0 // indirect

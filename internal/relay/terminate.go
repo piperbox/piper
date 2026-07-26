@@ -44,7 +44,7 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 // consumed ClientHello via prefixConn), then pipes decrypted plaintext to a
 // KindHTTP stream on the app's session. The relay sees plaintext HTTP but never
 // parses it — it is a byte pump into the box's :80.
-func terminate(conn net.Conn, buffered []byte, sess *tunnel.Session, tlsCfg *tls.Config) {
+func terminate(conn net.Conn, buffered []byte, sess *tunnel.Session, tlsCfg *tls.Config, m *Metrics) {
 	tlsConn := tls.Server(&prefixConn{Conn: conn, prefix: buffered}, tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
 		return
@@ -53,6 +53,8 @@ func terminate(conn net.Conn, buffered []byte, sess *tunnel.Session, tlsCfg *tls
 	if err != nil {
 		return
 	}
+	m.StreamStart()
+	defer m.StreamEnd()
 	defer stream.Close()
 	done := make(chan struct{}, 2)
 	go func() { io.Copy(stream, tlsConn); done <- struct{}{} }()

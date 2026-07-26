@@ -73,10 +73,10 @@ func startTestRelay(t *testing.T, tlsCfg *tls.Config, ctrl http.Handler) (*tunne
 			if err != nil {
 				return
 			}
-			go handlePublic(c, router, tlsCfg, ctrlHost, ctrlQ)
+			go handlePublic(c, router, tlsCfg, ctrlHost, ctrlQ, nil)
 		}
 	}()
-	go acceptHTTP(httpLn, router)
+	go acceptHTTP(httpLn, router, nil)
 	t.Cleanup(func() { tlsLn.Close(); httpLn.Close(); tunLn.Close() })
 
 	conn, err := net.Dial("tcp", tunLn.Addr().String())
@@ -442,7 +442,7 @@ func TestReconnectRederivesCustomDomains(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tunLn.Close()
-	go acceptTunnels(tunLn, st, router, nil, nil)
+	go acceptTunnels(tunLn, st, router, nil, nil, nil)
 
 	dial := func(tok, base string) *tunnel.Session {
 		t.Helper()

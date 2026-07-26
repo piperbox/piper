@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -233,6 +234,34 @@ func main() {
 	}
 
 	router := relay.NewRouter()
+
+	// Infra-only ops surface (metrics + log export). Isolation is the bind
+	// address — loopback by default, a private VPC IP in production — never
+	// the SNI dispatcher, so no public hostname can route here. Each endpoint
+	// is off unless its toggle is set; with neither, nothing binds at all.
+	opsAddr := env("PIPER_RELAY_OPS_ADDR", "127.0.0.1:9090")
+	metricsOn := os.Getenv("PIPER_RELAY_METRICS") == "1"
+	logsOn := os.Getenv("PIPER_RELAY_LOGS") == "1"
+	var metrics *relay.Metrics
+	var ring *relay.LogRing
+	if metricsOn {
+		metrics = relay.NewMetrics(router)
+	}
+	if logsOn {
+		ring = relay.NewLogRing(1000)
+		log.SetOutput(io.MultiWriter(os.Stderr, ring))
+	}
+	if metricsOn || logsOn {
+		opsHandler := relay.NewOpsHandler(metrics, ring)
+		go func() {
+			log.Printf("piper-relay: ops endpoint %s (metrics=%v logs=%v)", opsAddr, metricsOn, logsOn)
+			srv := &http.Server{Addr: opsAddr, Handler: opsHandler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+			if err := srv.ListenAndServe(); err != nil {
+				log.Fatalf("ops endpoint: %v", err)
+			}
+		}()
+	}
+
 	apiHandler := relay.NewAPIWithTunnel(st, v, tunnelPublic, router, webRedirects, ghApp)
 
 	ctrl := apiHandler
@@ -279,5 +308,5 @@ func main() {
 	}
 
 	log.Printf("piper-relay: TLS %s, HTTP %s, tunnel %s", tlsAddr, httpAddr, tunnelAddr)
-	log.Fatal(relay.Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, ghApp, delivery))
+	log.Fatal(relay.Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, ghApp, delivery, metrics))
 }
