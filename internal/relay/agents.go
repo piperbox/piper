@@ -11,15 +11,22 @@ import (
 // authentication path, misleading on an explicit delete.
 var ErrUnknownAgent = errors.New("unknown agent")
 
-// DeleteAgent retires one box: its agents row plus the rows keyed on its name.
+// DeleteAgent retires one box: its agents row plus the rows keyed on its name
+// or base domain.
 //
-// hostnames is deliberately NOT touched. That table keys on account_id with no
-// agent column (see schema.sql), so there is no way to tell which rows were
-// this box's — the relay already depends on this being unknowable, which is why
+// Deletes pending_events and repo_bindings (keyed on agents(name)), and
+// custom_domains (keyed directly on agent_base, unlike hostnames). hostnames
+// is deliberately NOT touched. That table keys on account_id with no agent
+// column (see schema.sql), so there is no way to tell which rows were this
+// box's — the relay already depends on this being unknowable, which is why
 // repushRelayApps re-pushes hostnames from the box instead. Deleting the
 // account's hostnames would destroy its *other* boxes' URLs. The consequence is
 // that removal frees an agent slot but not an app slot; that gap is tracked
 // separately rather than guessed at here.
+//
+// custom_domains is different: it names the agent directly via agent_base, so
+// a row left behind would return ErrDomainTaken forever to its own owner, with
+// no API able to clear it — a permanent squat.
 //
 // The name is resolved first because repo_bindings and pending_events both
 // reference agents(name), not base_domain.
@@ -41,9 +48,14 @@ func (s *Store) DeleteAgent(baseDomain string) error {
 	for _, stmt := range []string{
 		`DELETE FROM pending_events WHERE agent_name = ?`,
 		`DELETE FROM repo_bindings WHERE agent_name = ?`,
+		`DELETE FROM custom_domains WHERE agent_base = ?`,
 		`DELETE FROM agents WHERE name = ?`,
 	} {
-		if _, err := tx.Exec(stmt, name); err != nil {
+		arg := name
+		if stmt == `DELETE FROM custom_domains WHERE agent_base = ?` {
+			arg = baseDomain
+		}
+		if _, err := tx.Exec(stmt, arg); err != nil {
 			return err
 		}
 	}

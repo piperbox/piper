@@ -137,3 +137,46 @@ func TestDeleteAgentLeavesHostnamesIntact(t *testing.T) {
 		t.Errorf("hostnames rows = %d, want 1 (removal must not reclaim app slots)", n)
 	}
 }
+
+// custom_domains names the agent directly via agent_base, so unlike hostnames
+// it must go with the box. ClaimDomain evicts only expired *pending* claims, so
+// an active row left behind would answer ErrDomainTaken forever — to the domain's
+// own owner, with no API able to clear it.
+func TestDeleteAgentClearsItsCustomDomains(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, err := st.UpsertAccount("sub-1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doomed, err := st.EnrollForAccount(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeper, err := st.EnrollForAccount(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddCustomDomain(doomed.BaseDomain, "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddCustomDomain(keeper.BaseDomain, "blog.example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteAgent(doomed.BaseDomain); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+
+	if n := countRows(t, st, `SELECT COUNT(*) FROM custom_domains WHERE agent_base=?`, doomed.BaseDomain); n != 0 {
+		t.Errorf("removed box left %d custom_domains rows, want 0", n)
+	}
+	// The surviving box keeps its domain.
+	if n := countRows(t, st, `SELECT COUNT(*) FROM custom_domains WHERE agent_base=?`, keeper.BaseDomain); n != 1 {
+		t.Errorf("keeper custom_domains = %d, want 1", n)
+	}
+	// And the freed domain can be claimed again — the squat is gone.
+	if err := st.AddCustomDomain(keeper.BaseDomain, "shop.example.com"); err != nil {
+		t.Errorf("re-claiming the removed box's domain: %v, want nil", err)
+	}
+}
