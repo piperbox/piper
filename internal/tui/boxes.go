@@ -11,7 +11,8 @@ import (
 // boxesView is the depth-1 box switcher/editor: a table of the configured boxes
 // read fresh from the client config. ↵ connects (switches the active box), a/e
 // add/edit via a form, x removes. It is the one view that owns local config
-// state rather than piperd state. Relay boxes are listed but not switchable.
+// state rather than piperd state. Relay-only boxes (no LAN address) are listed
+// but not switchable.
 type boxesView struct {
 	dial    Dialer
 	boxes   []config.Box
@@ -19,6 +20,7 @@ type boxesView struct {
 	loaded  bool
 	cursor  int
 	err     error
+	notice  string          // why enter was refused; view-local (an errMsg cmd would banner the current box as down), survives reloads, cleared on cursor move
 	reach   map[string]bool // box name -> last probe result; absent = probing
 }
 
@@ -45,8 +47,12 @@ func (v boxesView) refresh(API) tea.Cmd {
 	}
 }
 
-// isRelay reports whether the box at i is relay-backed (not switchable here).
-func (v boxesView) isRelay(i int) bool { return v.boxes[i].RelayAPI != "" }
+// relayOnly reports whether the box at i is reachable only through the relay
+// (no LAN address, so not switchable here). A box with both a LAN address and
+// relay creds — a relay-enrolled box on the local network — is switchable.
+func (v boxesView) relayOnly(i int) bool {
+	return v.boxes[i].RelayAPI != "" && v.boxes[i].Addr == ""
+}
 
 // probe returns a cmd that dials box and calls ListApps; reachable is true iff
 // both succeed. One cmd per box keeps a dead box from blocking the others.
@@ -71,7 +77,7 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var probes []tea.Cmd
 		for i, box := range v.boxes {
-			if box.Name == v.current || v.isRelay(i) {
+			if box.Name == v.current || v.relayOnly(i) {
 				continue
 			}
 			probes = append(probes, v.probe(box))
@@ -84,18 +90,25 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "up", "k":
+			v.notice = ""
 			if v.cursor > 0 {
 				v.cursor--
 			}
 		case "down", "j":
+			v.notice = ""
 			if v.cursor < len(v.boxes)-1 {
 				v.cursor++
 			}
 		case "enter":
-			if len(v.boxes) > 0 && !v.isRelay(v.cursor) {
-				box := v.boxes[v.cursor]
-				return v, func() tea.Msg { return switchBoxMsg{box: box} }
+			if len(v.boxes) == 0 {
+				break
 			}
+			if v.relayOnly(v.cursor) {
+				v.notice = fmt.Sprintf("%s has no LAN address: relay boxes are driven with `piper --remote <domain>`", v.boxes[v.cursor].Name)
+				return v, nil
+			}
+			box := v.boxes[v.cursor]
+			return v, func() tea.Msg { return switchBoxMsg{box: box} }
 		case "a":
 			boxes := v.boxes
 			return v, func() tea.Msg { return pushMsg{newBoxForm(v.dial, boxes)} }
@@ -131,6 +144,9 @@ func (v boxesView) View() string {
 		}
 		fmt.Fprintf(&b, "%s%-16s %-22s %s\n", cursor, box.Name, box.Addr, v.status(i))
 	}
+	if v.notice != "" {
+		fmt.Fprintf(&b, "\n ⚠ %s\n", v.notice)
+	}
 	return b.String()
 }
 
@@ -138,7 +154,7 @@ func (v boxesView) status(i int) string {
 	switch {
 	case v.boxes[i].Name == v.current:
 		return "current"
-	case v.isRelay(i):
+	case v.relayOnly(i):
 		return "—"
 	}
 	reachable, probed := v.reach[v.boxes[i].Name]
