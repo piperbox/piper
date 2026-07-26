@@ -138,3 +138,18 @@ func (r *Router) LookupCustom(host string) (*tunnel.Session, bool) {
 	}
 	return nil, false
 }
+
+// Counts reports the router's live registration totals for the metrics
+// gauges: agent sessions, relay-terminated hostnames, and custom domains.
+// RegisterCustom stores a domain in both byBase and custom, so an agent is a
+// byBase entry with no custom twin.
+func (r *Router) Counts() (agents, hosts, custom int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for k := range r.byBase {
+		if _, ok := r.custom[k]; !ok {
+			agents++
+		}
+	}
+	return agents, len(r.byHost), len(r.custom)
+}

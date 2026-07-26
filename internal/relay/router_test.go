@@ -214,3 +214,25 @@ func TestUnregisterKeepsSuccessorEntries(t *testing.T) {
 		t.Fatalf("custom domain = %v (%p), want the reconnected session %p", ok, s, fresh)
 	}
 }
+
+func TestRouterCounts(t *testing.T) {
+	r := NewRouter()
+	s1 := &tunnel.Session{BaseDomain: "alice.example.com"}
+	s2 := &tunnel.Session{BaseDomain: "bob.example.com"}
+	r.Register(s1)
+	r.Register(s2)
+	r.RegisterHost("blog-alice.public.getpiper.co", s1)
+	// RegisterCustom writes byBase AND custom — Counts must not double-count
+	// the custom domain as an agent.
+	r.RegisterCustom("byo.example.org", s1)
+
+	a, h, c := r.Counts()
+	if a != 2 || h != 1 || c != 1 {
+		t.Fatalf("Counts() = %d,%d,%d; want 2,1,1", a, h, c)
+	}
+	r.Unregister(s1)
+	a, h, c = r.Counts()
+	if a != 1 || h != 0 || c != 0 {
+		t.Fatalf("after Unregister: Counts() = %d,%d,%d; want 1,0,0", a, h, c)
+	}
+}
