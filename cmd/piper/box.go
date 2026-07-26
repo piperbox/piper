@@ -37,17 +37,23 @@ func cmdBox(args []string, stdout, stderr io.Writer) int {
 		}
 		return boxList(stdout, stderr)
 	case "rm":
-		fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+		usage := "usage: piper box rm <base-domain> [--yes]"
+		if len(args) < 2 {
+			fmt.Fprintln(stderr, usage)
+			return 2
+		}
+		base := args[1]
+		fs := flag.NewFlagSet("box rm", flag.ContinueOnError)
 		fs.SetOutput(stderr)
 		yes := fs.Bool("yes", false, "skip the confirmation prompt")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := fs.Parse(args[2:]); err != nil {
 			return 2
 		}
-		if fs.NArg() != 1 {
-			fmt.Fprintln(stderr, "usage: piper box rm <base-domain> [--yes]")
+		if fs.NArg() != 0 {
+			fmt.Fprintln(stderr, usage)
 			return 2
 		}
-		return boxRemove(fs.Arg(0), *yes, stdout, stderr)
+		return boxRemove(base, *yes, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, boxUsage)
 		return 2

@@ -54,6 +54,25 @@ func TestCmdBoxRmNeedsABaseDomain(t *testing.T) {
 	}
 }
 
+// The documented invocation order — positional base-domain, then --yes — must
+// actually parse: Go's flag package stops at the first non-flag argument, so
+// naively doing fs.Parse(args[1:]) leaves --yes in NArg() and the command
+// wrongly bails out to usage.
+func TestCmdBoxRmAcceptsPositionalThenFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out, errb bytes.Buffer
+	code := cmdBox([]string{"rm", "b.example", "--yes"}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1 (should reach boxRemove and fail for lack of login)", code)
+	}
+	if strings.Contains(errb.String(), "usage: piper box rm") {
+		t.Fatalf("stderr = %q, must not print usage for a valid invocation", errb.String())
+	}
+	if !strings.Contains(errb.String(), "not logged in") {
+		t.Fatalf("stderr = %q, want the not-logged-in message proving boxRemove ran with yes=true (no confirmation prompt)", errb.String())
+	}
+}
+
 // Declining the prompt must make no request at all — the check has to happen
 // before the relay is dialed, or a "no" would still have removed the box.
 func TestBoxRemoveAbortsOnDeclinedPrompt(t *testing.T) {
