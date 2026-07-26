@@ -45,17 +45,15 @@ func (s *Store) DeleteAgent(baseDomain string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM custom_domains WHERE agent_base = ?`, baseDomain); err != nil {
+		return err
+	}
 	for _, stmt := range []string{
 		`DELETE FROM pending_events WHERE agent_name = ?`,
 		`DELETE FROM repo_bindings WHERE agent_name = ?`,
-		`DELETE FROM custom_domains WHERE agent_base = ?`,
 		`DELETE FROM agents WHERE name = ?`,
 	} {
-		arg := name
-		if stmt == `DELETE FROM custom_domains WHERE agent_base = ?` {
-			arg = baseDomain
-		}
-		if _, err := tx.Exec(stmt, arg); err != nil {
+		if _, err := tx.Exec(stmt, name); err != nil {
 			return err
 		}
 	}
