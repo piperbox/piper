@@ -583,8 +583,16 @@ func TestConnectQuotaExceeded(t *testing.T) {
 	if code := run([]string{"connect", "--data-dir", t.TempDir()}, &out, &errb); code != 1 {
 		t.Fatalf("code = %d, want 1", code)
 	}
-	if !bytes.Contains(errb.Bytes(), []byte("quota")) {
-		t.Fatalf("stderr = %q, want a quota message", errb.String())
+	// The message must name only remedies that exist. It used to say "remove an
+	// existing box or upgrade" when neither was possible (#401).
+	got := errb.String()
+	for _, want := range []string{"quota", "piper box ls", "piper box rm"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stderr = %q, want it to mention %q", got, want)
+		}
+	}
+	if strings.Contains(got, "upgrade") {
+		t.Errorf("stderr = %q, must not offer an upgrade path that does not exist", got)
 	}
 }
 
