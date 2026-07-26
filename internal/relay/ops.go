@@ -1,8 +1,12 @@
 package relay
 
 import (
+	"fmt"
+	"net/http"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Metrics owns the relay's Prometheus instruments on a private registry — the
@@ -98,4 +102,24 @@ func (m *Metrics) StreamEnd() {
 		return
 	}
 	m.activeStreams.Dec()
+}
+
+// NewOpsHandler serves the relay's infra-only ops surface: /metrics when m is
+// non-nil, /logs when ring is non-nil. A nil argument means that endpoint is
+// toggled off and 404s — the caller decides exposure purely by what it
+// constructs, so there is no config to consult here.
+func NewOpsHandler(m *Metrics, ring *LogRing) http.Handler {
+	mux := http.NewServeMux()
+	if m != nil {
+		mux.Handle("GET /metrics", promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{}))
+	}
+	if ring != nil {
+		mux.HandleFunc("GET /logs", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			for _, line := range ring.Lines() {
+				fmt.Fprintln(w, line)
+			}
+		})
+	}
+	return mux
 }

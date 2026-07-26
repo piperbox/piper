@@ -1,20 +1,19 @@
 package relay
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/piperbox/piper/internal/tunnel"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// scrapeMetrics returns the text exposition of m's registry via promhttp.
-// (Task 4 will rewrite this to use NewOpsHandler instead.)
+// scrapeMetrics returns the text exposition of m's registry via NewOpsHandler.
 func scrapeMetrics(t *testing.T, m *Metrics) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{}).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	NewOpsHandler(m, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	return rec.Body.String()
 }
 
@@ -72,4 +71,42 @@ func TestMetricsNilReceiverIsNoOp(t *testing.T) {
 	m.ConnUnrouted("http")
 	m.StreamStart()
 	m.StreamEnd()
+}
+
+func TestOpsHandlerLogs(t *testing.T) {
+	ring := NewLogRing(8)
+	ring.Write([]byte("first\nsecond\n"))
+	rec := httptest.NewRecorder()
+	NewOpsHandler(nil, ring).ServeHTTP(rec, httptest.NewRequest("GET", "/logs", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /logs = %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain", ct)
+	}
+	if got := rec.Body.String(); got != "first\nsecond\n" {
+		t.Fatalf("body = %q, want %q", got, "first\nsecond\n")
+	}
+}
+
+func TestOpsHandlerDisabledEndpoints404(t *testing.T) {
+	cases := []struct {
+		name string
+		h    http.Handler
+		path string
+		want int
+	}{
+		{"metrics off", NewOpsHandler(nil, NewLogRing(8)), "/metrics", http.StatusNotFound},
+		{"logs off", NewOpsHandler(NewMetrics(NewRouter()), nil), "/logs", http.StatusNotFound},
+		{"metrics on", NewOpsHandler(NewMetrics(NewRouter()), nil), "/metrics", http.StatusOK},
+		{"logs on", NewOpsHandler(nil, NewLogRing(8)), "/logs", http.StatusOK},
+		{"unknown path", NewOpsHandler(NewMetrics(NewRouter()), NewLogRing(8)), "/nope", http.StatusNotFound},
+	}
+	for _, c := range cases {
+		rec := httptest.NewRecorder()
+		c.h.ServeHTTP(rec, httptest.NewRequest("GET", c.path, nil))
+		if rec.Code != c.want {
+			t.Errorf("%s: GET %s = %d, want %d", c.name, c.path, rec.Code, c.want)
+		}
+	}
 }
