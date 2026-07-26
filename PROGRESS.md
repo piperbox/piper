@@ -124,7 +124,7 @@ Goal: bare `piper` in a TTY opens a full-screen control surface; every existing 
 - ✅ Actions: new-app form, deploy (confirm → live build), stop/delete confirms — [#194](https://github.com/piperbox/piper/issues/194)
 - ✅ Key discoverability: dim footer legend on every view (the `?` help overlay it shipped with is gone — footers cover it) — [#196](https://github.com/piperbox/piper/issues/196)
 - ✅ Boxes view: switcher + add/edit/remove config editor over schema v2 — [#198](https://github.com/piperbox/piper/issues/198)
-- ✅ Wizards: login (LAN token, verify → save to current box), GitHub App setup, link repo; unauth hint on apps home — [#200](https://github.com/piperbox/piper/issues/200)
+- ✅ Wizards: GitHub App setup, link repo; unauth hints on apps home point at the boxes menu (LAN) / github wizard (relay) — [#200](https://github.com/piperbox/piper/issues/200) (standalone login view removed as redundant — [#408](https://github.com/piperbox/piper/issues/408))
 - ✅ Per-app domains in the app drilldown: inline list + add (CNAME handoff, live issuance status) / remove — [#285](https://github.com/piperbox/piper/issues/285)
 - ✅ Relay GitHub onboarding wizard (login → install → repos) + link-form repo picker/root-dir — [#325](https://github.com/piperbox/piper/issues/325)
 
