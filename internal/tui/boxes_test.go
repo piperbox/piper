@@ -103,6 +103,71 @@ func TestEnterOnBoxEmitsSwitch(t *testing.T) {
 	}
 }
 
+func TestEnterOnLANBoxWithRelayCredsEmitsSwitch(t *testing.T) {
+	// A LAN-addressable box that also carries relay creds (a relay-enrolled
+	// box on the local network) must still be switchable via its LAN address.
+	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
+	vv, _ := v.Update(boxesLoadedMsg{
+		boxes:   []config.Box{{Name: "pi4"}, {Name: "cloud", Addr: "192.168.1.6:8088", RelayAPI: "https://r.example"}},
+		current: "pi4",
+	})
+	v = vv.(boxesView)
+	vv, _ = v.Update(keyRunes('j'))
+	v = vv.(boxesView)
+	_, cmd := v.Update(keyEnter())
+	if cmd == nil {
+		t.Fatal("enter on a LAN box with relay creds should emit a switch")
+	}
+	sw, ok := cmd().(switchBoxMsg)
+	if !ok || sw.box.Name != "cloud" {
+		t.Fatalf("want switchBoxMsg for cloud, got %#v", cmd())
+	}
+}
+
+func TestEnterOnRelayOnlyBoxExplains(t *testing.T) {
+	// A relay-only box (no LAN address) is not switchable here; enter must say
+	// so instead of silently doing nothing.
+	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
+	vv, _ := v.Update(boxesLoadedMsg{
+		boxes:   []config.Box{{Name: "pi4"}, {Name: "cloud", RelayAPI: "https://r.example"}},
+		current: "pi4",
+	})
+	v = vv.(boxesView)
+	vv, _ = v.Update(keyRunes('j'))
+	v = vv.(boxesView)
+	_, cmd := v.Update(keyEnter())
+	if cmd == nil {
+		t.Fatal("enter on a relay-only box should explain, not no-op")
+	}
+	em, ok := cmd().(errMsg)
+	if !ok || !strings.Contains(em.err.Error(), "relay") {
+		t.Fatalf("want errMsg mentioning relay, got %#v", cmd())
+	}
+}
+
+func TestBoxesRefreshProbesLANBoxWithRelayCreds(t *testing.T) {
+	// Only the current box and relay-only boxes are skipped: a LAN box with
+	// relay creds gets a reachability probe like any other LAN box.
+	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
+	_, cmd := v.Update(boxesLoadedMsg{
+		boxes: []config.Box{
+			{Name: "pi4"},
+			{Name: "cloud", Addr: "192.168.1.6:8088", RelayAPI: "https://r.example"},
+			{Name: "faraway", RelayAPI: "https://r.example"},
+		},
+		current: "pi4",
+	})
+	if cmd == nil {
+		t.Fatal("loading boxes should emit reachability probes")
+	}
+	// tea.Batch collapses a single cmd, so exactly one probe (cloud) yields a
+	// bare boxProbeMsg; faraway (relay-only) and pi4 (current) are skipped.
+	probe, ok := cmd().(boxProbeMsg)
+	if !ok || probe.name != "cloud" {
+		t.Fatalf("want a single probe for cloud, got %#v", cmd())
+	}
+}
+
 func TestRootSwitchSwapsBoxAndResetsStack(t *testing.T) {
 	m := NewModel("pi4", "192.168.1.6:8088", false, fakeAPI{}).
 		WithDialer(fakeDialer(fakeAPI{apps: nil}, "192.168.1.9:8088", false, nil))
