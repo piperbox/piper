@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -34,6 +36,18 @@ func cmdBox(args []string, stdout, stderr io.Writer) int {
 			return 2
 		}
 		return boxList(stdout, stderr)
+	case "rm":
+		fs := flag.NewFlagSet("rm", flag.ContinueOnError)
+		fs.SetOutput(stderr)
+		yes := fs.Bool("yes", false, "skip the confirmation prompt")
+		if err := fs.Parse(args[1:]); err != nil {
+			return 2
+		}
+		if fs.NArg() != 1 {
+			fmt.Fprintln(stderr, "usage: piper box rm <base-domain> [--yes]")
+			return 2
+		}
+		return boxRemove(fs.Arg(0), *yes, stdout, stderr)
 	default:
 		fmt.Fprintln(stderr, boxUsage)
 		return 2
@@ -90,4 +104,41 @@ func boxList(stdout, stderr io.Writer) int {
 	}
 	fmt.Fprint(stdout, renderBoxes(rows))
 	return 0
+}
+
+// boxRemove retires a box, freeing its agent slot. The confirmation comes
+// before the relay is dialed: removal cannot be undone — the enrollment token
+// is gone and the box must run `piper connect` again — so a declined prompt
+// must not have sent anything.
+//
+// Removing a box does not free its app-cap slots. The relay's hostnames table
+// keys on the account, not the agent, so it cannot tell which URLs were this
+// box's; saying so here is better than a user inferring it from a still-full
+// app quota.
+func boxRemove(baseDomain string, yes bool, stdout, stderr io.Writer) int {
+	if !yes && !confirmPrompt(stdout, "remove "+baseDomain+"? it must run `piper connect` again to come back") {
+		fmt.Fprintln(stdout, "aborted")
+		return 0
+	}
+	api, cred, ok := relayAccount(stderr)
+	if !ok {
+		return 1
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	switch err := relayclient.New(api).RemoveAgent(ctx, cred, baseDomain); {
+	case err == nil:
+		fmt.Fprintf(stdout, "removed %s\n", baseDomain)
+		fmt.Fprintln(stdout, "its app URLs stay reserved on the account; only the box slot is freed.")
+		return 0
+	case errors.Is(err, relayclient.ErrAgentConnected):
+		fmt.Fprintf(stderr, "error: %s is still connected — stop piperd on that box, then retry\n", baseDomain)
+		return 1
+	case errors.Is(err, relayclient.ErrNoAgent):
+		fmt.Fprintf(stderr, "error: no box %s on this account — run `piper box ls` to see them\n", baseDomain)
+		return 1
+	default:
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
 }

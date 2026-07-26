@@ -43,3 +43,32 @@ func TestBoxListSaysSoWhenEmpty(t *testing.T) {
 		t.Fatalf("empty listing = %q, want it to say there are no boxes", got)
 	}
 }
+
+func TestCmdBoxRmNeedsABaseDomain(t *testing.T) {
+	var out, errb bytes.Buffer
+	if code := cmdBox([]string{"rm"}, &out, &errb); code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+	if !strings.Contains(errb.String(), "usage: piper box rm") {
+		t.Fatalf("stderr = %q, want the rm usage line", errb.String())
+	}
+}
+
+// Declining the prompt must make no request at all — the check has to happen
+// before the relay is dialed, or a "no" would still have removed the box.
+func TestBoxRemoveAbortsOnDeclinedPrompt(t *testing.T) {
+	oldStdin := stdinReader
+	stdinReader = strings.NewReader("n\n")
+	defer func() { stdinReader = oldStdin }()
+
+	var out, errb bytes.Buffer
+	if code := boxRemove("a1.example", false, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if !strings.Contains(out.String(), "aborted") {
+		t.Fatalf("stdout = %q, want an abort notice", out.String())
+	}
+	if errb.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty (no relay call attempted)", errb.String())
+	}
+}
