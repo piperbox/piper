@@ -1,8 +1,11 @@
 package relay
 
 import (
+	"bytes"
+	"log"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -112,4 +115,49 @@ func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
 	})
 
 	sess2.Close()
+}
+
+// A rejected handshake must leave a trace on the relay. serveTunnel used to
+// close the connection silently, so a box with a stale enrollment was invisible
+// on both ends at once: the agent logged "connected" (#400) and the relay
+// logged nothing at all, making the ops /logs endpoint useless for diagnosing
+// exactly the case it most needed to explain.
+func TestServeTunnelLogsRejectedHandshake(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	st.Configure("public.getpiper.co", 3, 10, 5)
+
+	var logged bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go acceptTunnels(ln, st, NewRouter(), nil, nil, nil)
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := tunnel.Dial(conn, "stale-token", "092942b4-alice.public.getpiper.co"); err == nil {
+		t.Fatal("Dial succeeded with a token the relay never issued")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logged.String(), "092942b4-alice.public.getpiper.co") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("rejected handshake left no log naming the base domain; log was %q", logged.String())
 }

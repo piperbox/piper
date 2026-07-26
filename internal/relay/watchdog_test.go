@@ -209,8 +209,10 @@ func TestPostDisableRedialRejected(t *testing.T) {
 		t.Fatal("disabled account must be rejected at the tunnel handshake, not merely evicted later")
 	}
 
-	// Belt-and-braces through the full relay path: the re-dialed session never
-	// routes and is closed.
+	// Belt-and-braces through the full relay path: the re-dial never routes.
+	// Since #400 the agent learns this at Dial — the relay acks its verdict
+	// before yamux starts — so the rejection surfaces as a Dial error rather
+	// than a session that comes up and is torn down a moment later.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -219,11 +221,16 @@ func TestPostDisableRedialRejected(t *testing.T) {
 	router := NewRouter()
 	go acceptTunnels(ln, st, router, nil, nil, nil)
 
-	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
-	defer sess.Close()
-	waitCond(t, 2*time.Second, "rejected session torn down", func() bool {
-		return sess.Closed()
-	})
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	sess, err := tunnel.Dial(conn, en.Token, en.BaseDomain)
+	if err == nil {
+		sess.Close()
+		t.Fatal("disabled account must be rejected at the handshake, not handed a session")
+	}
 	if _, ok := router.Lookup(en.BaseDomain); ok {
 		t.Fatal("disabled account must not register a base")
 	}
