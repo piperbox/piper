@@ -57,6 +57,7 @@ func TestCmdBoxRmNeedsABaseDomain(t *testing.T) {
 // Declining the prompt must make no request at all — the check has to happen
 // before the relay is dialed, or a "no" would still have removed the box.
 func TestBoxRemoveAbortsOnDeclinedPrompt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	oldStdin := stdinReader
 	stdinReader = strings.NewReader("n\n")
 	defer func() { stdinReader = oldStdin }()
