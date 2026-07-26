@@ -295,10 +295,9 @@ func (v wizardReposView) footer() string {
 	return "esc back · ? help"
 }
 
-// retry clears a completed error load so the next refresh (the root's r key,
-// which calls refresh directly) re-arms the request. A successful load is
-// left untouched — GitHubRepos loads once, not on a timer, so r has nothing
-// to do there.
+// retry clears a completed error load so the next refresh re-arms the request.
+// A successful load is left untouched — GitHubRepos loads once, not on a timer,
+// so r has nothing to do there.
 func (v wizardReposView) retry() wizardReposView {
 	if v.loaded && v.err != nil {
 		v.loaded, v.err = false, nil
@@ -318,9 +317,17 @@ func (v wizardReposView) refresh(API) tea.Cmd {
 }
 
 func (v wizardReposView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m, ok := msg.(wizReposMsg); ok {
+	switch m := msg.(type) {
+	case wizReposMsg:
 		v.loaded = true
 		v.repos, v.err = m.repos, m.err
+	case tea.KeyMsg:
+		// r is this view's alone: the repos load once, so a failed load has no
+		// tick to rescue it.
+		if m.String() == "r" {
+			v = v.retry()
+			return v, v.refresh(nil)
+		}
 	}
 	return v, nil
 }

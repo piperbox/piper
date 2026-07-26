@@ -400,3 +400,29 @@ func TestWithRelayAttachesFactory(t *testing.T) {
 		t.Fatal("WithRelay should attach the relay dialer")
 	}
 }
+
+func TestRKeyIsNotAGlobalRefresh(t *testing.T) {
+	f := fakeAPI{apps: []api.App{{App: store.App{Name: "blog"}, Status: "running"}}}
+	m := NewModel("pi4", "addr", false, f)
+	m = pump(t, m, m.refresh())
+	_, cmd := m.Update(keyRunes('r'))
+	if cmd != nil {
+		t.Fatal("r must not force a poll — the tick already refreshes every 2s")
+	}
+}
+
+func TestNoLegendAdvertisesRefreshKey(t *testing.T) {
+	withDomain := appDetailView{name: "blog", domains: []domain.AppDomainStatus{{Domain: "blog.example.com"}}}
+	legends := map[string]string{
+		"apps":          appsView{}.footer(),
+		"app detail":    newAppDetailView("blog", false).footer(),
+		"domain row":    withDomain.footer(),
+		"domain detail": domainDetailView{}.footer(),
+		"help":          helpView{}.View(),
+	}
+	for where, legend := range legends {
+		if strings.Contains(legend, "refresh") {
+			t.Fatalf("%s legend still advertises refresh: %q", where, legend)
+		}
+	}
+}
