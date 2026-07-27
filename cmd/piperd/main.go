@@ -97,12 +97,12 @@ type relayAppAnnouncer interface {
 // have to come from the box instead:
 //
 //   - repo bindings, which live only in the box's store;
-//   - relay-assigned hostnames (#369) — the relay's hostnames table is keyed by
-//     account, not agent, so it cannot safely hand one box's session the
-//     account's whole app list; only the box knows which apps are its own.
-//     Without this, every <hash>-<user> URL drops TLS after a relay restart or
-//     a tunnel flap until the app is redeployed, while custom domains keep
-//     serving.
+//   - relay-assigned hostnames (#369) — the relay does not re-derive an agent's
+//     app hostnames when its session registers, the way it does custom domains.
+//     (Since #405 the hostnames table names the agent, so it could; nothing has
+//     been written to do it.) Without this re-push, every <hash>-<user> URL
+//     drops TLS after a relay restart or a tunnel flap until the app is
+//     redeployed, while custom domains keep serving.
 //
 // Only apps that already hold a hostname are re-registered, and registration is
 // idempotent on the relay, so this claims no new hostname and consumes no app

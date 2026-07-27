@@ -451,8 +451,9 @@ func TestDeleteOrgRefusesNonOrgAccounts(t *testing.T) {
 	alice, _ := st.UpsertAccount("gh-alice", "alice")
 
 	if _, err := st.db.Exec(
-		`INSERT INTO hostnames(hostname, account_id, app, created_at) VALUES(?,?,?,?)`,
-		"alice-app.piper.localhost", alice.ID, "app", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		`INSERT INTO hostnames(hostname, agent_name, account_id, app, created_at) VALUES(?,?,?,?,?)`,
+		"alice-app.piper.localhost", "alice-box", alice.ID, "app",
+		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 

@@ -153,6 +153,32 @@ func TestBoxRemoveSuccessMessageReflectsReleasedCustomDomains(t *testing.T) {
 	}
 }
 
+// Since #405 removal reclaims the box's app slots, so the message must not
+// still tell users their app URLs stay reserved on the account.
+func TestBoxRemoveSuccessMessageReflectsReclaimedAppSlots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	if err := config.SaveClient(config.ClientConfig{
+		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := boxRemove("b.example", true, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if strings.Contains(out.String(), "stay reserved") {
+		t.Fatalf("stdout = %q, must not claim app URLs stay reserved (DeleteAgent now frees them)", out.String())
+	}
+	if !strings.Contains(out.String(), "released") {
+		t.Fatalf("stdout = %q, want it to say the app URLs and domains are released", out.String())
+	}
+}
+
 // Declining the prompt must make no request at all — the check has to happen
 // before the relay is dialed, or a "no" would still have removed the box.
 func TestBoxRemoveAbortsOnDeclinedPrompt(t *testing.T) {

@@ -114,7 +114,9 @@ func TestDeleteAgentLeavesTheAccountsOtherAgentAlone(t *testing.T) {
 // the URLs of its *other* boxes, so they are deliberately left behind: removal
 // frees an agent slot, never an app slot. Pinned here so a future change cannot
 // quietly turn this into cross-box data loss.
-func TestDeleteAgentLeavesHostnamesIntact(t *testing.T) {
+// hostnames names the agent directly since #405, so a removed box's rows go
+// with it — releasing the app slots they held on the account.
+func TestDeleteAgentReclaimsItsHostnames(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, err := st.UpsertAccount("sub-1", "alice")
@@ -133,8 +135,8 @@ func TestDeleteAgentLeavesHostnamesIntact(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
-		t.Errorf("hostnames rows = %d, want 1 (removal must not reclaim app slots)", n)
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 0 {
+		t.Errorf("hostnames rows = %d, want 0 (removal must reclaim app slots)", n)
 	}
 }
 

@@ -49,6 +49,7 @@ func (s *Store) DeleteAgent(baseDomain string) error {
 		return err
 	}
 	for _, stmt := range []string{
+		`DELETE FROM hostnames WHERE agent_name = ?`,
 		`DELETE FROM pending_events WHERE agent_name = ?`,
 		`DELETE FROM repo_bindings WHERE agent_name = ?`,
 		`DELETE FROM agents WHERE name = ?`,

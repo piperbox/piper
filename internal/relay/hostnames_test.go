@@ -182,3 +182,55 @@ func TestDeregisterHostname(t *testing.T) {
 		t.Fatalf("deregister missing row should be no-op: %v", err)
 	}
 }
+
+// #405: two boxes on one account deploying the same app name derive the same
+// hostname (appHostname hashes the account, not the agent), so the second box
+// silently takes over the first's URL.
+func TestRegisterHostnameIsPerAgent(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	boxA, err := st.EnrollForAccount(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boxB, err := st.EnrollForAccount(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hostA, err := st.RegisterHostname(boxA.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatalf("box A register: %v", err)
+	}
+	hostB, err := st.RegisterHostname(boxB.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatalf("box B register: %v", err)
+	}
+	if hostA == hostB {
+		t.Fatalf("both boxes serve %q; box B took over box A's URL", hostA)
+	}
+}
+
+// #405: removing a box must return its app slots to the account, or an account
+// stays blocked from deploying by boxes that no longer exist.
+func TestDeleteAgentReclaimsItsAppSlots(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 1, 5) // one app per account
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	boxA, _ := st.EnrollForAccount(acc.ID)
+	boxB, _ := st.EnrollForAccount(acc.ID)
+	if _, err := st.RegisterHostname(boxA.BaseDomain, "blog", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteAgent(boxA.BaseDomain); err != nil {
+		t.Fatalf("DeleteAgent: %v", err)
+	}
+
+	// A *different* app name: registering "blog" again would be answered by the
+	// orphaned row's idempotency lookup, which hides the exhausted quota.
+	if _, err := st.RegisterHostname(boxB.BaseDomain, "shop", 0); err != nil {
+		t.Fatalf("register after removal: %v, want the freed slot to be reusable", err)
+	}
+}

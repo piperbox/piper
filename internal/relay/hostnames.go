@@ -9,18 +9,22 @@ import (
 	"time"
 )
 
-// appHostname derives the single-label public hostname for (account, app, pr):
+// appHostname derives the single-label public hostname for (agent, app, pr):
 // "<hex>-<username>.<apex>" for production (pr 0), "pr<N>-<hex>-<username>.<apex>"
 // for a PR preview, where <hex> is the first 8 hex chars of sha256 over the
 // same triple. It truncates <username> so the whole first label stays within
 // DNS's 63-char limit (the 8-char hash preserves uniqueness). Deterministic —
-// the same (account, app, pr) always maps to the same hostname.
+// the same (agent, app, pr) always maps to the same hostname.
+//
+// The hash keys on the agent, not the account: two boxes on one account may
+// each run an app called "blog", and hashing the account would derive one
+// hostname for both, silently handing the second box the first's URL (#405).
 //
 // Everything stays in ONE label: the relay serves a "*.<apex>" wildcard, which
 // matches exactly one label, so a preview at "pr-<N>-<app>.<agent>.<apex>"
 // would fail TLS outright (#302).
-func appHostname(accountID, app, username, apex string, pr int) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%d", accountID, app, pr)))
+func appHostname(agentName, app, username, apex string, pr int) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s/%s/%d", agentName, app, pr)))
 	h := hex.EncodeToString(sum[:])[:8]
 	prefix := ""
 	if pr > 0 {
@@ -34,25 +38,27 @@ func appHostname(accountID, app, username, apex string, pr int) string {
 }
 
 // AgentAccount resolves the account owning the agent whose base_domain is
-// baseDomain. ErrBadToken if there is no such agent; ErrBadCredential if the
-// owning account is disabled.
-func (s *Store) AgentAccount(baseDomain string) (accountID, username string, err error) {
+// baseDomain, along with the agent's own name — which hostname rows are keyed
+// by, and which is not the base domain for an operator-enrolled agent
+// (`piper-relay enroll <name> --domain <base>`). ErrBadToken if there is no such
+// agent; ErrBadCredential if the owning account is disabled.
+func (s *Store) AgentAccount(baseDomain string) (accountID, username, agentName string, err error) {
 	var disabled sql.NullInt64
 	err = s.db.QueryRow(
-		`SELECT acc.id, acc.username, acc.disabled
+		`SELECT acc.id, acc.username, ag.name, acc.disabled
 		   FROM agents ag JOIN accounts acc ON acc.id = ag.account_id
 		  WHERE ag.base_domain = ?`, baseDomain).
-		Scan(&accountID, &username, &disabled)
+		Scan(&accountID, &username, &agentName, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", ErrBadToken
+		return "", "", "", ErrBadToken
 	}
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if disabled.Valid && disabled.Int64 != 0 {
-		return "", "", ErrBadCredential
+		return "", "", "", ErrBadCredential
 	}
-	return accountID, username, nil
+	return accountID, username, agentName, nil
 }
 
 // AgentDisabled reports whether the account owning the agent whose base_domain
@@ -93,13 +99,13 @@ func (s *Store) AgentDisabled(baseDomain string) (bool, error) {
 // Only production hosts count against the app cap: the cap bounds apps, and an
 // open PR must not lock an account out of creating one.
 func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error) {
-	accountID, username, err := s.AgentAccount(baseDomain)
+	accountID, username, agentName, err := s.AgentAccount(baseDomain)
 	if err != nil {
 		return "", err
 	}
 
 	var existing string
-	err = s.db.QueryRow(`SELECT hostname FROM hostnames WHERE account_id=? AND app=? AND pr=?`, accountID, app, pr).Scan(&existing)
+	err = s.db.QueryRow(`SELECT hostname FROM hostnames WHERE agent_name=? AND app=? AND pr=?`, agentName, app, pr).Scan(&existing)
 	if err == nil {
 		return existing, nil // idempotent
 	}
@@ -117,23 +123,24 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 		}
 	}
 
-	hostname := appHostname(accountID, app, username, s.apexOrDefault(), pr)
+	hostname := appHostname(agentName, app, username, s.apexOrDefault(), pr)
 	_, err = s.db.Exec(
-		`INSERT INTO hostnames(hostname, account_id, app, pr, created_at) VALUES(?,?,?,?,?)`,
-		hostname, accountID, app, pr, time.Now().UTC().Format(time.RFC3339Nano))
+		`INSERT INTO hostnames(hostname, agent_name, account_id, app, pr, created_at) VALUES(?,?,?,?,?,?)`,
+		hostname, agentName, accountID, app, pr, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return "", err
 	}
 	return hostname, nil
 }
 
-// DeregisterHostname removes the hostname row for the account owning baseDomain.
-// A missing row is not an error.
+// DeregisterHostname removes the hostname row for the agent whose base domain is
+// baseDomain. Scoped to that agent, not its account, so one box cannot drop
+// another's hostname. A missing row is not an error.
 func (s *Store) DeregisterHostname(baseDomain, hostname string) error {
-	accountID, _, err := s.AgentAccount(baseDomain)
+	_, _, agentName, err := s.AgentAccount(baseDomain)
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`DELETE FROM hostnames WHERE account_id=? AND hostname=?`, accountID, hostname)
+	_, err = s.db.Exec(`DELETE FROM hostnames WHERE agent_name=? AND hostname=?`, agentName, hostname)
 	return err
 }

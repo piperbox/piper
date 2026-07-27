@@ -139,7 +139,7 @@ func boxRemove(baseDomain string, yes bool, stdout, stderr io.Writer) int {
 	switch err := relayclient.New(api).RemoveAgent(ctx, cred, baseDomain); {
 	case err == nil:
 		fmt.Fprintf(stdout, "removed %s\n", baseDomain)
-		fmt.Fprintln(stdout, "its relay-assigned app URLs stay reserved on the account; any custom domains it held are released.")
+		fmt.Fprintln(stdout, "its relay-assigned app URLs and any custom domains it held are released.")
 		return 0
 	case errors.Is(err, relayclient.ErrAgentConnected):
 		fmt.Fprintf(stderr, "error: %s is still connected — stop piperd on that box, then retry\n", baseDomain)
