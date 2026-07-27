@@ -32,13 +32,18 @@ CREATE TABLE IF NOT EXISTS account_creds (
     created_at  TEXT NOT NULL
 );
 
+-- agent_name attributes each hostname to the box that claimed it, so removing a
+-- box reclaims its app slots and two boxes on one account can hold the same app
+-- name without colliding (#405). account_id stays because the app cap is still
+-- per account, not per box.
 CREATE TABLE IF NOT EXISTS hostnames (
     hostname    TEXT PRIMARY KEY,
+    agent_name  TEXT NOT NULL REFERENCES agents(name),
     account_id  TEXT NOT NULL REFERENCES accounts(id),
     app         TEXT NOT NULL,
     pr          INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
-    UNIQUE(account_id, app, pr)
+    UNIQUE(agent_name, app, pr)
 );
 
 CREATE TABLE IF NOT EXISTS org_members (

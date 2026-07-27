@@ -34,7 +34,7 @@ func (s *Store) GitHubTokenFor(ctx context.Context, app *GitHubApp, agentName, r
 	if app == nil {
 		return "", time.Time{}, ErrNoGitHubApp
 	}
-	accountID, _, err := s.AgentAccount(agentName)
+	accountID, _, _, err := s.AgentAccount(agentName)
 	if err != nil {
 		return "", time.Time{}, err
 	}

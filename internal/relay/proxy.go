@@ -180,7 +180,7 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 			return
 		}
 
-		ownerID, _, err := st.AgentAccount(base)
+		ownerID, _, _, err := st.AgentAccount(base)
 		if err != nil {
 			// Unknown agent and disabled owner both 404: no existence leak.
 			http.NotFound(w, r)
