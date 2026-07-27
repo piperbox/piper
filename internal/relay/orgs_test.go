@@ -47,19 +47,17 @@ func TestCreateOrgDoesNotTakeAUserLogin(t *testing.T) {
 	}
 }
 
-func TestCreateOrgStillDisambiguatesAgainstOrgs(t *testing.T) {
+func TestCreateOrgRejectsATakenName(t *testing.T) {
 	st := openTestStore(t)
 	alice, _ := st.UpsertAccount("gh-alice", "alice")
 	if _, err := st.CreateOrg(alice.ID, "Acme"); err != nil {
 		t.Fatalf("first CreateOrg: %v", err)
 	}
 
+	// A name someone typed fails visibly rather than becoming "acme-2" (#412).
 	org, err := st.CreateOrg(alice.ID, "Acme")
-	if err != nil {
-		t.Fatalf("second CreateOrg: %v", err)
-	}
-	if org.Slug != "acme-2" {
-		t.Fatalf("slug = %q, want acme-2", org.Slug)
+	if !errors.Is(err, ErrOrgNameTaken) {
+		t.Fatalf("second CreateOrg = (%q, %v), want ErrOrgNameTaken", org.Slug, err)
 	}
 }
 

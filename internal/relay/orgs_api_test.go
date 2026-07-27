@@ -44,6 +44,39 @@ func apiReq(t *testing.T, api http.Handler, method, path, cred, body string) *ht
 	return rr
 }
 
+func TestOrgCreateConflictsOnATakenName(t *testing.T) {
+	api, _, aliceCred, bobCred := orgAPIFixture(t)
+	if rr := apiReq(t, api, "POST", "/v1/orgs", aliceCred, `{"name":"acme"}`); rr.Code != http.StatusOK {
+		t.Fatalf("create org: %d", rr.Code)
+	}
+
+	// Bob asks for the same name: a visible conflict, not a silent "acme-2".
+	rr := apiReq(t, api, "POST", "/v1/orgs", bobCred, `{"name":"Acme"}`)
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("duplicate create: %d, want 409", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "acme") {
+		t.Fatalf("body %q does not name the taken slug", rr.Body.String())
+	}
+}
+
+func TestOrgCreateAllowsAUsersName(t *testing.T) {
+	api, _, aliceCred, _ := orgAPIFixture(t)
+	// "bob" is a user in the fixture; orgs hold their own namespace (#411), so
+	// the 409 path must not fire here.
+	rr := apiReq(t, api, "POST", "/v1/orgs", aliceCred, `{"name":"bob"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("create org named after a user: %d, want 200", rr.Code)
+	}
+	var got struct{ Org string }
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Org != "bob" {
+		t.Fatalf("org = %q, want bob", got.Org)
+	}
+}
+
 func TestOrgSetGitHub(t *testing.T) {
 	api, st, aliceCred, bobCred := orgAPIFixture(t)
 	if rr := apiReq(t, api, "POST", "/v1/orgs", aliceCred, `{"name":"acme"}`); rr.Code != http.StatusOK {

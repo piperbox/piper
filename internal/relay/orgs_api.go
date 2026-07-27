@@ -40,6 +40,12 @@ func (a *api) orgCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	org, err := a.st.CreateOrg(acc.ID, req.Name)
+	if errors.Is(err, ErrOrgNameTaken) {
+		// Name the slug that collided: the creator typed a name, and what is
+		// taken is what it derived to.
+		http.Error(w, "org name taken: "+deriveUsername(req.Name), http.StatusConflict)
+		return
+	}
 	if err != nil {
 		http.Error(w, "org create failed", http.StatusInternalServerError)
 		return

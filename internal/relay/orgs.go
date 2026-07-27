@@ -3,7 +3,6 @@ package relay
 import (
 	"database/sql"
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +20,11 @@ type Org struct {
 // member — deliberately indistinguishable, so org existence never leaks.
 var ErrNoOrg = errors.New("no such org")
 
+// ErrOrgNameTaken is returned when another org already holds the slug derived
+// from the requested name. Org names are typed by a person who can pick another,
+// so a collision fails visibly instead of being silently suffixed (#412).
+var ErrOrgNameTaken = errors.New("org name taken")
+
 // CreateOrg creates an org account (type='org', no GitHub identity, no
 // credentials) with a slug derived from name — unique among orgs only, since
 // users hold their own namespace (#411) — and makes the creator its sole owner.
@@ -37,7 +41,7 @@ func (s *Store) CreateOrg(creatorID, name string) (Org, error) {
 		return Org{}, errors.New("only user accounts create orgs")
 	}
 
-	base := deriveUsername(name)
+	slug := deriveUsername(name)
 	id := uuid.NewString()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	tx, err := s.db.Begin()
@@ -45,30 +49,23 @@ func (s *Store) CreateOrg(creatorID, name string) (Org, error) {
 		return Org{}, err
 	}
 	defer tx.Rollback()
-	for i := 1; ; i++ {
-		slug := base
-		if i > 1 {
-			slug = base + "-" + strconv.Itoa(i)
-		}
-		_, err := tx.Exec(
-			`INSERT INTO accounts(id, github_id, github_login, username, type, disabled, created_at)
-			 VALUES(?,NULL,NULL,?,'org',0,?)`, id, slug, now)
-		if err == nil {
-			if _, err := tx.Exec(
-				`INSERT INTO org_members(org_id, account_id, role, created_at) VALUES(?,?,'owner',?)`,
-				id, creatorID, now); err != nil {
-				return Org{}, err
-			}
-			if err := tx.Commit(); err != nil {
-				return Org{}, err
-			}
-			return Org{ID: id, Slug: slug, Role: "owner"}, nil
-		}
+	if _, err := tx.Exec(
+		`INSERT INTO accounts(id, github_id, github_login, username, type, disabled, created_at)
+		 VALUES(?,NULL,NULL,?,'org',0,?)`, id, slug, now); err != nil {
 		if isUniqueViolation(err) {
-			continue // another org holds this slug; try the next suffix
+			return Org{}, ErrOrgNameTaken
 		}
 		return Org{}, err
 	}
+	if _, err := tx.Exec(
+		`INSERT INTO org_members(org_id, account_id, role, created_at) VALUES(?,?,'owner',?)`,
+		id, creatorID, now); err != nil {
+		return Org{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Org{}, err
+	}
+	return Org{ID: id, Slug: slug, Role: "owner"}, nil
 }
 
 // OrgsForAccount lists the orgs accountID belongs to, oldest membership first.
