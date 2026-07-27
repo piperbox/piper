@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -66,7 +67,7 @@ func atoiOr(s string, def int) int {
 
 // adminStore is the slice of *relay.Store the admin subcommands need.
 type adminStore interface {
-	DisableAccount(username string) error
+	DisableAccount(username, accountType string) error
 }
 
 // apiAddrIsLoopback reports whether addr binds only the loopback interface.
@@ -111,17 +112,26 @@ func parseWebRedirects(s string) []string {
 	return out
 }
 
-// runAdmin handles "piper-relay admin <cmd> ...". Currently: disable <username>.
+const adminUsage = "usage: piper-relay admin disable [--org] <name>"
+
+// runAdmin handles "piper-relay admin <cmd> ...". Currently:
+// disable [--org] <name>. The --org flag picks the org holding <name> rather
+// than the user — usernames are unique only per type (#411), so a bare name is
+// ambiguous whenever both exist.
 func runAdmin(st adminStore, args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: piper-relay admin disable <username>")
+		return errors.New(adminUsage)
 	}
 	switch args[0] {
 	case "disable":
-		if len(args) != 2 {
-			return fmt.Errorf("usage: piper-relay admin disable <username>")
+		rest, accountType := args[1:], "user"
+		if len(rest) > 0 && rest[0] == "--org" {
+			rest, accountType = rest[1:], "org"
 		}
-		return st.DisableAccount(args[1])
+		if len(rest) != 1 {
+			return errors.New(adminUsage)
+		}
+		return st.DisableAccount(rest[0], accountType)
 	default:
 		return fmt.Errorf("unknown admin command %q", args[0])
 	}

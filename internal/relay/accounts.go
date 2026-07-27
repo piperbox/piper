@@ -160,14 +160,20 @@ func (s *Store) AuthenticateAccount(cred string) (Account, error) {
 	return acc, nil
 }
 
-// DisableAccount flips the kill-switch flag in the database for an account by
-// username. New connects are then rejected at auth (Authenticate and
-// AuthenticateAccount return a bad-credential error for a disabled account),
-// and live tunnel sessions are evicted by the relay's per-session watchdog
-// within one poll interval (see acceptTunnels). The operator trigger is the
-// admin CLI: `piper-relay admin disable <user>`.
-func (s *Store) DisableAccount(username string) error {
-	res, err := s.db.Exec(`UPDATE accounts SET disabled=1 WHERE username=?`, username)
+// DisableAccount flips the kill-switch flag in the database for the account of
+// type accountType ("user" or "org") holding username. New connects are then
+// rejected at auth (Authenticate and AuthenticateAccount return a
+// bad-credential error for a disabled account), and live tunnel sessions are
+// evicted by the relay's per-session watchdog within one poll interval (see
+// acceptTunnels). The operator trigger is the admin CLI:
+// `piper-relay admin disable [--org] <name>`.
+//
+// The type is required because usernames are only unique per type (#411): a
+// user and an org may both be called "acme", and severing one must not sever
+// the other.
+func (s *Store) DisableAccount(username, accountType string) error {
+	res, err := s.db.Exec(
+		`UPDATE accounts SET disabled=1 WHERE username=? AND type=?`, username, accountType)
 	if err != nil {
 		return err
 	}

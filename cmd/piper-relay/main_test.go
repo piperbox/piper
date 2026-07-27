@@ -30,6 +30,30 @@ func TestRunAdminDisable(t *testing.T) {
 	}
 }
 
+func TestRunAdminDisableOrg(t *testing.T) {
+	st, err := relay.Open(filepath.Join(t.TempDir(), "relay.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	alice, err := st.UpsertAccount("sub-1", "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateOrg(alice.ID, "acme"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bare name means the user; --org picks the org of the same name (#411).
+	if err := runAdmin(st, []string{"disable", "--org", "acme"}); err != nil {
+		t.Fatalf("runAdmin disable --org: %v", err)
+	}
+	// The user "acme" is untouched, so disabling it must still find a row.
+	if err := runAdmin(st, []string{"disable", "acme"}); err != nil {
+		t.Fatalf("runAdmin disable user: %v", err)
+	}
+}
+
 func TestRunAdminUsage(t *testing.T) {
 	st, _ := relay.Open(filepath.Join(t.TempDir(), "relay.db"))
 	defer st.Close()

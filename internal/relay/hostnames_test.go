@@ -123,7 +123,7 @@ func TestRegisterHostnameAppCap(t *testing.T) {
 
 func TestRegisterHostnameDisabledAccount(t *testing.T) {
 	st, base := newAccountAgent(t)
-	if err := st.DisableAccount("alice"); err != nil {
+	if err := st.DisableAccount("alice", "user"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.RegisterHostname(base, "blog", 0); err != ErrBadCredential {
@@ -146,7 +146,7 @@ func TestAgentDisabledOutcomes(t *testing.T) {
 	}
 
 	// known + disabled
-	if err := st.DisableAccount("alice"); err != nil {
+	if err := st.DisableAccount("alice", "user"); err != nil {
 		t.Fatal(err)
 	}
 	if off, err := st.AgentDisabled(base); !off || err != nil {
