@@ -129,10 +129,18 @@ func (g *GitHubApp) installationToken(ctx context.Context, installationID string
 // RepoToken mints an installation token scoped to a single repository with the
 // minimum permissions a deploy needs. Scoping is what bounds the blast radius
 // of a compromised box to the one repo it already deploys.
+//
+// Only the name half of repo constrains anything here: GitHub's "repositories"
+// field takes bare names, resolved within the installation. The owner half is
+// spent before this call — GitHubTokenFor picks the installation whose
+// target_login is that owner, and answers ErrNoInstallation when the account
+// holds none — so passing "evil/blog" cannot reach a different owner's blog. An
+// installation only ever covers one account's repos, and names are unique within
+// an owner, so the bare name resolves exactly (#296).
 func (g *GitHubApp) RepoToken(ctx context.Context, installationID, repo string) (string, time.Time, error) {
 	name := repo
 	if i := strings.LastIndex(repo, "/"); i >= 0 {
-		name = repo[i+1:] // GitHub's "repositories" field takes bare names
+		name = repo[i+1:]
 	}
 	return g.installationToken(ctx, installationID, map[string]any{
 		"repositories": []string{name},
