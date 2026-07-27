@@ -228,10 +228,49 @@ func newTestManagerWith(t *testing.T, iss Issuer) (*Manager, *store.Store, *fake
 	return m, st, proxy, relay, dataDir
 }
 
-// waitStatus polls the store until the domain config reaches status (2s cap).
+// waitCeiling bounds the poll helpers below. They return the instant their
+// condition holds, so a generous ceiling costs nothing on a fast machine and
+// buys robustness on a loaded runner (#421).
+const waitCeiling = 15 * time.Second
+
+// waitFor polls cond until it holds (waitCeiling cap), failing with what.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(waitCeiling)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s: condition never held", what)
+}
+
+// attemptCountingNotifier counts Add/Confirm attempts, including failed ones —
+// fakeNotifier only records successes, but a retry loop's liveness shows in
+// its failed attempts: a second recorded attempt proves the loop is
+// sequential and completed the whole previous cycle.
+type attemptCountingNotifier struct {
+	fakeNotifier
+	adds, confirms int64
+}
+
+func (c *attemptCountingNotifier) AddCustomDomain(d string) error {
+	atomic.AddInt64(&c.adds, 1)
+	return c.fakeNotifier.AddCustomDomain(d)
+}
+func (c *attemptCountingNotifier) ConfirmCustomDomain(d string) error {
+	atomic.AddInt64(&c.confirms, 1)
+	return c.fakeNotifier.ConfirmCustomDomain(d)
+}
+func (c *attemptCountingNotifier) addAttempts() int64     { return atomic.LoadInt64(&c.adds) }
+func (c *attemptCountingNotifier) confirmAttempts() int64 { return atomic.LoadInt64(&c.confirms) }
+
+// waitStatus polls the store until the domain config reaches status
+// (waitCeiling cap).
 func waitStatus(t *testing.T, st *store.Store, status string) store.DomainConfig {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitCeiling)
 	var dc store.DomainConfig
 	var err error
 	for time.Now().Before(deadline) {
@@ -246,11 +285,11 @@ func waitStatus(t *testing.T, st *store.Store, status string) store.DomainConfig
 }
 
 // waitError polls the store until the config carries a non-empty error — the
-// first failed issuance attempt has recorded its outcome (2s cap). The status
-// alone can't mark the moment: a fresh Set already reads "issuing".
+// first failed issuance attempt has recorded its outcome (waitCeiling cap).
+// The status alone can't mark the moment: a fresh Set already reads "issuing".
 func waitError(t *testing.T, st *store.Store) store.DomainConfig {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitCeiling)
 	var dc store.DomainConfig
 	var err error
 	for time.Now().Before(deadline) {
@@ -365,9 +404,11 @@ func TestIssueFailureRecordsFailedThenRetriesToActive(t *testing.T) {
 }
 
 func TestRelayRejectionSurfacesAsFailed(t *testing.T) {
-	iss := &fakeIssuer{}
-	m, st, _, relay, _ := newTestManager(t, iss)
-	relay.failAdd = errors.New("domain already in use")
+	iss := newBlockingIssuer()
+	m, st, _, _, _ := newTestManagerWith(t, iss)
+	attempts := &attemptCountingNotifier{}
+	attempts.failAdd = errors.New("domain already in use")
+	m.SetRelay(attempts)
 	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
 		t.Fatal(err)
 	}
@@ -376,42 +417,75 @@ func TestRelayRejectionSurfacesAsFailed(t *testing.T) {
 		t.Fatalf("error = %q", dc.Error)
 	}
 	// The claim precedes issuance, so a contested name never burns an ACME
-	// order at all.
-	time.Sleep(50 * time.Millisecond)
-	if got := iss.obtainCalls(); got != 0 {
-		t.Fatalf("obtain calls = %d during relay-rejected retries, want 0", got)
+	// order at all. The second add attempt proves the sequential retry loop
+	// completed a whole cycle (failed attempts are not recorded by the
+	// embedded fake, only counted here); while the relay rejects, no cycle
+	// can reach Obtain — the blocking issuer would park and signal entered
+	// instead of letting a slow runner pass before any retry ran.
+	waitFor(t, "relay add retried while rejected", func() bool {
+		return attempts.addAttempts() >= 2
+	})
+	select {
+	case <-iss.entered:
+		t.Fatal("obtained a cert while the relay rejects the claim")
+	default:
 	}
-	// Unblock the relay; the loop must converge to active.
-	relay.mu.Lock()
-	relay.failAdd = nil
-	relay.mu.Unlock()
+	// Unblock the relay; the loop must converge to active through exactly one
+	// gated Obtain.
+	attempts.mu.Lock()
+	attempts.failAdd = nil
+	attempts.mu.Unlock()
+	select {
+	case <-iss.entered:
+	case <-time.After(waitCeiling):
+		t.Fatal("issuance never reached Obtain after the relay unblocked")
+	}
+	iss.release <- struct{}{}
 	waitStatus(t, st, StatusActive)
 }
 
 // A relay confirm failure after the cert was obtained must retry on the disk
 // cert instead of re-obtaining (rate limits).
 func TestRelayConfirmFailureReusesDiskCert(t *testing.T) {
-	iss := &fakeIssuer{}
-	m, st, _, relay, _ := newTestManager(t, iss)
-	relay.failConfirm = errors.New("tunnel down")
+	iss := newBlockingIssuer()
+	m, st, _, _, _ := newTestManagerWith(t, iss)
+	attempts := &attemptCountingNotifier{}
+	attempts.failConfirm = errors.New("tunnel down")
+	m.SetRelay(attempts)
 	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
 		t.Fatal(err)
 	}
+	select {
+	case <-iss.entered: // the one genuine Obtain, behind the relay claim
+	case <-time.After(waitCeiling):
+		t.Fatal("issuance never reached Obtain")
+	}
+	iss.release <- struct{}{}
 	waitStatus(t, st, StatusFailed)
-	before := iss.obtainCalls()
-	if before == 0 {
-		t.Fatal("no cert obtained before the confirm failure")
+	if before := iss.obtainCalls(); before != 1 {
+		t.Fatalf("obtain calls = %d before the confirm failure, want exactly 1", before)
 	}
-	time.Sleep(50 * time.Millisecond)
-	if after := iss.obtainCalls(); after != before {
-		t.Fatalf("obtain calls grew %d→%d during confirm-only retries", before, after)
+	// Confirm-only retries must reuse the disk cert, not re-obtain. The second
+	// confirm attempt proves the sequential retry loop completed a whole
+	// retry cycle; a re-Obtain in any cycle would park at the blocking issuer
+	// and signal entered instead of going unnoticed on a slow runner.
+	waitFor(t, "relay confirm retried while failing", func() bool {
+		return attempts.confirmAttempts() >= 2
+	})
+	select {
+	case <-iss.entered:
+		t.Fatal("re-obtained during confirm-only retries")
+	default:
 	}
-	relay.mu.Lock()
-	relay.failConfirm = nil
-	relay.mu.Unlock()
+	if got := iss.obtainCalls(); got != 1 {
+		t.Fatalf("obtain calls = %d during confirm-only retries, want 1 (disk reuse)", got)
+	}
+	attempts.mu.Lock()
+	attempts.failConfirm = nil
+	attempts.mu.Unlock()
 	waitStatus(t, st, StatusActive)
-	if got := iss.obtainCalls(); got != before {
-		t.Fatalf("activation after confirm unblocked re-obtained (%d→%d)", before, got)
+	if got := iss.obtainCalls(); got != 1 {
+		t.Fatalf("activation after confirm unblocked re-obtained (%d calls)", got)
 	}
 }
 

@@ -75,10 +75,10 @@ func newAppTestManager(t *testing.T, iss Issuer) (*Manager, *store.Store, *fakeP
 	return m, st, proxy, relay, router, dataDir
 }
 
-// waitAppStatus polls the store until domain reaches status (2s cap).
+// waitAppStatus polls the store until domain reaches status (waitCeiling cap).
 func waitAppStatus(t *testing.T, st *store.Store, domain, status string) store.AppDomain {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitCeiling)
 	var row store.AppDomain
 	var err error
 	for time.Now().Before(deadline) {
@@ -207,7 +207,7 @@ func TestAddAppDomainValidation(t *testing.T) {
 // and no ACME order is burned. The claim is re-added on each poll so the
 // relay's pending TTL keeps being refreshed.
 func TestAppDomainWaitsForDNS(t *testing.T) {
-	iss := &fakeIssuer{}
+	iss := newBlockingIssuer()
 	m, st, _, relay, _, _ := newAppTestManager(t, iss)
 	if _, err := st.CreateApp("blog", 8080); err != nil {
 		t.Fatal(err)
@@ -223,7 +223,21 @@ func TestAppDomainWaitsForDNS(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	// The claim is re-added on each DNS poll and the loop is sequential, so
+	// the second recorded add proves one whole poll cycle completed with DNS
+	// unset: the pending status and its DNS hint are already persisted, and
+	// no cycle could have reached Obtain — the blocking issuer would park and
+	// signal entered instead of passing silently because the work had not
+	// started yet.
+	waitFor(t, "pending claim re-added while DNS unset", func() bool {
+		adds := 0
+		for _, p := range relay.pushes() {
+			if p == "add:shop.example.com" {
+				adds++
+			}
+		}
+		return adds >= 2
+	})
 	row, err := st.GetAppDomain("shop.example.com")
 	if err != nil || row.Status != StatusPending {
 		t.Fatalf("row while DNS unset = %+v (err %v), want pending", row, err)
@@ -231,20 +245,14 @@ func TestAppDomainWaitsForDNS(t *testing.T) {
 	if row.Error == "" {
 		t.Fatal("pending row carries no DNS hint")
 	}
-	if iss.obtainCalls() != 0 {
-		t.Fatalf("obtained %d certs while DNS unset, want 0", iss.obtainCalls())
-	}
-	adds := 0
-	for _, p := range relay.pushes() {
-		if p == "add:shop.example.com" {
-			adds++
-		}
-	}
-	if adds < 2 {
-		t.Fatalf("pending claim refreshed %d times, want repeated add-domain", adds)
+	select {
+	case <-iss.entered:
+		t.Fatal("obtained a cert while DNS unset")
+	default:
 	}
 
 	pointed.set(true)
+	iss.release <- struct{}{} // the one Obtain behind the DNS gate
 	waitAppStatus(t, st, "shop.example.com", StatusActive)
 }
 
@@ -431,7 +439,7 @@ func TestResumeAppDomainActiveReloadsWithoutReissuing(t *testing.T) {
 		t.Fatalf("resume backfill = %v", r)
 	}
 	// The relay claim is re-asserted (add + confirm) in the background.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(waitCeiling)
 	for {
 		p := relay2.pushes()
 		if len(p) >= 2 && p[len(p)-1] == "confirm:shop.example.com" {
@@ -491,17 +499,25 @@ func TestReassertLoopCannotResurrectRemovedDomain(t *testing.T) {
 	m2.SetRelay(gated)
 	m2.ResumeAppDomains()
 	<-gated.entered // the re-assert is inside its add-domain push
+	genBefore := m2.currentGenFor("shop.example.com")
 
 	remDone := make(chan error, 1)
 	go func() { remDone <- m2.RemoveAppDomain("shop.example.com") }()
-	// Let Remove run as far as it can while the push is held, then release.
-	time.Sleep(50 * time.Millisecond)
+	// RemoveAppDomain's first step is the generation bump; once it lands,
+	// Remove is parked on the domain's run lock — held by the gated push — so
+	// the interleaving under test (a removal racing an in-flight re-assert)
+	// is in place by construction, not by giving the goroutine time to run.
+	waitFor(t, "RemoveAppDomain superseded the re-assert generation", func() bool {
+		return m2.currentGenFor("shop.example.com") != genBefore
+	})
 	gated.release <- struct{}{}
 	if err := <-remDone; err != nil {
 		t.Fatalf("RemoveAppDomain: %v", err)
 	}
-	// Give a stale re-assert time to misbehave before asserting.
-	time.Sleep(50 * time.Millisecond)
+	// Join the lifecycle goroutines: after Close returns no stale re-assert
+	// can still be in flight, so a resurrection push after the removal would
+	// already be in the recorded ops — not still on its way.
+	m2.Close()
 
 	ops := gated.pushes()
 	removed := false
