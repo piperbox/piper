@@ -6,7 +6,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"time"
+
+	"github.com/piperbox/piper/internal/tunnel"
 )
 
 // appHostname derives the single-label public hostname for (agent, app, pr):
@@ -131,6 +134,84 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 		return "", err
 	}
 	return hostname, nil
+}
+
+// ReconcileHostnames settles the relay's hostname rows for one agent against
+// the set of slots the box says it holds, and returns the surviving hostnames
+// for the router to map. It is what a session sends on connect (#418).
+//
+// The box is the authority on which apps exist; the relay is the authority on
+// what each one is called. So this prunes rows for slots the box no longer has
+// — otherwise orphaned forever, since deleting an app while the relay is
+// unreachable skips deregistration entirely — and then ensures a row for every
+// slot it does, which is how a box recovers after a relay DB wipe.
+//
+// Pruning before ensuring matters: a box at its app cap that dropped an app
+// needs the freed slot to re-register the ones it kept.
+//
+// Nothing here is atomic across slots, and it does not need to be. Hostnames
+// are deterministic in (agent, app, pr), so a row pruned in error returns
+// identical, and the whole exchange repeats on the next connect. One slot's
+// failure — a cap it cannot fit under, say — is skipped rather than failing the
+// rest, matching the per-app re-push this replaces.
+func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (live, pruned []string, err error) {
+	_, _, agentName, err := s.AgentAccount(baseDomain)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	keep := make(map[string]bool, len(apps))
+	for _, a := range apps {
+		keep[hostnameSlot(a.App, a.PR)] = true
+	}
+	rows, err := s.db.Query(`SELECT hostname, app, pr FROM hostnames WHERE agent_name=?`, agentName)
+	if err != nil {
+		return nil, nil, err
+	}
+	type slot struct {
+		hostname string
+		app      string
+		pr       int
+	}
+	var stale []slot
+	for rows.Next() {
+		var sl slot
+		if err := rows.Scan(&sl.hostname, &sl.app, &sl.pr); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		if !keep[hostnameSlot(sl.app, sl.pr)] {
+			stale = append(stale, sl)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	for _, sl := range stale {
+		if _, err := s.db.Exec(
+			`DELETE FROM hostnames WHERE agent_name=? AND app=? AND pr=?`,
+			agentName, sl.app, sl.pr); err != nil {
+			return nil, nil, err
+		}
+		pruned = append(pruned, sl.hostname)
+	}
+
+	live = make([]string, 0, len(apps))
+	for _, a := range apps {
+		host, err := s.RegisterHostname(baseDomain, a.App, a.PR)
+		if err != nil {
+			log.Printf("relay: sync %s %s pr %d: %v", agentName, a.App, a.PR, err)
+			continue
+		}
+		live = append(live, host)
+	}
+	return live, pruned, nil
+}
+
+// hostnameSlot keys one (app, pr) pair for set membership.
+func hostnameSlot(app string, pr int) string {
+	return fmt.Sprintf("%s/%d", app, pr)
 }
 
 // DeregisterHostname removes the hostname row for the agent whose base domain is

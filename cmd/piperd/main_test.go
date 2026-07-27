@@ -595,9 +595,10 @@ func (s *repushStore) RunningPreviews() ([]store.Deployment, error) {
 
 // repushAnnouncer records what the re-push announced to the relay.
 type repushAnnouncer struct {
-	binds       []string
-	registered  []string
-	registerErr error
+	binds   []string
+	synced  []string // app@pr, in the order the sync listed them
+	syncs   int
+	syncErr error
 }
 
 func (a *repushAnnouncer) BindRepo(app, repo, branch string) error {
@@ -605,19 +606,23 @@ func (a *repushAnnouncer) BindRepo(app, repo, branch string) error {
 	return nil
 }
 
-// Register records app@pr so a preview re-registration is distinguishable
-// from the production one for the same app.
-func (a *repushAnnouncer) Register(app string, pr int) (string, error) {
-	a.registered = append(a.registered, fmt.Sprintf("%s@%d", app, pr))
-	return app + ".relay.example", a.registerErr
+// SyncApps records app@pr per slot so a preview is distinguishable from the
+// production entry for the same app, and counts calls: the whole point of #418
+// is that one connect announces the set once.
+func (a *repushAnnouncer) SyncApps(apps []tunnel.AppRef) error {
+	a.syncs++
+	for _, ap := range apps {
+		a.synced = append(a.synced, fmt.Sprintf("%s@%d", ap.App, ap.PR))
+	}
+	return a.syncErr
 }
 
-// TestRepushRelayAppsReregistersHostnames pins #369: the relay's router keeps
+// TestRepushRelayAppsSyncsHostnames pins #369: the relay's router keeps
 // relay-assigned hostnames in memory only, and re-derives just custom domains
 // when a session registers — so after a relay restart or tunnel flap every
-// <hash>-<user> URL drops TLS until the app is redeployed. The box re-announces
-// its own hostnames on every (re)connect to close that window.
-func TestRepushRelayAppsReregistersHostnames(t *testing.T) {
+// <hash>-<user> URL drops TLS until the app is redeployed. The box announces
+// its whole app set on every (re)connect to close that window (#418).
+func TestRepushRelayAppsSyncsHostnames(t *testing.T) {
 	st := &repushStore{apps: []store.App{
 		{Name: "test1", Hostname: "855d1432-ozykhan.relay.example"},
 		{Name: "test2"}, // never deployed: no hostname to restore
@@ -626,17 +631,17 @@ func TestRepushRelayAppsReregistersHostnames(t *testing.T) {
 
 	repushRelayApps(st, a, true)
 
-	if want := []string{"test1@0"}; !reflect.DeepEqual(a.registered, want) {
-		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	if want := []string{"test1@0"}; !reflect.DeepEqual(a.synced, want) {
+		t.Fatalf("synced %v, want %v", a.synced, want)
 	}
 }
 
-// TestRepushRelayAppsReregistersPreviewHostnames is the preview half of #369,
+// TestRepushRelayAppsSyncsPreviewHostnames is the preview half of #369,
 // carried over as #376: previews get relay-assigned hostnames from the same
 // register op, and they were as invisible to the reconnect re-push as they were
 // to ResumeRoutes. Without this a live PR-preview URL goes dark on a relay
 // restart and stays dark until the PR pushes again.
-func TestRepushRelayAppsReregistersPreviewHostnames(t *testing.T) {
+func TestRepushRelayAppsSyncsPreviewHostnames(t *testing.T) {
 	st := &repushStore{
 		apps: []store.App{{Name: "test1", Hostname: "855d1432-ozykhan.relay.example"}},
 		previews: []store.Deployment{
@@ -649,8 +654,8 @@ func TestRepushRelayAppsReregistersPreviewHostnames(t *testing.T) {
 	repushRelayApps(st, a, true)
 
 	want := []string{"test1@0", "test1@7", "test1@9"}
-	if !reflect.DeepEqual(a.registered, want) {
-		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	if !reflect.DeepEqual(a.synced, want) {
+		t.Fatalf("synced %v, want %v", a.synced, want)
 	}
 }
 
@@ -665,8 +670,8 @@ func TestRepushRelayAppsSkipsPreviewsWhenNotTerminated(t *testing.T) {
 
 	repushRelayApps(st, a, false)
 
-	if len(a.registered) != 0 {
-		t.Fatalf("re-registered %v on a non-terminated box, want none", a.registered)
+	if len(a.synced) != 0 {
+		t.Fatalf("synced %v on a non-terminated box, want none", a.synced)
 	}
 }
 
@@ -680,8 +685,8 @@ func TestRepushRelayAppsPreviewErrorKeepsAppHostnames(t *testing.T) {
 
 	repushRelayApps(st, a, true)
 
-	if want := []string{"test1@0"}; !reflect.DeepEqual(a.registered, want) {
-		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	if want := []string{"test1@0"}; !reflect.DeepEqual(a.synced, want) {
+		t.Fatalf("synced %v, want %v", a.synced, want)
 	}
 }
 
@@ -696,8 +701,8 @@ func TestRepushRelayAppsSkipsHostnamesWhenNotTerminated(t *testing.T) {
 
 	repushRelayApps(st, a, false)
 
-	if len(a.registered) != 0 {
-		t.Fatalf("re-registered %v on a non-terminated box, want none", a.registered)
+	if len(a.synced) != 0 {
+		t.Fatalf("synced %v on a non-terminated box, want none", a.synced)
 	}
 }
 
@@ -717,19 +722,60 @@ func TestRepushRelayAppsStillBindsRepos(t *testing.T) {
 	}
 }
 
-// TestRepushRelayAppsRegisterErrorDoesNotStopOthers keeps one failing app from
-// stranding the rest of the box's URLs.
-func TestRepushRelayAppsRegisterErrorDoesNotStopOthers(t *testing.T) {
+// A rejected sync is logged, not fatal — the next connect retries, and it must
+// not cost the box the repo bindings pushed alongside it. Per-slot resilience
+// now lives relay-side in ReconcileHostnames, which skips a slot it cannot fit
+// rather than failing the whole set.
+func TestRepushRelayAppsSyncErrorStillBindsRepos(t *testing.T) {
 	st := &repushStore{apps: []store.App{
-		{Name: "test1", Hostname: "a.relay.example"},
+		{Name: "test1", Repo: "ozykhan/test1", Branch: "main", Hostname: "a.relay.example"},
 		{Name: "test2", Hostname: "b.relay.example"},
 	}}
-	a := &repushAnnouncer{registerErr: errors.New("relay: quota exceeded")}
+	a := &repushAnnouncer{syncErr: errors.New("relay: quota exceeded")}
 
 	repushRelayApps(st, a, true)
 
-	if want := []string{"test1@0", "test2@0"}; !reflect.DeepEqual(a.registered, want) {
-		t.Fatalf("re-registered %v, want %v", a.registered, want)
+	if want := []string{"test1=ozykhan/test1@main"}; !reflect.DeepEqual(a.binds, want) {
+		t.Fatalf("re-bound %v, want %v", a.binds, want)
+	}
+	if want := []string{"test1@0", "test2@0"}; !reflect.DeepEqual(a.synced, want) {
+		t.Fatalf("synced %v, want %v — the whole set goes in one call", a.synced, want)
+	}
+}
+
+// The set is announced exactly once per connect: that is the difference from
+// the per-app re-push this replaced, and what lets the relay treat the payload
+// as authoritative enough to prune against.
+func TestRepushRelayAppsSyncsOncePerConnect(t *testing.T) {
+	st := &repushStore{
+		apps: []store.App{
+			{Name: "test1", Hostname: "a.relay.example"},
+			{Name: "test2", Hostname: "b.relay.example"},
+		},
+		previews: []store.Deployment{{App: "test1", PR: 7, Status: "running"}},
+	}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, true)
+
+	if a.syncs != 1 {
+		t.Fatalf("syncs = %d, want exactly 1", a.syncs)
+	}
+}
+
+// A box with no apps must still sync: the empty set is what prunes rows left
+// behind by apps deleted while the relay was unreachable.
+func TestRepushRelayAppsSyncsAnEmptySet(t *testing.T) {
+	st := &repushStore{}
+	a := &repushAnnouncer{}
+
+	repushRelayApps(st, a, true)
+
+	if a.syncs != 1 {
+		t.Fatalf("syncs = %d, want 1 even with no apps", a.syncs)
+	}
+	if len(a.synced) != 0 {
+		t.Fatalf("synced %v, want an empty set", a.synced)
 	}
 }
 

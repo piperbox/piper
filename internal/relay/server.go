@@ -259,6 +259,22 @@ func handleControl(stream net.Conn, sess *tunnel.Session, st *Store, router *Rou
 		_ = st.DeregisterHostname(sess.BaseDomain, req.Hostname)
 		router.UnregisterHost(req.Hostname)
 		_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{Hostname: req.Hostname})
+	case "sync-apps":
+		// The box's whole app set, sent on connect (#418). Leaves exactly the
+		// reported slots routed: survivors mapped, pruned ones dropped from the
+		// router as well as the store, so the op holds however it is called.
+		live, pruned, err := st.ReconcileHostnames(sess.BaseDomain, req.Apps)
+		if err != nil {
+			_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{Error: err.Error()})
+			return
+		}
+		for _, host := range pruned {
+			router.UnregisterHost(host)
+		}
+		for _, host := range live {
+			router.RegisterHost(host, sess)
+		}
+		_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{})
 	case "provision":
 		// The box hands the relay its control-API bearer (agent-push Token B).
 		// The op rides the authenticated session, so it can only ever set the

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/piperbox/piper/internal/tunnel"
 )
 
 func newAccountAgent(t *testing.T) (*Store, string) {
@@ -232,5 +234,133 @@ func TestDeleteAgentReclaimsItsAppSlots(t *testing.T) {
 	// orphaned row's idempotency lookup, which hides the exhausted quota.
 	if _, err := st.RegisterHostname(boxB.BaseDomain, "shop", 0); err != nil {
 		t.Fatalf("register after removal: %v, want the freed slot to be reusable", err)
+	}
+}
+
+// #418: the box is the authority on which apps exist, so a connect-time sync
+// prunes hostname rows for apps it no longer has. Those rows are otherwise
+// orphaned forever — deleting an app while the relay is unreachable skips
+// deregistration entirely — and they keep consuming the account's app quota.
+func TestReconcileHostnamesPrunesAppsTheBoxNoLongerHas(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	box, _ := st.EnrollForAccount(acc.ID)
+	kept, err := st.RegisterHostname(box.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RegisterHostname(box.BaseDomain, "shop", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	live, _, err := st.ReconcileHostnames(box.BaseDomain, []tunnel.AppRef{{App: "blog"}})
+	if err != nil {
+		t.Fatalf("ReconcileHostnames: %v", err)
+	}
+
+	if len(live) != 1 || live[0] != kept {
+		t.Fatalf("live = %v, want [%s]", live, kept)
+	}
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
+		t.Fatalf("rows = %d, want 1 (shop's row must be pruned)", n)
+	}
+}
+
+// A relay DB wipe (routine under the no-migrations policy) leaves the box
+// holding hostnames the relay has no rows for. Sync must recreate them, which
+// is what the per-app re-push did implicitly via idempotent Register.
+func TestReconcileHostnamesRecreatesMissingRows(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	box, _ := st.EnrollForAccount(acc.ID)
+
+	live, _, err := st.ReconcileHostnames(box.BaseDomain, []tunnel.AppRef{{App: "blog"}})
+	if err != nil {
+		t.Fatalf("ReconcileHostnames: %v", err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("live = %v, want one hostname created from nothing", live)
+	}
+}
+
+// Pruning is safe to get wrong because appHostname is deterministic in
+// (agent, app, pr): a row dropped in error comes back identical.
+func TestReconcileHostnamesIsHostnameStableAcrossAPruneCycle(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	box, _ := st.EnrollForAccount(acc.ID)
+	before, _ := st.RegisterHostname(box.BaseDomain, "blog", 0)
+
+	if _, _, err := st.ReconcileHostnames(box.BaseDomain, nil); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := st.ReconcileHostnames(box.BaseDomain, []tunnel.AppRef{{App: "blog"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 1 || after[0] != before {
+		t.Fatalf("after = %v, want the original %q back", after, before)
+	}
+}
+
+// Previews hold their own (app, pr) rows and must survive a sync that lists
+// them; production and preview for one app are different slots.
+func TestReconcileHostnamesKeepsPreviews(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	box, _ := st.EnrollForAccount(acc.ID)
+	prod, _ := st.RegisterHostname(box.BaseDomain, "blog", 0)
+	preview, _ := st.RegisterHostname(box.BaseDomain, "blog", 7)
+
+	live, _, err := st.ReconcileHostnames(box.BaseDomain,
+		[]tunnel.AppRef{{App: "blog"}, {App: "blog", PR: 7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(live) != 2 {
+		t.Fatalf("live = %v, want both %q and %q", live, prod, preview)
+	}
+}
+
+// One box's sync must not touch another box's rows, even on the same account.
+func TestReconcileHostnamesLeavesOtherBoxesAlone(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	boxA, _ := st.EnrollForAccount(acc.ID)
+	boxB, _ := st.EnrollForAccount(acc.ID)
+	if _, err := st.RegisterHostname(boxB.BaseDomain, "blog", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := st.ReconcileHostnames(boxA.BaseDomain, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
+		t.Fatalf("rows = %d, want box B's row untouched", n)
+	}
+}
+
+// A slot the account cannot fit under its app cap is skipped, not fatal: one
+// app must not strand the rest of the box's URLs, which is the resilience the
+// per-app re-push used to provide by looping.
+func TestReconcileHostnamesSkipsASlotItCannotFit(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 1, 5) // one app per account
+	acc, _ := st.UpsertAccount("sub-1", "alice")
+	box, _ := st.EnrollForAccount(acc.ID)
+
+	live, _, err := st.ReconcileHostnames(box.BaseDomain,
+		[]tunnel.AppRef{{App: "blog"}, {App: "shop"}})
+	if err != nil {
+		t.Fatalf("ReconcileHostnames: %v", err)
+	}
+	if len(live) != 1 {
+		t.Fatalf("live = %v, want the one slot that fits under the cap", live)
 	}
 }
