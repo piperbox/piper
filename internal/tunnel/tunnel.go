@@ -185,15 +185,15 @@ type AppRef struct {
 
 // ControlRequest is an agent→relay control message on a KindControl stream.
 type ControlRequest struct {
-	Op       string `json:"op"` // "register" | "deregister" | "sync-apps" | "provision" | "add-domain" | "remove-domain" | "domain-active" | "bind-repo" | "unbind-repo" | "gh-token"
-	App      string `json:"app,omitempty"`
-	PR       int    `json:"pr,omitempty"` // "register": PR number for a preview host; 0 is production
-	Hostname string `json:"hostname,omitempty"`
-	Token    string `json:"token,omitempty"`  // "provision": the box's control-API bearer for the relay to inject
-	Domain   string `json:"domain,omitempty"` // custom domain for add/remove/active operations
-	Repo     string `json:"repo,omitempty"`   // "owner/name" for bind-repo and gh-token
-	Branch   string `json:"branch,omitempty"` // tracked branch for bind-repo
-	Apps     []AppRef `json:"apps,omitempty"` // "sync-apps": every slot the box holds
+	Op       string   `json:"op"` // "register" | "deregister" | "sync-apps" | "provision" | "add-domain" | "remove-domain" | "domain-active" | "bind-repo" | "unbind-repo" | "gh-token"
+	App      string   `json:"app,omitempty"`
+	PR       int      `json:"pr,omitempty"` // "register": PR number for a preview host; 0 is production
+	Hostname string   `json:"hostname,omitempty"`
+	Token    string   `json:"token,omitempty"`  // "provision": the box's control-API bearer for the relay to inject
+	Domain   string   `json:"domain,omitempty"` // custom domain for add/remove/active operations
+	Repo     string   `json:"repo,omitempty"`   // "owner/name" for bind-repo and gh-token
+	Branch   string   `json:"branch,omitempty"` // tracked branch for bind-repo
+	Apps     []AppRef `json:"apps,omitempty"`   // "sync-apps": every slot the box holds
 }
 
 // ControlResponse is the relay's reply. Error is non-empty on failure.
