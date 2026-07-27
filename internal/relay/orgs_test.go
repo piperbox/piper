@@ -31,19 +31,92 @@ func TestCreateOrgMakesCreatorSoleOwner(t *testing.T) {
 	}
 }
 
-func TestCreateOrgSlugSharesUsernameNamespace(t *testing.T) {
+func TestCreateOrgDoesNotTakeAUserLogin(t *testing.T) {
 	st := openTestStore(t)
 	alice, _ := st.UpsertAccount("gh-alice", "alice")
-	// A user already holds "bob": the org gets bob-2, exactly like a
-	// colliding user signup would.
+	// A user already holds "bob". Orgs live in their own namespace, so the
+	// org gets "bob" too — neither displaces the other (#411).
 	st.UpsertAccount("gh-bob", "bob")
 
 	org, err := st.CreateOrg(alice.ID, "Bob")
 	if err != nil {
 		t.Fatalf("CreateOrg: %v", err)
 	}
-	if org.Slug != "bob-2" {
-		t.Fatalf("slug = %q, want bob-2", org.Slug)
+	if org.Slug != "bob" {
+		t.Fatalf("slug = %q, want bob", org.Slug)
+	}
+}
+
+func TestCreateOrgStillDisambiguatesAgainstOrgs(t *testing.T) {
+	st := openTestStore(t)
+	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	if _, err := st.CreateOrg(alice.ID, "Acme"); err != nil {
+		t.Fatalf("first CreateOrg: %v", err)
+	}
+
+	org, err := st.CreateOrg(alice.ID, "Acme")
+	if err != nil {
+		t.Fatalf("second CreateOrg: %v", err)
+	}
+	if org.Slug != "acme-2" {
+		t.Fatalf("slug = %q, want acme-2", org.Slug)
+	}
+}
+
+func TestUpsertAccountKeepsLoginHeldByAnOrg(t *testing.T) {
+	st := openTestStore(t)
+	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	// An org squats "bob" before the GitHub user of that name ever signs in.
+	if _, err := st.CreateOrg(alice.ID, "bob"); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	bob, err := st.UpsertAccount("gh-bob", "bob")
+	if err != nil {
+		t.Fatalf("UpsertAccount: %v", err)
+	}
+	if bob.Username != "bob" {
+		t.Fatalf("username = %q, want bob — an org must not displace a GitHub login", bob.Username)
+	}
+}
+
+func TestSameNamedUserAndOrgGetDistinctHostnames(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 5, 10, 5)
+	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	acme, _ := st.UpsertAccount("gh-acme", "acme")
+	org, err := st.CreateOrg(alice.ID, "acme")
+	if err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+	if org.Slug != acme.Username {
+		t.Fatalf("org slug %q != user slug %q; this test needs them equal", org.Slug, acme.Username)
+	}
+
+	userAgent, err := st.EnrollForAccount(acme.ID)
+	if err != nil {
+		t.Fatalf("user enroll: %v", err)
+	}
+	orgAgent, err := st.EnrollForAccount(org.ID)
+	if err != nil {
+		t.Fatalf("org enroll: %v", err)
+	}
+	if userAgent.BaseDomain == orgAgent.BaseDomain {
+		t.Fatalf("user and org share base domain %q", userAgent.BaseDomain)
+	}
+
+	// Both hold the slug "acme"; the per-account hash keeps their app
+	// hostnames apart, which is why the slug need not be globally unique.
+	userHost, err := st.RegisterHostname(userAgent.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatalf("user RegisterHostname: %v", err)
+	}
+	orgHost, err := st.RegisterHostname(orgAgent.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatalf("org RegisterHostname: %v", err)
+	}
+	if userHost == orgHost {
+		t.Fatalf("user and org share hostname %q", userHost)
 	}
 }
 

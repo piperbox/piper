@@ -11,14 +11,19 @@ CREATE TABLE IF NOT EXISTS agents (
 CREATE UNIQUE INDEX IF NOT EXISTS agents_base_domain_unique
     ON agents(base_domain);
 
+-- username is unique per type, not globally: users and orgs hold separate
+-- namespaces, so an org can never take a GitHub login out from under the user
+-- who owns it (#411). Hostnames stay distinct regardless — appHostname keys its
+-- hash on the account id, and the slug is only the human-readable half.
 CREATE TABLE IF NOT EXISTS accounts (
     id           TEXT PRIMARY KEY,
     github_id    TEXT UNIQUE,
     github_login TEXT,
-    username     TEXT NOT NULL UNIQUE,
+    username     TEXT NOT NULL,
     type         TEXT NOT NULL DEFAULT 'user',
     disabled     INTEGER NOT NULL DEFAULT 0,
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    UNIQUE(username, type)
 );
 
 CREATE TABLE IF NOT EXISTS account_creds (

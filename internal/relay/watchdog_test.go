@@ -91,7 +91,7 @@ func TestDisabledWatchdogEvictsLiveSession(t *testing.T) {
 		return ok
 	})
 
-	if err := st.DisableAccount(acc.Username); err != nil {
+	if err := st.DisableAccount(acc.Username, "user"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -199,7 +199,7 @@ func TestPostDisableRedialRejected(t *testing.T) {
 		t.Fatalf("healthy agent rejected at handshake: %v", err)
 	}
 
-	if err := st.DisableAccount(acc.Username); err != nil {
+	if err := st.DisableAccount(acc.Username, "user"); err != nil {
 		t.Fatal(err)
 	}
 

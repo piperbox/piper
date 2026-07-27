@@ -22,9 +22,8 @@ type Org struct {
 var ErrNoOrg = errors.New("no such org")
 
 // CreateOrg creates an org account (type='org', no GitHub identity, no
-// credentials) with a slug derived from name — unique in the same username
-// namespace user slugs live in, since both become DNS-label components — and
-// makes the creator its sole owner.
+// credentials) with a slug derived from name — unique among orgs only, since
+// users hold their own namespace (#411) — and makes the creator its sole owner.
 func (s *Store) CreateOrg(creatorID, name string) (Org, error) {
 	var ctype string
 	err := s.db.QueryRow(`SELECT type FROM accounts WHERE id=?`, creatorID).Scan(&ctype)
@@ -66,7 +65,7 @@ func (s *Store) CreateOrg(creatorID, name string) (Org, error) {
 			return Org{ID: id, Slug: slug, Role: "owner"}, nil
 		}
 		if isUniqueViolation(err) {
-			continue // slug taken (user or org); try the next suffix
+			continue // another org holds this slug; try the next suffix
 		}
 		return Org{}, err
 	}

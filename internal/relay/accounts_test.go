@@ -97,11 +97,56 @@ func TestDisabledAccountCredentialRejected(t *testing.T) {
 	acc, _ := st.UpsertAccount("sub-1", "dave")
 	cred, _ := st.MintAccountCredential(acc.ID)
 
-	if err := st.DisableAccount(acc.Username); err != nil {
+	if err := st.DisableAccount(acc.Username, "user"); err != nil {
 		t.Fatalf("DisableAccount: %v", err)
 	}
 	if _, err := st.AuthenticateAccount(cred); err != ErrBadCredential {
 		t.Fatalf("disabled cred err = %v, want ErrBadCredential", err)
+	}
+}
+
+// A user and an org may now hold the same slug (#411), so the kill-switch has
+// to name which one it means — disabling "acme" the user must not sever "acme"
+// the org, nor the reverse.
+func TestDisableAccountLeavesTheSameNamedOrgAlone(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	user, _ := st.UpsertAccount("gh-acme", "acme")
+	org, _ := st.CreateOrg(alice.ID, "acme")
+	orgAgent, err := st.EnrollForAccount(org.ID)
+	if err != nil {
+		t.Fatalf("org enroll: %v", err)
+	}
+
+	if err := st.DisableAccount(user.Username, "user"); err != nil {
+		t.Fatalf("DisableAccount: %v", err)
+	}
+
+	disabled, err := st.AgentDisabled(orgAgent.BaseDomain)
+	if err != nil {
+		t.Fatalf("AgentDisabled: %v", err)
+	}
+	if disabled {
+		t.Fatal("disabling user acme also disabled org acme")
+	}
+}
+
+func TestDisableAccountLeavesTheSameNamedUserAlone(t *testing.T) {
+	st := openTestStore(t)
+	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	user, _ := st.UpsertAccount("gh-acme", "acme")
+	cred, _ := st.MintAccountCredential(user.ID)
+	if _, err := st.CreateOrg(alice.ID, "acme"); err != nil {
+		t.Fatalf("CreateOrg: %v", err)
+	}
+
+	if err := st.DisableAccount("acme", "org"); err != nil {
+		t.Fatalf("DisableAccount: %v", err)
+	}
+
+	if _, err := st.AuthenticateAccount(cred); err != nil {
+		t.Fatalf("user acme rejected after disabling org acme: %v", err)
 	}
 }
 
@@ -160,7 +205,7 @@ func TestAuthenticateRejectsDisabledAccountAgent(t *testing.T) {
 	acc, _ := st.UpsertAccount("sub-1", "grace")
 	en, _ := st.EnrollForAccount(acc.ID)
 
-	if err := st.DisableAccount(acc.Username); err != nil {
+	if err := st.DisableAccount(acc.Username, "user"); err != nil {
 		t.Fatalf("DisableAccount: %v", err)
 	}
 	if _, err := st.Authenticate(en.Token); err != ErrBadToken {

@@ -68,7 +68,7 @@ func TestAddCustomDomainRejectsDisabledAccount(t *testing.T) {
 	if err := st.AddCustomDomain(en.BaseDomain, "shop.dev"); err != nil {
 		t.Fatalf("healthy account rejected: %v", err)
 	}
-	if err := st.DisableAccount(acc.Username); err != nil {
+	if err := st.DisableAccount(acc.Username, "user"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.AddCustomDomain(en.BaseDomain, "other.dev"); !errors.Is(err, ErrBadCredential) {

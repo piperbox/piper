@@ -379,7 +379,7 @@ func TestControlProxyDisabledOrgSeversMembers(t *testing.T) {
 	router.Register(relaySess)
 	go fakeBox(agentSess)
 
-	if err := st.DisableAccount("acme"); err != nil {
+	if err := st.DisableAccount("acme", "org"); err != nil {
 		t.Fatal(err)
 	}
 	if rr := proxyGet(t, api, "/agents/"+base+"/v1/apps", bobCred); rr.Code != http.StatusNotFound {
