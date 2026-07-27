@@ -99,6 +99,14 @@ func (c *TunnelClient) Deregister(hostname string) error {
 	return err
 }
 
+// SyncApps announces every slot this box holds, so the relay can restore their
+// routes and drop rows for the ones it no longer has (#418). Sent once per
+// connect; an empty set is meaningful and prunes everything.
+func (c *TunnelClient) SyncApps(apps []tunnel.AppRef) error {
+	_, err := c.control(tunnel.ControlRequest{Op: "sync-apps", Apps: apps})
+	return err
+}
+
 // Provision hands the relay this box's control-API bearer for the enrollment.
 // It rides the authenticated session, so it can only set this agent's token.
 func (c *TunnelClient) Provision(token string) error {

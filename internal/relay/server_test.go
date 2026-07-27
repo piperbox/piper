@@ -556,3 +556,61 @@ func TestGHTokenControlOpRejectsUnboundRepo(t *testing.T) {
 		t.Fatalf("unbound repo minted a token: %+v", resp)
 	}
 }
+
+// #418: a box announces every slot it holds on connect; the relay prunes rows
+// for the ones it dropped and routes the survivors, so the box no longer has to
+// re-register each app one at a time.
+func TestControlSyncAppsPrunesAndRoutes(t *testing.T) {
+	cert, key := writeWildcard(t, "public.getpiper.co")
+	tlsCfg, err := LoadWildcardConfig(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, _, _, base, st, router := startTestRelay(t, tlsCfg, nil)
+
+	// Two apps registered; the box will report only one back.
+	kept, err := st.RegisterHostname(base, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := st.RegisterHostname(base, "shop", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Route it first, so the assertion below tests that sync unroutes a pruned
+	// host rather than passing because it was never mapped.
+	router.RegisterHost(dropped, sess)
+
+	cs, err := sess.OpenKind(tunnel.KindControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tunnel.WriteMsg(cs, tunnel.ControlRequest{
+		Op:   "sync-apps",
+		Apps: []tunnel.AppRef{{App: "blog"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var resp tunnel.ControlResponse
+	if err := tunnel.ReadMsg(cs, &resp); err != nil {
+		t.Fatal(err)
+	}
+	cs.Close()
+	if resp.Error != "" {
+		t.Fatalf("sync-apps resp = %+v", resp)
+	}
+
+	if _, ok := router.LookupHost(kept); !ok {
+		t.Errorf("kept hostname %q is not routed", kept)
+	}
+	if _, ok := router.LookupHost(dropped); ok {
+		t.Errorf("dropped hostname %q is still routed", dropped)
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM hostnames`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("hostname rows = %d, want 1", n)
+	}
+}

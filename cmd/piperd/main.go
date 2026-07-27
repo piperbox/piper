@@ -88,7 +88,7 @@ type relayAppStore interface {
 // needs.
 type relayAppAnnouncer interface {
 	BindRepo(app, repo, branch string) error
-	Register(app string, pr int) (string, error)
+	SyncApps(apps []tunnel.AppRef) error
 }
 
 // repushRelayApps re-announces this box's per-app relay state on every tunnel
@@ -97,24 +97,31 @@ type relayAppAnnouncer interface {
 // have to come from the box instead:
 //
 //   - repo bindings, which live only in the box's store;
-//   - relay-assigned hostnames (#369) — the relay does not re-derive an agent's
-//     app hostnames when its session registers, the way it does custom domains.
-//     (Since #405 the hostnames table names the agent, so it could; nothing has
-//     been written to do it.) Without this re-push, every <hash>-<user> URL
-//     drops TLS after a relay restart or a tunnel flap until the app is
-//     redeployed, while custom domains keep serving.
+//   - the box's app set (#418) — the relay's router is in-memory and re-derives
+//     only custom domains when a session registers, so without this every
+//     <hash>-<user> URL drops TLS after a relay restart or a tunnel flap until
+//     the app is redeployed, while custom domains keep serving.
 //
-// Only apps that already hold a hostname are re-registered, and registration is
-// idempotent on the relay, so this claims no new hostname and consumes no app
-// quota. terminated is false on a BYO/LAN box, which has no relay-assigned
-// hostnames at all. One app's failure must not strand the rest, so errors are
-// logged and the loop continues; the next connect retries.
+// The app set goes as ONE sync rather than a register per app, because the box
+// is the authority on which apps exist: the relay restores routes for the slots
+// listed and prunes rows for the ones that are gone. Deleting an app while the
+// relay is unreachable skips deregistration entirely, so without a sync those
+// rows are orphaned forever and keep consuming the account's app quota.
+//
+// An empty set is meaningful — it prunes everything — so the sync is sent even
+// when the box holds no apps. terminated is false on a BYO/LAN box, which has
+// no relay-assigned hostnames at all, and is skipped: syncing would prune
+// nothing and claim nothing, but the op is meaningless there.
+//
+// A failed preview lookup must not cost the box the production hostnames it
+// could still announce, so the sync goes ahead with what is known.
 func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 	apps, err := st.ListApps()
 	if err != nil {
 		log.Printf("relay: re-push apps: %v", err)
 		return
 	}
+	var slots []tunnel.AppRef
 	for _, a := range apps {
 		if a.Repo != "" {
 			if err := tc.BindRepo(a.Name, a.Repo, a.Branch); err != nil {
@@ -122,28 +129,24 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 			}
 		}
 		if terminated && a.Hostname != "" {
-			if _, err := tc.Register(a.Name, 0); err != nil {
-				log.Printf("relay: re-register %s: %v", a.Name, err)
-			}
+			slots = append(slots, tunnel.AppRef{App: a.Name})
 		}
 	}
 	if !terminated {
 		return
 	}
-	// Previews hold relay-assigned hostnames from the same register op, and are
-	// missed by the loop above: they live on their own (app, pr) deployment rows,
-	// not on the app row's single Hostname (#376). Without this a live PR-preview
-	// URL goes dark on a relay restart and stays dark until the PR pushes again.
-	// A failed lookup here must not cost the box the hostnames already restored.
-	previews, err := st.RunningPreviews()
-	if err != nil {
+	// Previews live on their own (app, pr) deployment rows rather than the app
+	// row's single Hostname (#376), so they need their own pass or a live
+	// PR-preview URL goes dark on a relay restart until the PR pushes again.
+	if previews, err := st.RunningPreviews(); err != nil {
 		log.Printf("relay: re-push previews: %v", err)
-		return
-	}
-	for _, p := range previews {
-		if _, err := tc.Register(p.App, p.PR); err != nil {
-			log.Printf("relay: re-register %s PR %d: %v", p.App, p.PR, err)
+	} else {
+		for _, p := range previews {
+			slots = append(slots, tunnel.AppRef{App: p.App, PR: p.PR})
 		}
+	}
+	if err := tc.SyncApps(slots); err != nil {
+		log.Printf("relay: sync apps: %v", err)
 	}
 }
 
