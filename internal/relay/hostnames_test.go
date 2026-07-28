@@ -259,7 +259,7 @@ func TestReconcileHostnamesPrunesAppsTheBoxNoLongerHas(t *testing.T) {
 		t.Fatalf("ReconcileHostnames: %v", err)
 	}
 
-	if len(live) != 1 || live[0] != kept {
+	if len(live) != 1 || live[0].Hostname != kept {
 		t.Fatalf("live = %v, want [%s]", live, kept)
 	}
 	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
@@ -301,7 +301,7 @@ func TestReconcileHostnamesIsHostnameStableAcrossAPruneCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(after) != 1 || after[0] != before {
+	if len(after) != 1 || after[0].Hostname != before {
 		t.Fatalf("after = %v, want the original %q back", after, before)
 	}
 }

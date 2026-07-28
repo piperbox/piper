@@ -82,13 +82,14 @@ type relayTokenStore interface {
 type relayAppStore interface {
 	ListApps() ([]store.App, error)
 	RunningPreviews() ([]store.Deployment, error)
+	SetAppHostname(name, hostname string) error
 }
 
 // relayAppAnnouncer is the tunnel-client slice the per-connect app re-push
 // needs.
 type relayAppAnnouncer interface {
 	BindRepo(app, repo, branch string) error
-	SyncApps(apps []tunnel.AppRef) error
+	SyncApps(apps []tunnel.AppRef) ([]tunnel.AppHost, error)
 }
 
 // repushRelayApps re-announces this box's per-app relay state on every tunnel
@@ -145,8 +146,23 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 			slots = append(slots, tunnel.AppRef{App: p.App, PR: p.PR})
 		}
 	}
-	if err := tc.SyncApps(slots); err != nil {
+	hosts, err := tc.SyncApps(slots)
+	if err != nil {
 		log.Printf("relay: sync apps: %v", err)
+		return
+	}
+	// Persist what came back. The relay names the slots, and #405 moved that
+	// name onto the agent, so a hostname stored at deploy time can be stale
+	// after an upgrade — leaving `piper list` and the dashboard advertising a
+	// URL that no longer resolves. Previews are skipped: their hostname belongs
+	// to a deployment, and writing it to the app row would clobber production's.
+	for _, h := range hosts {
+		if h.PR != 0 || h.Hostname == "" {
+			continue
+		}
+		if err := st.SetAppHostname(h.App, h.Hostname); err != nil {
+			log.Printf("relay: record hostname for %s: %v", h.App, err)
+		}
 	}
 }
 

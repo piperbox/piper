@@ -581,10 +581,19 @@ func TestProvisionRelayControlConcurrentSingleMint(t *testing.T) {
 
 // repushStore is the store slice repushRelayApps needs.
 type repushStore struct {
-	apps        []store.App
-	previews    []store.Deployment
-	err         error
-	previewsErr error
+	apps         []store.App
+	previews     []store.Deployment
+	err          error
+	previewsErr  error
+	hostnamesSet map[string]string
+}
+
+func (s *repushStore) SetAppHostname(name, hostname string) error {
+	if s.hostnamesSet == nil {
+		s.hostnamesSet = map[string]string{}
+	}
+	s.hostnamesSet[name] = hostname
+	return nil
 }
 
 func (s *repushStore) ListApps() ([]store.App, error) { return s.apps, s.err }
@@ -595,10 +604,11 @@ func (s *repushStore) RunningPreviews() ([]store.Deployment, error) {
 
 // repushAnnouncer records what the re-push announced to the relay.
 type repushAnnouncer struct {
-	binds   []string
-	synced  []string // app@pr, in the order the sync listed them
-	syncs   int
-	syncErr error
+	binds    []string
+	synced   []string // app@pr, in the order the sync listed them
+	syncs    int
+	syncErr  error
+	returned []tunnel.AppHost
 }
 
 func (a *repushAnnouncer) BindRepo(app, repo, branch string) error {
@@ -609,12 +619,12 @@ func (a *repushAnnouncer) BindRepo(app, repo, branch string) error {
 // SyncApps records app@pr per slot so a preview is distinguishable from the
 // production entry for the same app, and counts calls: the whole point of #418
 // is that one connect announces the set once.
-func (a *repushAnnouncer) SyncApps(apps []tunnel.AppRef) error {
+func (a *repushAnnouncer) SyncApps(apps []tunnel.AppRef) ([]tunnel.AppHost, error) {
 	a.syncs++
 	for _, ap := range apps {
 		a.synced = append(a.synced, fmt.Sprintf("%s@%d", ap.App, ap.PR))
 	}
-	return a.syncErr
+	return a.returned, a.syncErr
 }
 
 // TestRepushRelayAppsSyncsHostnames pins #369: the relay's router keeps
@@ -868,5 +878,50 @@ func TestDialAddrRewritesListenAddrToLoopback(t *testing.T) {
 		if got := dialAddr(tc.listen); got != tc.want {
 			t.Errorf("dialAddr(%q) = %q, want %q", tc.listen, got, tc.want)
 		}
+	}
+}
+
+// The relay is the authority on what each app is called, and #405 made every
+// hostname change on upgrade (the hash moved onto the agent). The box persists
+// apps.hostname only at deploy time, so unless the connect-time sync writes the
+// relay's answer back, `piper list` and the dashboard keep advertising a dead
+// URL until each app is redeployed.
+func TestRepushRelayAppsPersistsReturnedHostnames(t *testing.T) {
+	st := &repushStore{apps: []store.App{
+		{Name: "test1", Hostname: "stale-a.relay.example"},
+		{Name: "test2", Hostname: "stale-b.relay.example"},
+	}}
+	a := &repushAnnouncer{returned: []tunnel.AppHost{
+		{App: "test1", Hostname: "fresh-a.relay.example"},
+		{App: "test2", Hostname: "fresh-b.relay.example"},
+	}}
+
+	repushRelayApps(st, a, true)
+
+	want := map[string]string{
+		"test1": "fresh-a.relay.example",
+		"test2": "fresh-b.relay.example",
+	}
+	if !reflect.DeepEqual(st.hostnamesSet, want) {
+		t.Fatalf("persisted %v, want %v", st.hostnamesSet, want)
+	}
+}
+
+// A preview's hostname lives on its deployment, not the app row — writing it to
+// apps.hostname would clobber production's URL with a PR preview's.
+func TestRepushRelayAppsDoesNotPersistPreviewHostnames(t *testing.T) {
+	st := &repushStore{
+		apps:     []store.App{{Name: "test1", Hostname: "stale-a.relay.example"}},
+		previews: []store.Deployment{{App: "test1", PR: 7, Status: "running"}},
+	}
+	a := &repushAnnouncer{returned: []tunnel.AppHost{
+		{App: "test1", Hostname: "fresh-a.relay.example"},
+		{App: "test1", PR: 7, Hostname: "pr7-fresh-a.relay.example"},
+	}}
+
+	repushRelayApps(st, a, true)
+
+	if got := st.hostnamesSet["test1"]; got != "fresh-a.relay.example" {
+		t.Fatalf("test1 hostname = %q, want the production one", got)
 	}
 }
