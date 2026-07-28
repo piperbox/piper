@@ -137,8 +137,10 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 }
 
 // ReconcileHostnames settles the relay's hostname rows for one agent against
-// the set of slots the box says it holds, and returns the surviving hostnames
-// for the router to map. It is what a session sends on connect (#418).
+// the set of slots the box says it holds, and returns each survivor's assigned
+// hostname — for the router to map, and for the box to persist, since the relay
+// names the slots and that name can change under a box. It is what a session
+// sends on connect (#418).
 //
 // The box is the authority on which apps exist; the relay is the authority on
 // what each one is called. So this prunes rows for slots the box no longer has
@@ -154,7 +156,7 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 // identical, and the whole exchange repeats on the next connect. One slot's
 // failure — a cap it cannot fit under, say — is skipped rather than failing the
 // rest, matching the per-app re-push this replaces.
-func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (live, pruned []string, err error) {
+func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (live []tunnel.AppHost, pruned []string, err error) {
 	_, _, agentName, err := s.AgentAccount(baseDomain)
 	if err != nil {
 		return nil, nil, err
@@ -197,14 +199,14 @@ func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (liv
 		pruned = append(pruned, sl.hostname)
 	}
 
-	live = make([]string, 0, len(apps))
+	live = make([]tunnel.AppHost, 0, len(apps))
 	for _, a := range apps {
 		host, err := s.RegisterHostname(baseDomain, a.App, a.PR)
 		if err != nil {
 			log.Printf("relay: sync %s %s pr %d: %v", agentName, a.App, a.PR, err)
 			continue
 		}
-		live = append(live, host)
+		live = append(live, tunnel.AppHost{App: a.App, PR: a.PR, Hostname: host})
 	}
 	return live, pruned, nil
 }
