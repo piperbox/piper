@@ -14,6 +14,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -419,9 +420,13 @@ func (m *Manager) issueLoop(domain string, gen int) {
 			// "issuing" so a restart never reports "failed" just because the
 			// relay wasn't connected yet (#166). The OnConnect kick drives the
 			// immediate retry; the backoff below is only the fallback.
-			_ = m.st.UpdateDomainStatus(dc.Domain, StatusIssuing, "waiting for relay connection", time.Time{})
+			if err := m.st.UpdateDomainStatus(dc.Domain, StatusIssuing, "waiting for relay connection", time.Time{}); err != nil {
+				log.Printf("domain: status write for %s: %v", dc.Domain, err)
+			}
 		} else {
-			_ = m.st.UpdateDomainStatus(dc.Domain, StatusFailed, err.Error(), time.Time{})
+			if err := m.st.UpdateDomainStatus(dc.Domain, StatusFailed, err.Error(), time.Time{}); err != nil {
+				log.Printf("domain: status write for %s: %v", dc.Domain, err)
+			}
 		}
 		if !m.sleepOrStopped(m.retryDelay(attempt)) {
 			return

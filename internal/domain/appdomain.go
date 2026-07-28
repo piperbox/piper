@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,12 +81,16 @@ func (m *Manager) appLoop(domain string, gen int) {
 		case errors.Is(err, errStaleConfig):
 			return // removed or re-owned; the successor owns the state now
 		case errors.Is(err, errWaitDNS):
-			_ = m.st.UpdateAppDomainStatus(domain, StatusPending, err.Error(), time.Time{})
+			if err := m.st.UpdateAppDomainStatus(domain, StatusPending, err.Error(), time.Time{}); err != nil {
+				log.Printf("domain: status write for %s: %v", domain, err)
+			}
 			if !m.sleepOrStopped(m.dnsWait) {
 				return
 			}
 		default:
-			_ = m.st.UpdateAppDomainStatus(domain, StatusFailed, err.Error(), time.Time{})
+			if err := m.st.UpdateAppDomainStatus(domain, StatusFailed, err.Error(), time.Time{}); err != nil {
+				log.Printf("domain: status write for %s: %v", domain, err)
+			}
 			if !m.sleepOrStopped(m.retryDelay(attempt)) {
 				return
 			}
@@ -228,7 +233,9 @@ func (m *Manager) ResumeAppDomains() {
 				}
 			}
 			// Damaged or missing disk cert: degrade to re-issuance.
-			_ = m.st.UpdateAppDomainStatus(row.Domain, StatusIssuing, "", time.Time{})
+			if err := m.st.UpdateAppDomainStatus(row.Domain, StatusIssuing, "", time.Time{}); err != nil {
+				log.Printf("domain: status write for %s: %v", row.Domain, err)
+			}
 		}
 		gen := m.nextGenFor(row.Domain)
 		m.spawn(func() { m.appLoop(row.Domain, gen) })
@@ -309,7 +316,9 @@ func (m *Manager) renewApp(snap store.AppDomain, now time.Time) {
 	}
 	if err := m.reissueApp(row); err != nil && !errors.Is(err, errStaleConfig) {
 		// Old cert keeps serving until expiry; surface the error, stay active.
-		_ = m.st.UpdateAppDomainStatus(row.Domain, StatusActive, "renew: "+err.Error(), row.CertNotAfter)
+		if err := m.st.UpdateAppDomainStatus(row.Domain, StatusActive, "renew: "+err.Error(), row.CertNotAfter); err != nil {
+			log.Printf("domain: status write for %s: %v", row.Domain, err)
+		}
 	}
 }
 
