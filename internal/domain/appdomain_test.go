@@ -461,10 +461,19 @@ func TestResumeAppDomainActiveReloadsWithoutReissuing(t *testing.T) {
 // releases it, exposing the window between reassertLoop's checks and its push.
 type gatedAddNotifier struct {
 	fakeNotifier
-	entered chan struct{} // one value when the gated Add enters
-	release chan struct{}
-	once    sync.Once
+	entered     chan struct{} // one value when the gated Add enters
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 }
+
+// releaseAll unblocks a parked and any future gated Add, idempotently. Tests
+// register it with t.Cleanup after the manager helper has registered
+// t.Cleanup(m.Close); cleanups run LIFO, so releaseAll fires first and a
+// failed barrier assertion cannot leave Close waiting forever on a parked
+// Add. The Once keeps it safe when a test already released on the happy
+// path.
+func (g *gatedAddNotifier) releaseAll() { g.releaseOnce.Do(func() { close(g.release) }) }
 
 func (g *gatedAddNotifier) AddCustomDomain(d string) error {
 	gated := false
@@ -497,6 +506,7 @@ func TestReassertLoopCannotResurrectRemovedDomain(t *testing.T) {
 		entered: make(chan struct{}, 1),
 		release: make(chan struct{}, 1),
 	}
+	t.Cleanup(gated.releaseAll) // runs before m2.Close (LIFO): unblocks a parked Add
 	m2.SetRelay(gated)
 	m2.ResumeAppDomains()
 	<-gated.entered // the re-assert is inside its add-domain push
