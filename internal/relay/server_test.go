@@ -599,6 +599,11 @@ func TestControlSyncAppsPrunesAndRoutes(t *testing.T) {
 	if resp.Error != "" {
 		t.Fatalf("sync-apps resp = %+v", resp)
 	}
+	// The response must name the survivors: the box persists these, and #405
+	// means the hostname it stored at deploy time can be stale.
+	if len(resp.Apps) != 1 || resp.Apps[0].App != "blog" || resp.Apps[0].Hostname != kept {
+		t.Fatalf("resp.Apps = %+v, want [{blog 0 %s}]", resp.Apps, kept)
+	}
 
 	if _, ok := router.LookupHost(kept); !ok {
 		t.Errorf("kept hostname %q is not routed", kept)

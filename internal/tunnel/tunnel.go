@@ -183,6 +183,16 @@ type AppRef struct {
 	PR  int    `json:"pr,omitempty"`
 }
 
+// AppHost is one slot's assigned hostname, as "sync-apps" answers it. The relay
+// is the authority on what each slot is called, and the name can change under a
+// box (the hash keys on the agent since #405), so the box persists what comes
+// back rather than trusting the copy it stored at deploy time.
+type AppHost struct {
+	App      string `json:"app"`
+	PR       int    `json:"pr,omitempty"`
+	Hostname string `json:"hostname"`
+}
+
 // ControlRequest is an agent→relay control message on a KindControl stream.
 type ControlRequest struct {
 	Op       string   `json:"op"` // "register" | "deregister" | "sync-apps" | "provision" | "add-domain" | "remove-domain" | "domain-active" | "bind-repo" | "unbind-repo" | "gh-token"
@@ -198,10 +208,11 @@ type ControlRequest struct {
 
 // ControlResponse is the relay's reply. Error is non-empty on failure.
 type ControlResponse struct {
-	Hostname string `json:"hostname,omitempty"`
-	Error    string `json:"error,omitempty"`
-	Token    string `json:"token,omitempty"`   // "gh-token": repo-scoped installation token
-	Expires  string `json:"expires,omitempty"` // "gh-token": RFC3339 expiry
+	Hostname string    `json:"hostname,omitempty"`
+	Apps     []AppHost `json:"apps,omitempty"` // "sync-apps": the assigned hostname per surviving slot
+	Error    string    `json:"error,omitempty"`
+	Token    string    `json:"token,omitempty"`   // "gh-token": repo-scoped installation token
+	Expires  string    `json:"expires,omitempty"` // "gh-token": RFC3339 expiry
 }
 
 // WriteMsg writes v as a single length-prefixed JSON frame.

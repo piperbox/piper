@@ -271,10 +271,12 @@ func handleControl(stream net.Conn, sess *tunnel.Session, st *Store, router *Rou
 		for _, host := range pruned {
 			router.UnregisterHost(host)
 		}
-		for _, host := range live {
-			router.RegisterHost(host, sess)
+		for _, h := range live {
+			router.RegisterHost(h.Hostname, sess)
 		}
-		_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{})
+		// Hand the names back: the box stores them at deploy time, and #405 moved
+		// the hash onto the agent, so its copy can be stale after an upgrade.
+		_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{Apps: live})
 	case "provision":
 		// The box hands the relay its control-API bearer (agent-push Token B).
 		// The op rides the authenticated session, so it can only ever set the
