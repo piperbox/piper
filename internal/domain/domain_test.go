@@ -742,8 +742,9 @@ func TestRenewFailureKeepsServing(t *testing.T) {
 // the failed write must be reported on the log, not dropped (#422).
 func TestRenewStatusWriteFailureIsLogged(t *testing.T) {
 	var logBuf bytes.Buffer
+	prevOut := log.Writer()
 	log.SetOutput(&logBuf)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prevOut) })
 
 	dataDir := t.TempDir()
 	st, err := store.Open(filepath.Join(dataDir, "test.db"))
