@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -730,6 +732,54 @@ func TestRenewFailureKeepsServing(t *testing.T) {
 	}
 	if dcAfter.Error == "" {
 		t.Fatal("renewal failure not recorded in error")
+	}
+}
+
+// TestRenewStatusWriteFailureIsLogged closes the store underneath a renewal —
+// the issuer factory runs between the run's stale-config re-read and its
+// status write — so the "old cert keeps serving" status update fails. The
+// sweep must keep going (renewCheck returns; a later sweep still runs) and
+// the failed write must be reported on the log, not dropped (#422).
+func TestRenewStatusWriteFailureIsLogged(t *testing.T) {
+	var logBuf bytes.Buffer
+	log.SetOutput(&logBuf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := New(Options{
+		Store: st, Proxy: &fakeProxy{}, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+		Issuer: func(string, string) (Issuer, error) {
+			st.Close() // every later store call fails with "database is closed"
+			return nil, errors.New("acme: boom")
+		},
+	})
+	t.Cleanup(m.Close)
+
+	notAfter := time.Now().Add(25 * 24 * time.Hour) // inside the renewal window
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateDomainStatus("example.com", StatusActive, "", notAfter); err != nil {
+		t.Fatal(err)
+	}
+	certPEM, keyPEM := selfSignedPEM(t, notAfter, "*.example.com", "example.com")
+	if err := m.writeCert(certPEM, keyPEM); err != nil {
+		t.Fatal(err)
+	}
+
+	// The renewal fails and its status write errors on the closed store; the
+	// sweep still returns, and a later sweep runs without panic or deadlock.
+	m.renewCheck(time.Now())
+	m.renewCheck(time.Now())
+
+	if got := logBuf.String(); !strings.Contains(got, "domain: status write for example.com: sql: database is closed") {
+		t.Fatalf("failed status write not reported; log = %q", got)
 	}
 }
 

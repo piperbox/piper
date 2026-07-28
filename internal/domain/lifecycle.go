@@ -46,7 +46,9 @@ func (m *Manager) Resume() {
 			}
 		}
 		// Damaged or missing disk cert: degrade to re-issuance, not a crash.
-		_ = m.st.UpdateDomainStatus(dc.Domain, StatusIssuing, "", time.Time{})
+		if err := m.st.UpdateDomainStatus(dc.Domain, StatusIssuing, "", time.Time{}); err != nil {
+			log.Printf("domain: status write for %s: %v", dc.Domain, err)
+		}
 	}
 	gen := m.nextGen()
 	m.issueMu.Unlock()
@@ -128,7 +130,9 @@ func (m *Manager) renewCheck(now time.Time) {
 	}
 	if err := m.reissue(dc); err != nil && !errors.Is(err, errStaleConfig) {
 		// Old cert keeps serving until expiry; surface the error, stay active.
-		_ = m.st.UpdateDomainStatus(dc.Domain, StatusActive, "renew: "+err.Error(), dc.CertNotAfter)
+		if err := m.st.UpdateDomainStatus(dc.Domain, StatusActive, "renew: "+err.Error(), dc.CertNotAfter); err != nil {
+			log.Printf("domain: status write for %s: %v", dc.Domain, err)
+		}
 	}
 }
 

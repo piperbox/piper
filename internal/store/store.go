@@ -47,11 +47,15 @@ type Store struct{ db *sql.DB }
 func Open(path string) (*Store, error) {
 	// busy_timeout makes a second writer (e.g. `piperd token create` run
 	// against a live daemon's piper.db) wait for the lock instead of
-	// failing immediately with SQLITE_BUSY.
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	// failing immediately with SQLITE_BUSY. journal_mode(WAL) lets readers
+	// proceed while a writer holds the write lock (#422).
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
 		return nil, err
 	}
+	// One connection: a larger pool opens several connections to the same
+	// file and they race each other to the busy timeout (#422).
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
