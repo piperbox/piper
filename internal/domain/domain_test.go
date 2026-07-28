@@ -182,8 +182,9 @@ func (f *fakeNotifier) pushes() []string {
 // exposing the minutes-long ACME window the C1 races live in.
 type blockingIssuer struct {
 	fakeIssuer
-	entered chan struct{} // receives one value when an Obtain enters
-	release chan struct{} // each Obtain proceeds after one receive
+	entered     chan struct{} // receives one value when an Obtain enters
+	release     chan struct{} // each Obtain proceeds after one receive
+	releaseOnce sync.Once
 }
 
 func newBlockingIssuer() *blockingIssuer {
@@ -192,6 +193,14 @@ func newBlockingIssuer() *blockingIssuer {
 		release: make(chan struct{}, 8),
 	}
 }
+
+// releaseAll unblocks every parked and future Obtain, idempotently. Tests
+// register it with t.Cleanup after the manager helper has registered
+// t.Cleanup(m.Close); cleanups run LIFO, so releaseAll fires first and a
+// failed barrier assertion cannot leave Close waiting forever on a parked
+// Obtain. The Once keeps it safe when a test already released on the happy
+// path.
+func (b *blockingIssuer) releaseAll() { b.releaseOnce.Do(func() { close(b.release) }) }
 
 func (b *blockingIssuer) Obtain(domains []string) ([]byte, []byte, error) {
 	b.entered <- struct{}{}
@@ -252,19 +261,19 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // sequential and completed the whole previous cycle.
 type attemptCountingNotifier struct {
 	fakeNotifier
-	adds, confirms int64
+	adds, confirms atomic.Int64
 }
 
 func (c *attemptCountingNotifier) AddCustomDomain(d string) error {
-	atomic.AddInt64(&c.adds, 1)
+	c.adds.Add(1)
 	return c.fakeNotifier.AddCustomDomain(d)
 }
 func (c *attemptCountingNotifier) ConfirmCustomDomain(d string) error {
-	atomic.AddInt64(&c.confirms, 1)
+	c.confirms.Add(1)
 	return c.fakeNotifier.ConfirmCustomDomain(d)
 }
-func (c *attemptCountingNotifier) addAttempts() int64     { return atomic.LoadInt64(&c.adds) }
-func (c *attemptCountingNotifier) confirmAttempts() int64 { return atomic.LoadInt64(&c.confirms) }
+func (c *attemptCountingNotifier) addAttempts() int64     { return c.adds.Load() }
+func (c *attemptCountingNotifier) confirmAttempts() int64 { return c.confirms.Load() }
 
 // waitStatus polls the store until the domain config reaches status
 // (waitCeiling cap).
@@ -406,6 +415,7 @@ func TestIssueFailureRecordsFailedThenRetriesToActive(t *testing.T) {
 func TestRelayRejectionSurfacesAsFailed(t *testing.T) {
 	iss := newBlockingIssuer()
 	m, st, _, _, _ := newTestManagerWith(t, iss)
+	t.Cleanup(iss.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 	attempts := &attemptCountingNotifier{}
 	attempts.failAdd = errors.New("domain already in use")
 	m.SetRelay(attempts)
@@ -449,6 +459,7 @@ func TestRelayRejectionSurfacesAsFailed(t *testing.T) {
 func TestRelayConfirmFailureReusesDiskCert(t *testing.T) {
 	iss := newBlockingIssuer()
 	m, st, _, _, _ := newTestManagerWith(t, iss)
+	t.Cleanup(iss.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 	attempts := &attemptCountingNotifier{}
 	attempts.failConfirm = errors.New("tunnel down")
 	m.SetRelay(attempts)
@@ -754,6 +765,7 @@ func TestRunEnvIssuesAndRenews(t *testing.T) {
 func TestSetReplaceDuringInFlightIssuance(t *testing.T) {
 	bi := newBlockingIssuer()
 	m, st, _, relay, _ := newTestManagerWith(t, bi)
+	t.Cleanup(bi.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 
 	if _, err := m.Set("old.dev", "cloudflare", "tok"); err != nil {
 		t.Fatal(err)
@@ -806,6 +818,7 @@ func TestSetReplaceDuringInFlightIssuance(t *testing.T) {
 func TestRemoveDuringInFlightIssuance(t *testing.T) {
 	bi := newBlockingIssuer()
 	m, st, _, relay, dataDir := newTestManagerWith(t, bi)
+	t.Cleanup(bi.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 
 	if _, err := m.Set("gone.dev", "cloudflare", "tok"); err != nil {
 		t.Fatal(err)
@@ -836,6 +849,7 @@ func TestRemoveDuringInFlightIssuance(t *testing.T) {
 func TestRemoveDuringRenewalKeepsCertDirDeleted(t *testing.T) {
 	bi := newBlockingIssuer()
 	m, st, _, _, dataDir := newTestManagerWith(t, bi)
+	t.Cleanup(bi.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 
 	if _, err := m.Set("shop.dev", "cloudflare", "tok"); err != nil {
 		t.Fatal(err)

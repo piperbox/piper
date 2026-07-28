@@ -209,6 +209,7 @@ func TestAddAppDomainValidation(t *testing.T) {
 func TestAppDomainWaitsForDNS(t *testing.T) {
 	iss := newBlockingIssuer()
 	m, st, _, relay, _, _ := newAppTestManager(t, iss)
+	t.Cleanup(iss.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 	if _, err := st.CreateApp("blog", 8080); err != nil {
 		t.Fatal(err)
 	}
