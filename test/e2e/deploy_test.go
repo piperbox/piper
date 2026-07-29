@@ -177,10 +177,11 @@ func startLANPiperd(t *testing.T) {
 
 // dockerfileFor returns a one-file app image serving body on :8080, the same
 // netcat single-liner as sampleapp. body must end in "\n" and contain no
-// quotes or backslashes — it is spliced into a shell printf.
+// single quotes — it is passed to the shell printf as a quoted %s argument,
+// so "%" and backslashes in it are data, not format directives.
 func dockerfileFor(body string) string {
 	return "FROM alpine:3.20\nRUN apk add --no-cache netcat-openbsd\nEXPOSE 8080\n" +
-		fmt.Sprintf("CMD while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s\\n' | nc -l -p 8080; done\n",
+		fmt.Sprintf("CMD while true; do printf 'HTTP/1.1 200 OK\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%%s\\n' '%s' | nc -l -p 8080; done\n",
 			len(body), strings.TrimSuffix(body, "\n"))
 }
 
