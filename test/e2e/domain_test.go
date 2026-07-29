@@ -60,7 +60,12 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	if err := relay.Start(); err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
-	defer relay.Process.Kill()
+	defer func() {
+		relay.Process.Kill()
+		// Reap so the port is released before the next test; Wait's error on
+		// a SIGKILL'd process is expected.
+		_ = relay.Wait()
+	}()
 	waitPort(t, "127.0.0.1:7000", 10*time.Second)
 	waitPort(t, "127.0.0.1:8080", 10*time.Second)
 
@@ -100,7 +105,12 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	if err := pd.Start(); err != nil {
 		t.Fatalf("start piperd: %v", err)
 	}
-	defer pd.Process.Kill()
+	defer func() {
+		pd.Process.Kill()
+		// Reap so the port is released before the next test; Wait's error on
+		// a SIGKILL'd process is expected.
+		_ = pd.Wait()
+	}()
 	waitPort(t, "127.0.0.1:8088", 15*time.Second)
 
 	// Create the app, then deploy. Terminated deploy registers the hostname over
@@ -257,7 +267,12 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	if err := relay.Start(); err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
-	defer relay.Process.Kill()
+	defer func() {
+		relay.Process.Kill()
+		// Reap so the port is released before the next test; Wait's error on
+		// a SIGKILL'd process is expected.
+		_ = relay.Wait()
+	}()
 	waitPort(t, "127.0.0.1:7000", 10*time.Second)
 	waitPort(t, "127.0.0.1:8080", 10*time.Second)
 
@@ -294,7 +309,12 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	if err := pd.Start(); err != nil {
 		t.Fatalf("start piperd: %v", err)
 	}
-	defer pd.Process.Kill()
+	defer func() {
+		pd.Process.Kill()
+		// Reap so the port is released before the next test; Wait's error on
+		// a SIGKILL'd process is expected.
+		_ = pd.Wait()
+	}()
 	waitPort(t, "127.0.0.1:8088", 15*time.Second)
 
 	create := exec.Command(filepath.Join(binDir, "piper"), "create", "blog", "--port", "8080")

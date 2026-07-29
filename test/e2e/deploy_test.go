@@ -171,7 +171,13 @@ func startLANPiperd(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start piperd: %v", err)
 	}
-	t.Cleanup(func() { cmd.Process.Kill() })
+	t.Cleanup(func() {
+		cmd.Process.Kill()
+		// Reap the killed process so its port is released before the next
+		// test's piperd binds :8088; Wait's error on a SIGKILL'd process is
+		// expected.
+		_ = cmd.Wait()
+	})
 	waitPort(t, "127.0.0.1:8088", 15*time.Second)
 }
 
