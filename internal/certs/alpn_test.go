@@ -6,7 +6,10 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/asn1"
+	"log"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-acme/lego/v4/challenge/tlsalpn01"
 )
@@ -141,4 +144,35 @@ func TestALPNSolverCleanUp(t *testing.T) {
 	if _, err := dialSolver(t, s.Addr(), domain); err == nil {
 		t.Fatal("handshake succeeded after CleanUp, want failure")
 	}
+}
+
+// TestALPNSolverLogsHandshakeFailures pins the operator signal for failed
+// validations (#242): an unknown-SNI miss must leave a log line. With
+// per-domain renewal loops running, a validator that keeps failing would
+// otherwise be silent until someone went looking for the Obtain error. The
+// happy path stays quiet — nothing is asserted for successful handshakes
+// because nothing is logged.
+func TestALPNSolverLogsHandshakeFailures(t *testing.T) {
+	var logged bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	s, err := NewALPNSolver("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewALPNSolver: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := dialSolver(t, s.Addr(), "unknown.example.com"); err == nil {
+		t.Fatal("handshake succeeded for an SNI with no pending challenge, want failure")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logged.String(), `no pending challenge for "unknown.example.com"`) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("failed handshake not logged; log = %q", logged.String())
 }

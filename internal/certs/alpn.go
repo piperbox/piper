@@ -3,6 +3,7 @@ package certs
 import (
 	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -45,7 +46,11 @@ func NewALPNSolver(listenAddr string) (*ALPNSolver, error) {
 }
 
 // serve completes handshakes; the validator inspects the presented cert and
-// closes. Exits when Close shuts the listener.
+// closes. Exits when Close shuts the listener. A failed handshake — unknown
+// SNI, no acme-tls/1 offered, a stalled peer hitting the deadline — is logged,
+// not just dropped: with per-domain renewal loops running, repeated validator
+// failures are otherwise invisible until someone reads the Obtain error (#242).
+// The happy path stays quiet: a completed handshake logs nothing.
 func (s *ALPNSolver) serve() {
 	for {
 		conn, err := s.ln.Accept()
@@ -55,7 +60,9 @@ func (s *ALPNSolver) serve() {
 		go func(c net.Conn) {
 			defer c.Close()
 			_ = c.SetDeadline(time.Now().Add(alpnHandshakeTimeout))
-			_ = c.(*tls.Conn).Handshake()
+			if err := c.(*tls.Conn).Handshake(); err != nil {
+				log.Printf("alpn solver: handshake from %s: %v", c.RemoteAddr(), err)
+			}
 		}(conn)
 	}
 }
