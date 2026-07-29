@@ -20,7 +20,8 @@ type FakeRuntime struct {
 	StopContextErrs []error
 	Pruned          []PruneCall
 	PruneErr        error
-	BuildSrcDir     string // captures the srcDir of the last Build call
+	BuildSrcDir     string            // captures the srcDir of the last Build call
+	RunEnv          map[string]string // captures the env of the last Run call
 }
 
 // PruneCall records one PruneAppImages invocation for assertions.
@@ -37,7 +38,8 @@ func (f *FakeRuntime) Build(_ context.Context, srcDir, _ string, progress io.Wri
 	return f.BuildResultVal, f.BuildErr
 }
 
-func (f *FakeRuntime) Run(context.Context, string, int, map[string]string) (RunResult, error) {
+func (f *FakeRuntime) Run(_ context.Context, _ string, _ int, env map[string]string) (RunResult, error) {
+	f.RunEnv = env
 	return f.RunResultVal, f.RunErr
 }
 

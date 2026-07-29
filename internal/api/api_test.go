@@ -1446,3 +1446,76 @@ func TestServerErrorDoesNotLeakInternalDetail(t *testing.T) {
 		t.Errorf("body = %q, want a generic message", strings.TrimSpace(body))
 	}
 }
+
+func TestAppEnvCRUD(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/blog/env",
+		strings.NewReader(`{"key":"SESSION_SECRET","value":"s3cret"}`)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("post code = %d, body %s", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/blog/env", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get code = %d", rec.Code)
+	}
+	var out struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Env["SESSION_SECRET"] != "s3cret" {
+		t.Errorf("env = %v", out.Env)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/v1/apps/blog/env/SESSION_SECRET", nil))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("delete code = %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/blog/env", nil))
+	// Fresh struct: decoding into a populated map merges instead of clearing.
+	var after struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&after); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if after.Env == nil || len(after.Env) != 0 {
+		t.Errorf("env after delete = %v, want empty non-null object", after.Env)
+	}
+}
+
+func TestAppEnvRejects(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil)
+
+	for _, tc := range []struct {
+		name, path, body string
+		want             int
+	}{
+		{"unknown app", "/v1/apps/ghost/env", `{"key":"A","value":"b"}`, http.StatusNotFound},
+		{"bad key", "/v1/apps/blog/env", `{"key":"9BAD-KEY","value":"b"}`, http.StatusBadRequest},
+		{"reserved PORT", "/v1/apps/blog/env", `{"key":"port","value":"1"}`, http.StatusBadRequest},
+		{"empty key", "/v1/apps/blog/env", `{"value":"b"}`, http.StatusBadRequest},
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
+		if rec.Code != tc.want {
+			t.Errorf("%s: code = %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}

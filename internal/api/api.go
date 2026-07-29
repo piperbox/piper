@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/piperbox/piper/internal/domain"
@@ -21,6 +22,9 @@ import (
 	"github.com/piperbox/piper/internal/store"
 	"github.com/piperbox/piper/internal/version"
 )
+
+// envKeyRE is the accepted env var name shape; PORT is additionally reserved.
+var envKeyRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 type Deployerer interface {
 	Begin(app string) (store.Deployment, error)
@@ -617,6 +621,58 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			return
 		}
 		if err := dom.RemoveAppDomain(dn); err != nil {
+			serverError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("GET /v1/apps/{name}/env", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !knownApp(w, r, name) {
+			return
+		}
+		env, err := s.AppEnv(name)
+		if err != nil {
+			serverError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"env": env})
+	})
+	mux.HandleFunc("POST /v1/apps/{name}/env", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !knownApp(w, r, name) {
+			return
+		}
+		var in struct {
+			Key   string `json:"key"`
+			Value string `json:"value"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil || in.Key == "" {
+			http.Error(w, "invalid body", http.StatusBadRequest)
+			return
+		}
+		if !envKeyRE.MatchString(in.Key) {
+			http.Error(w, "invalid env key", http.StatusBadRequest)
+			return
+		}
+		// The deploy path owns PORT; a stored one would be silently overwritten,
+		// so reject it here where the user can see why.
+		if strings.EqualFold(in.Key, "PORT") {
+			http.Error(w, "PORT is reserved", http.StatusBadRequest)
+			return
+		}
+		if err := s.SetAppEnv(name, in.Key, in.Value); err != nil {
+			serverError(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("DELETE /v1/apps/{name}/env/{key}", func(w http.ResponseWriter, r *http.Request) {
+		name := r.PathValue("name")
+		if !knownApp(w, r, name) {
+			return
+		}
+		if err := s.DeleteAppEnv(name, r.PathValue("key")); err != nil {
 			serverError(w, r, err)
 			return
 		}

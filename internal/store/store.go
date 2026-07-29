@@ -126,6 +126,9 @@ func (s *Store) DeleteApp(name string) error {
 	if _, err := tx.Exec(`DELETE FROM app_domains WHERE app=?`, name); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(`DELETE FROM app_env WHERE app=?`, name); err != nil {
+		return err
+	}
 	res, err := tx.Exec(`DELETE FROM apps WHERE name=?`, name)
 	if err != nil {
 		return err
@@ -720,4 +723,37 @@ func (s *Store) UpdateAppDomainStatus(domain, status, errMsg string, notAfter ti
 func (s *Store) DeleteAppDomain(domain string) error {
 	_, err := s.db.Exec(`DELETE FROM app_domains WHERE domain=?`, domain)
 	return err
+}
+
+// SetAppEnv saves one env var for app, overwriting any existing value. The
+// caller (api) validates the key and gates on app existence; the table's FK is
+// documentation, not enforcement.
+func (s *Store) SetAppEnv(app, key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO app_env(app, key, value) VALUES(?,?,?)
+		ON CONFLICT(app, key) DO UPDATE SET value=excluded.value`, app, key, value)
+	return err
+}
+
+// DeleteAppEnv removes one env var; deleting an absent key is a no-op.
+func (s *Store) DeleteAppEnv(app, key string) error {
+	_, err := s.db.Exec(`DELETE FROM app_env WHERE app=? AND key=?`, app, key)
+	return err
+}
+
+// AppEnv returns app's env vars; an empty (non-nil) map when it has none.
+func (s *Store) AppEnv(app string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM app_env WHERE app=?`, app)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	env := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		env[k] = v
+	}
+	return env, rows.Err()
 }

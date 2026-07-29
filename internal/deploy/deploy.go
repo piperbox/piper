@@ -139,6 +139,19 @@ func (d *Deployer) stopPartial(ctx context.Context, containerID string) {
 	_ = d.runtime.Stop(cleanupCtx, containerID)
 }
 
+// containerEnv builds an app container's environment: the app's stored vars
+// with the reserved PORT overwritten on top, so a stored var can never shadow
+// the port the health check and route depend on. A store failure fails the
+// deploy — running a half-configured app is worse than not running it.
+func (d *Deployer) containerEnv(appName string, port int) (map[string]string, error) {
+	env, err := d.store.AppEnv(appName)
+	if err != nil {
+		return nil, fmt.Errorf("app env: %w", err)
+	}
+	env["PORT"] = fmt.Sprint(port)
+	return env, nil
+}
+
 // buildRunHealthy builds, runs, and health-checks app, capturing one
 // tail-capped log blob (build output, plus container output when the run or
 // health check fails). When progress is non-nil (the production Finish path),
@@ -169,7 +182,13 @@ func (d *Deployer) buildRunHealthy(ctx context.Context, app store.App, srcDir st
 		return build, runtime.RunResult{}, log.String(), fmt.Errorf("build: %w", err)
 	}
 	_, _ = io.WriteString(out, "→ starting container\n")
-	run, err := d.runtime.Run(ctx, tag, app.Port, map[string]string{"PORT": fmt.Sprint(app.Port)})
+	env, err := d.containerEnv(app.Name, app.Port)
+	if err != nil {
+		_, _ = io.WriteString(&log, "\nerror: "+err.Error()+"\n")
+		recordFailed(build.ImageID, "", 0, log.String())
+		return build, runtime.RunResult{}, log.String(), err
+	}
+	run, err := d.runtime.Run(ctx, tag, app.Port, env)
 	if err != nil {
 		d.appendContainerOutput(ctx, &log, run.ContainerID)
 		_, _ = io.WriteString(&log, "\nerror: "+err.Error()+"\n")
@@ -639,7 +658,11 @@ func (d *Deployer) Start(ctx context.Context, appName string) error {
 	if dep.Status != "stopped" {
 		return nil
 	}
-	run, err := d.runtime.Run(ctx, dep.ImageID, app.Port, map[string]string{"PORT": fmt.Sprint(app.Port)})
+	env, err := d.containerEnv(app.Name, app.Port)
+	if err != nil {
+		return err
+	}
+	run, err := d.runtime.Run(ctx, dep.ImageID, app.Port, env)
 	if err != nil {
 		d.stopPartial(ctx, run.ContainerID)
 		return fmt.Errorf("run: %w", err)
