@@ -77,3 +77,21 @@ func TestRunEnvRmDeletes(t *testing.T) {
 		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
 	}
 }
+
+func TestRunEnvSetMalformedArgPostsNothing(t *testing.T) {
+	posts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		posts++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+	t.Setenv("PIPER_ADDR", srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"env", "dashboard", "set", "A=1", "bogus"}, &stdout, &stderr); code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+	if posts != 0 {
+		t.Errorf("posts = %d — a malformed arg must be caught before anything is saved", posts)
+	}
+}

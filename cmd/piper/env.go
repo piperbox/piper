@@ -30,13 +30,20 @@ func cmdEnv(remote string, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, envUsage)
 			return 2
 		}
+		// Parse everything before posting anything, so a malformed later arg
+		// can't leave the app half-updated.
+		type pair struct{ key, value string }
+		pairs := make([]pair, 0, len(rest))
 		for _, kv := range rest {
 			key, value, found := strings.Cut(kv, "=")
 			if !found || key == "" {
 				fmt.Fprintf(stderr, "error: %q is not KEY=VALUE\n", kv)
 				return 2
 			}
-			if err := c.SetAppEnv(app, key, value); err != nil {
+			pairs = append(pairs, pair{key, value})
+		}
+		for _, p := range pairs {
+			if err := c.SetAppEnv(app, p.key, p.value); err != nil {
 				fmt.Fprintln(stderr, "error:", err)
 				return 1
 			}

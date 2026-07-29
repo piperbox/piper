@@ -139,14 +139,6 @@ func (d *Deployer) stopPartial(ctx context.Context, containerID string) {
 	_ = d.runtime.Stop(cleanupCtx, containerID)
 }
 
-// buildRunHealthy builds, runs, and health-checks app, capturing one
-// tail-capped log blob (build output, plus container output when the run or
-// health check fails). When progress is non-nil (the production Finish path),
-// stage-transition banners ("→ building image", etc.) and the build's live
-// output are written to it as they happen, in addition to the returned log;
-// previews pass nil and see no live output. On failure it invokes recordFailed
-// with whatever ids and log are known so the caller persists a "failed" record
-// for the right (app, pr) row, then returns a wrapped error.
 // containerEnv builds an app container's environment: the app's stored vars
 // with the reserved PORT overwritten on top, so a stored var can never shadow
 // the port the health check and route depend on. A store failure fails the
@@ -160,6 +152,14 @@ func (d *Deployer) containerEnv(appName string, port int) (map[string]string, er
 	return env, nil
 }
 
+// buildRunHealthy builds, runs, and health-checks app, capturing one
+// tail-capped log blob (build output, plus container output when the run or
+// health check fails). When progress is non-nil (the production Finish path),
+// stage-transition banners ("→ building image", etc.) and the build's live
+// output are written to it as they happen, in addition to the returned log;
+// previews pass nil and see no live output. On failure it invokes recordFailed
+// with whatever ids and log are known so the caller persists a "failed" record
+// for the right (app, pr) row, then returns a wrapped error.
 func (d *Deployer) buildRunHealthy(ctx context.Context, app store.App, srcDir string, progress io.Writer, recordFailed func(imageID, containerID string, hostPort int, logs string)) (runtime.BuildResult, runtime.RunResult, string, error) {
 	tag := fmt.Sprintf("piper/%s:%d", app.Name, time.Now().Unix())
 	var log runtime.TailBuffer
