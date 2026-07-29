@@ -89,7 +89,7 @@ func TestWebhookPushAndPreview(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
 	// Enroll an agent, capture the token, start the relay (as TestRelayLoopback).
 	relayData := t.TempDir()
@@ -112,7 +112,7 @@ func TestWebhookPushAndPreview(t *testing.T) {
 	if err := relay.Start(); err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
-	defer relay.Process.Kill()
+	killOnCleanup(t, relay)
 	waitPort(t, "127.0.0.1:7000", 10*time.Second)
 
 	// Seed the BYO GitHub App row before piperd starts (one writer at a time).
@@ -152,7 +152,7 @@ func TestWebhookPushAndPreview(t *testing.T) {
 	if err := pd.Start(); err != nil {
 		t.Fatalf("start piperd: %v", err)
 	}
-	defer pd.Process.Kill()
+	killOnCleanup(t, pd)
 	waitPort(t, "127.0.0.1:8088", 15*time.Second)
 
 	// Create the app and link the repo (tokenless on loopback).
