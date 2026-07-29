@@ -308,6 +308,7 @@ func TestRemoveAgentStatusMapping(t *testing.T) {
 		{"removed", http.StatusNoContent, nil},
 		{"connected", http.StatusConflict, ErrAgentConnected},
 		{"unknown or foreign", http.StatusNotFound, ErrNoAgent},
+		{"org member, not owner", http.StatusForbidden, ErrNotOwner},
 		{"bad credential", http.StatusUnauthorized, ErrBadCredential},
 	} {
 		t.Run(c.name, func(t *testing.T) {

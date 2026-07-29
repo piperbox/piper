@@ -123,6 +123,33 @@ func TestBoxRemoveBadCredentialSuggestsLogin(t *testing.T) {
 	}
 }
 
+// A member removing an org's box must be told the owner-role requirement,
+// not handed the raw 403 — the box shows up in their `piper box ls`, so a
+// bare "Forbidden" reads as a bug.
+func TestBoxRemoveNotOwnerNamesOwnerRole(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "owner role required", http.StatusForbidden)
+	}))
+	defer srv.Close()
+	if err := config.SaveClient(config.ClientConfig{
+		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "member-cred",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out, errb bytes.Buffer
+	if code := boxRemove("b.example", true, &out, &errb); code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "owner") {
+		t.Fatalf("stderr = %q, want the owner-role requirement named", errb.String())
+	}
+	if strings.Contains(errb.String(), "403") {
+		t.Fatalf("stderr = %q, want no raw status surfacing", errb.String())
+	}
+}
+
 // DeleteAgent also clears custom_domains now, so the success message must not
 // claim custom domains stay attached — only the relay-assigned app URLs do.
 func TestBoxRemoveSuccessMessageReflectsReleasedCustomDomains(t *testing.T) {

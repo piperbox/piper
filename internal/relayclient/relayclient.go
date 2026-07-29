@@ -299,6 +299,10 @@ var ErrAgentConnected = errors.New("box is connected; stop piperd on it first")
 // another tenant's box are indistinguishable by design.
 var ErrNoAgent = errors.New("no such box")
 
+// ErrNotOwner means the box belongs to an org the account is only a member
+// of. Removal is owner-only, symmetric with org enrollment.
+var ErrNotOwner = errors.New("owner role required")
+
 // Agents lists the boxes the account may drive — its own plus any org's it
 // belongs to.
 func (c *Client) Agents(ctx context.Context, accountCredential string) ([]Agent, error) {
@@ -328,7 +332,7 @@ func (c *Client) Agents(ctx context.Context, accountCredential string) ([]Agent,
 }
 
 // RemoveAgent retires baseDomain, freeing its agent slot. The relay refuses
-// while the box is connected.
+// while the box is connected, and refuses non-owners of an org box.
 func (c *Client) RemoveAgent(ctx context.Context, accountCredential, baseDomain string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+"/agents/"+url.PathEscape(baseDomain), nil)
 	if err != nil {
@@ -347,6 +351,8 @@ func (c *Client) RemoveAgent(ctx context.Context, accountCredential, baseDomain 
 		return ErrAgentConnected
 	case http.StatusNotFound:
 		return ErrNoAgent
+	case http.StatusForbidden:
+		return ErrNotOwner
 	case http.StatusUnauthorized:
 		return ErrBadCredential
 	default:
