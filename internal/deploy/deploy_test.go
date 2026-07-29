@@ -2089,3 +2089,52 @@ func TestStartRecoversAfterFailedUnroute(t *testing.T) {
 		t.Errorf("route not re-armed to the new port: %+v", routes.upserts)
 	}
 }
+
+func TestDeployInjectsAppEnv(t *testing.T) {
+	s, _ := newStore(t)
+	if err := s.SetAppEnv("blog", "SESSION_SECRET", "s3cret"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	// A stored PORT must lose to the app's real port — it is reserved.
+	if err := s.SetAppEnv("blog", "PORT", "9999"); err != nil {
+		t.Fatalf("SetAppEnv PORT: %v", err)
+	}
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	d := New(s, rt, newFakeCaddy(), "piper.localhost")
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if got := rt.RunEnv["SESSION_SECRET"]; got != "s3cret" {
+		t.Errorf("SESSION_SECRET = %q, want s3cret", got)
+	}
+	if got := rt.RunEnv["PORT"]; got != "8080" {
+		t.Errorf("PORT = %q, want 8080 — stored env must not shadow the app port", got)
+	}
+}
+
+func TestStartInjectsAppEnv(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	d := New(s, rt, newFakeCaddy(), "piper.localhost")
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if err := d.Stop(context.Background(), "blog"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if err := s.SetAppEnv("blog", "ADDED_LATER", "yes"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	if err := d.Start(context.Background(), "blog"); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := rt.RunEnv["ADDED_LATER"]; got != "yes" {
+		t.Errorf("ADDED_LATER = %q — Start must pick up env saved after the deploy (apply-on-restart semantics)", got)
+	}
+}
