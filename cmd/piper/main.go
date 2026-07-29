@@ -488,6 +488,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "app":
 		return cmdApp(*remote, args[1:], stdout, stderr)
+	case "env":
+		return cmdEnv(*remote, args[1:], stdout, stderr)
 	case "domains":
 		return cmdDomains(*remote, args[1:], stdout, stderr)
 	case "github":
@@ -727,7 +729,7 @@ func confirmPrompt(stdout io.Writer, question string) bool {
 }
 
 func usage(w io.Writer) int {
-	fmt.Fprintln(w, "usage: piper [--remote <base-domain>] [--version] <version|login|connect|create|deploy|list|status|stop|start|delete|app|domains|github|box|agent> [args]")
+	fmt.Fprintln(w, "usage: piper [--remote <base-domain>] [--version] <version|login|connect|create|deploy|list|status|stop|start|delete|app|env|domains|github|box|agent> [args]")
 	fmt.Fprintln(w, "       piper                # no subcommand in a terminal: interactive TUI")
 	return 2
 }
