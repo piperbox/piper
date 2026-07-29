@@ -8,6 +8,7 @@ import (
 	"encoding/asn1"
 	"log"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -146,6 +147,26 @@ func TestALPNSolverCleanUp(t *testing.T) {
 	}
 }
 
+// syncLogBuffer is a concurrency-safe log sink: the solver's handshake
+// goroutine can still be inside log.Printf writing to it while the test polls
+// for the line, and a bare bytes.Buffer is not safe for that concurrent use.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // TestALPNSolverLogsHandshakeFailures pins the operator signal for failed
 // validations (#242): an unknown-SNI miss must leave a log line. With
 // per-domain renewal loops running, a validator that keeps failing would
@@ -153,7 +174,7 @@ func TestALPNSolverCleanUp(t *testing.T) {
 // happy path stays quiet — nothing is asserted for successful handshakes
 // because nothing is logged.
 func TestALPNSolverLogsHandshakeFailures(t *testing.T) {
-	var logged bytes.Buffer
+	var logged syncLogBuffer
 	prevOut := log.Writer()
 	log.SetOutput(&logged)
 	t.Cleanup(func() { log.SetOutput(prevOut) })
