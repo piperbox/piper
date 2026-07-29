@@ -332,6 +332,53 @@ func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte
 	}
 }
 
+// newDomainOptions wires the custom-domain manager from cfg. Extracted (cf.
+// newDialLocal) so the address plumbing is testable: the HTTPS listen address
+// the manager arms certs on must be cfg.HTTPSAddr, the same address
+// newDialLocal splices relay passthrough streams to — hardcoding ":443" here
+// broke every box that cannot bind it (#435, the listener half of #399).
+func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string) domain.Options {
+	opts := domain.Options{
+		Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
+		DataDir: cfg.DataDir, RelayHost: relayHost, HTTPSListen: cfg.HTTPSAddr,
+		Issuer: func(provider, token string) (domain.Issuer, error) {
+			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
+				return testSelfSignedIssuer{}, nil
+			}
+			key, err := certs.LoadOrCreateAccountKey(filepath.Join(cfg.DataDir, "acme_account.key"))
+			if err != nil {
+				return nil, err
+			}
+			return certs.NewCloudflareIssuer(cfg.ACMEEmail, cfg.ACMECA, token, key)
+		},
+		AppIssuer: func() (domain.Issuer, error) {
+			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
+				return testSelfSignedIssuer{}, nil
+			}
+			key, err := certs.LoadOrCreateAccountKey(filepath.Join(cfg.DataDir, "acme_account.key"))
+			if err != nil {
+				return nil, err
+			}
+			return certs.New(certs.Config{
+				Email: cfg.ACMEEmail, CADirURL: cfg.ACMECA,
+				ALPNSolver: alpnSolver, AccountKey: key,
+			})
+		},
+	}
+	if !cfg.Terminated {
+		opts.EnvDomain = cfg.BaseDomain // env-managed BYO: API writes are 409
+	}
+	if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
+		// E2E: the fake issuer implies the test domains have no real DNS
+		// either. Resolve every name to loopback so the per-app DNS gate
+		// (and dns_ok) sees them pointing at the loopback relay.
+		opts.Resolve = func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("127.0.0.1")}, nil
+		}
+	}
+	return opts
+}
+
 // runTokenCmd implements `piperd token <create|list|revoke>`, writing directly
 // to the on-box store. It needs no auth: running it is proof of box ownership.
 func runTokenCmd(st tokenStore, args []string, out io.Writer) error {
@@ -464,45 +511,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("alpn solver: %v", err)
 		}
-		opts := domain.Options{
-			Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
-			DataDir: cfg.DataDir, RelayHost: relayHost, HTTPSListen: ":443",
-			Issuer: func(provider, token string) (domain.Issuer, error) {
-				if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
-					return testSelfSignedIssuer{}, nil
-				}
-				key, err := certs.LoadOrCreateAccountKey(filepath.Join(cfg.DataDir, "acme_account.key"))
-				if err != nil {
-					return nil, err
-				}
-				return certs.NewCloudflareIssuer(cfg.ACMEEmail, cfg.ACMECA, token, key)
-			},
-			AppIssuer: func() (domain.Issuer, error) {
-				if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
-					return testSelfSignedIssuer{}, nil
-				}
-				key, err := certs.LoadOrCreateAccountKey(filepath.Join(cfg.DataDir, "acme_account.key"))
-				if err != nil {
-					return nil, err
-				}
-				return certs.New(certs.Config{
-					Email: cfg.ACMEEmail, CADirURL: cfg.ACMECA,
-					ALPNSolver: alpnSolver, AccountKey: key,
-				})
-			},
-		}
-		if !cfg.Terminated {
-			opts.EnvDomain = cfg.BaseDomain // env-managed BYO: API writes are 409
-		}
-		if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
-			// E2E: the fake issuer implies the test domains have no real DNS
-			// either. Resolve every name to loopback so the per-app DNS gate
-			// (and dns_ok) sees them pointing at the loopback relay.
-			opts.Resolve = func(context.Context, string) ([]net.IP, error) {
-				return []net.IP{net.ParseIP("127.0.0.1")}, nil
-			}
-		}
-		domMgr = domain.New(opts)
+		domMgr = domain.New(newDomainOptions(cfg, st, dep, alpnSolver, relayHost))
 	}
 
 	// The control API mux, shared by both listeners. wh is assigned below in
