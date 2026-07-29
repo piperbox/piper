@@ -681,25 +681,34 @@ func main() {
 	// into. Run only exits once ctx is cancelled — already in hand here — and
 	// every blocking point in its loop is ctx- or deadline-bounded (DialContext
 	// on the connect, the ack deadline on the handshake, AfterFunc closing the
-	// session in serveStreams, ctx-aware backoff sleeps), so this join returns
-	// promptly and cannot hang the shutdown (#242).
+	// session in serveStreams, the bounded handler join, ctx-aware backoff
+	// sleeps), so this join returns promptly (#242). It still waits under the
+	// SAME overall budget the rest of shutdown uses: if anything in the tunnel
+	// path ever wedges, the join gives up at the budget instead of blocking
+	// past it, and the drain below runs on whatever remains.
+	overallCtx, cancelOverall := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer cancelOverall()
 	if tunnelDone != nil {
-		<-tunnelDone
+		select {
+		case <-tunnelDone:
+		case <-overallCtx.Done():
+			log.Printf("shutdown: tunnel client did not stop within %s; closing the ALPN solver anyway", shutdownTimeout)
+		}
 	}
 	if alpnSolver != nil {
 		_ = alpnSolver.Close()
 	}
-	shutdown(apiServers{srv, authSrv}, whLifecycle, mgrStop, st)
+	shutdownWithContext(overallCtx, apiServers{srv, authSrv}, whLifecycle, mgrStop, st, drainTimeout)
 	os.Exit(0)
-}
-
-func shutdown(api apiShutdowner, wh webhookLifecycle, mgr listenerStopper, st storeCloser) {
-	shutdownWithTimeouts(api, wh, mgr, st, drainTimeout, shutdownTimeout)
 }
 
 func shutdownWithTimeouts(api apiShutdowner, wh webhookLifecycle, mgr listenerStopper, st storeCloser, drain, overall time.Duration) {
 	overallCtx, cancelOverall := context.WithTimeout(context.Background(), overall)
 	defer cancelOverall()
+	shutdownWithContext(overallCtx, api, wh, mgr, st, drain)
+}
+
+func shutdownWithContext(overallCtx context.Context, api apiShutdowner, wh webhookLifecycle, mgr listenerStopper, st storeCloser, drain time.Duration) {
 	drainCtx, cancelDrain := context.WithTimeout(overallCtx, drain)
 	defer cancelDrain()
 
