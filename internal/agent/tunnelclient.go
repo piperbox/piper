@@ -42,6 +42,14 @@ func (c *TunnelClient) current() *tunnel.Session {
 	return c.sess
 }
 
+// relayDialTimeout bounds one relay connect. piperd joins Run at shutdown
+// (#242), so every blocking point in the loop must answer to ctx — and a
+// blackholed relay (SYNs swallowed, no RST) would otherwise hold a plain
+// net.Dial until the kernel's own connect timeout, minutes past the daemon's
+// shutdown budget. DialContext also makes an in-flight dial abort the moment
+// the shutdown signal lands.
+const relayDialTimeout = 10 * time.Second
+
 // Run maintains the tunnel to relayAddr, registering baseDomain, and forwards
 // each relay-opened stream to dialLocal(kind, stream). dialLocal may peek
 // (read) bytes from stream before choosing a backend; it must replay whatever
@@ -50,8 +58,11 @@ func (c *TunnelClient) current() *tunnel.Session {
 func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error)) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		conn, err := net.Dial("tcp", relayAddr)
+		conn, err := (&net.Dialer{Timeout: relayDialTimeout}).DialContext(ctx, "tcp", relayAddr)
 		if err != nil {
+			if ctx.Err() != nil {
+				return // shutdown interrupted the dial; not a relay problem
+			}
 			log.Printf("tunnel: dial relay: %v (retry in %s)", err, backoff)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)

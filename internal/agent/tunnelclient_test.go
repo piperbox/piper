@@ -217,6 +217,51 @@ func TestTunnelClientControlTimesOut(t *testing.T) {
 	t.Fatalf("Register never returned a timeout error: %v", err)
 }
 
+// TestTunnelClientRunExitsPromptlyOnCancel pins the property piperd's shutdown
+// join relies on (#242): once ctx is cancelled, Run returns quickly whether it
+// is serving a live session or sitting in reconnect backoff — so joining its
+// goroutine before closing the ALPN solver cannot hang the daemon.
+func TestTunnelClientRunExitsPromptlyOnCancel(t *testing.T) {
+	dialLocal := func(byte, net.Conn) (net.Conn, error) {
+		return nil, errors.New("no local dials expected")
+	}
+	t.Run("mid-session", func(t *testing.T) {
+		addr, sessCh := fakeRelay(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		var c TunnelClient
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.Run(ctx, addr, "tok", "base.example.com", dialLocal)
+		}()
+		<-sessCh // session is up; Run is inside serveStreams
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return after cancel while serving a session")
+		}
+	})
+	t.Run("mid-backoff", func(t *testing.T) {
+		// Nothing listens on :1, so every dial fails fast and Run spends its
+		// time in the backoff sleep.
+		ctx, cancel := context.WithCancel(context.Background())
+		var c TunnelClient
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.Run(ctx, "127.0.0.1:1", "tok", "base.example.com", dialLocal)
+		}()
+		time.Sleep(100 * time.Millisecond) // fail once, settle into backoff
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return after cancel during reconnect backoff")
+		}
+	})
+}
+
 func TestServeStreamsStopsOnContextCancellation(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	t.Cleanup(func() { clientConn.Close(); serverConn.Close() })
