@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piperbox/piper/internal/config"
 	"github.com/piperbox/piper/internal/store"
 	"github.com/piperbox/piper/internal/tunnel"
 	"github.com/piperbox/piper/internal/version"
@@ -878,6 +879,20 @@ func TestDialAddrRewritesListenAddrToLoopback(t *testing.T) {
 		if got := dialAddr(tc.listen); got != tc.want {
 			t.Errorf("dialAddr(%q) = %q, want %q", tc.listen, got, tc.want)
 		}
+	}
+}
+
+// The custom-domain manager arms each issued cert on a Caddy server at
+// HTTPSListen, and the relay's passthrough streams are spliced to
+// cfg.HTTPSAddr (newDialLocal, #399) — so the two must be the same address.
+// Hardcoding ":443" broke every box that cannot bind it: the relay-colocated
+// box (the relay owns :443) and the rootless macOS install alike issued fine
+// and then failed arming with "address already in use" (#435).
+func TestDomainOptionsHTTPSListenFollowsConfig(t *testing.T) {
+	cfg := config.Config{HTTPSAddr: "127.0.0.1:8444"}
+	opts := newDomainOptions(cfg, nil, nil, nil, "relay.example")
+	if opts.HTTPSListen != cfg.HTTPSAddr {
+		t.Errorf("HTTPSListen = %q, want cfg.HTTPSAddr %q", opts.HTTPSListen, cfg.HTTPSAddr)
 	}
 }
 

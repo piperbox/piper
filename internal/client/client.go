@@ -379,6 +379,55 @@ func (c *Client) DeleteApp(name string) error {
 	return nil
 }
 
+// AppEnv returns app's saved environment variables.
+func (c *Client) AppEnv(app string) (map[string]string, error) {
+	resp, err := c.do(http.MethodGet, "/v1/apps/"+app+"/env", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, responseError("env", resp)
+	}
+	var out struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Env, nil
+}
+
+// SetAppEnv saves one env var; it applies on the app's next deploy or restart.
+func (c *Client) SetAppEnv(app, key, value string) error {
+	body, err := json.Marshal(map[string]string{"key": key, "value": value})
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(http.MethodPost, "/v1/apps/"+app+"/env", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return responseError("env set", resp)
+	}
+	return nil
+}
+
+// DeleteAppEnv removes one env var from app.
+func (c *Client) DeleteAppEnv(app, key string) error {
+	resp, err := c.do(http.MethodDelete, "/v1/apps/"+app+"/env/"+key, "", nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return responseError("env rm", resp)
+	}
+	return nil
+}
+
 // AppDomains lists the per-app custom domains attached to app (#232).
 func (c *Client) AppDomains(app string) ([]domain.AppDomainStatus, error) {
 	resp, err := c.do(http.MethodGet, "/v1/apps/"+app+"/domains", "", nil)
