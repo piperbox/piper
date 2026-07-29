@@ -46,7 +46,7 @@ func TestRelayLoopback(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	t.Cleanup(cancel)
 
 	// Enroll an agent against the relay's store, capture the token.
 	relayData := t.TempDir()
@@ -70,12 +70,7 @@ func TestRelayLoopback(t *testing.T) {
 	if err := relay.Start(); err != nil {
 		t.Fatalf("start relay: %v", err)
 	}
-	defer func() {
-		relay.Process.Kill()
-		// Reap so the port is released before the next test; Wait's error on
-		// a SIGKILL'd process is expected.
-		_ = relay.Wait()
-	}()
+	killOnCleanup(t, relay)
 	waitPort(t, "127.0.0.1:7000", 10*time.Second)
 
 	// Mint a control-API token before starting piperd, so there's only one
@@ -107,12 +102,7 @@ func TestRelayLoopback(t *testing.T) {
 	if err := pd.Start(); err != nil {
 		t.Fatalf("start piperd: %v", err)
 	}
-	defer func() {
-		pd.Process.Kill()
-		// Reap so the port is released before the next test; Wait's error on
-		// a SIGKILL'd process is expected.
-		_ = pd.Wait()
-	}()
+	killOnCleanup(t, pd)
 	waitPort(t, "127.0.0.1:8088", 15*time.Second)
 
 	// Deploy the sample app.

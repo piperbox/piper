@@ -171,14 +171,21 @@ func startLANPiperd(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start piperd: %v", err)
 	}
+	killOnCleanup(t, cmd)
+	waitPort(t, "127.0.0.1:8088", 15*time.Second)
+}
+
+// killOnCleanup SIGKILLs cmd during test cleanup and reaps it with Wait, so
+// the port it held is released before the next test's piperd/relay binds it.
+// Wait's error on a killed process is expected and ignored. t.Cleanup (unlike
+// a defer in the test body) also runs when a helper fails the test with
+// t.Fatal.
+func killOnCleanup(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
 	t.Cleanup(func() {
 		cmd.Process.Kill()
-		// Reap the killed process so its port is released before the next
-		// test's piperd binds :8088; Wait's error on a SIGKILL'd process is
-		// expected.
 		_ = cmd.Wait()
 	})
-	waitPort(t, "127.0.0.1:8088", 15*time.Second)
 }
 
 // dockerfileFor returns a one-file app image serving body on :8080, the same
