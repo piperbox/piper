@@ -954,3 +954,58 @@ func TestDeploymentOrderingTiebreaksOnRowid(t *testing.T) {
 		t.Fatalf("ListDeployments order = %+v, want [d2 d1]", deps)
 	}
 }
+
+func TestAppEnvRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	if err := s.SetAppEnv("blog", "SESSION_SECRET", "one"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	if err := s.SetAppEnv("blog", "SESSION_SECRET", "two"); err != nil {
+		t.Fatalf("SetAppEnv overwrite: %v", err)
+	}
+	env, err := s.AppEnv("blog")
+	if err != nil {
+		t.Fatalf("AppEnv: %v", err)
+	}
+	if len(env) != 1 || env["SESSION_SECRET"] != "two" {
+		t.Errorf("env = %v, want map[SESSION_SECRET:two]", env)
+	}
+	if err := s.DeleteAppEnv("blog", "SESSION_SECRET"); err != nil {
+		t.Fatalf("DeleteAppEnv: %v", err)
+	}
+	if err := s.DeleteAppEnv("blog", "SESSION_SECRET"); err != nil {
+		t.Fatalf("DeleteAppEnv must be idempotent: %v", err)
+	}
+	env, err = s.AppEnv("blog")
+	if err != nil {
+		t.Fatalf("AppEnv after delete: %v", err)
+	}
+	if env == nil || len(env) != 0 {
+		t.Errorf("env = %v, want empty non-nil map", env)
+	}
+}
+
+func TestDeleteAppRemovesEnv(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	if err := s.SetAppEnv("blog", "FOO", "bar"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	if err := s.DeleteApp("blog"); err != nil {
+		t.Fatalf("DeleteApp: %v", err)
+	}
+	// AppEnv reads app_env directly, so a missing cascade would surface the
+	// orphaned row here.
+	env, err := s.AppEnv("blog")
+	if err != nil {
+		t.Fatalf("AppEnv: %v", err)
+	}
+	if len(env) != 0 {
+		t.Errorf("app_env rows after DeleteApp = %v, want none", env)
+	}
+}
