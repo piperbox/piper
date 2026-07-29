@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"fmt"
+	"reflect"
 
 	"github.com/go-acme/lego/v4/certificate"
 	"github.com/go-acme/lego/v4/challenge"
@@ -39,9 +40,25 @@ func (u *user) GetEmail() string                        { return u.email }
 func (u *user) GetRegistration() *registration.Resource { return u.reg }
 func (u *user) GetPrivateKey() crypto.PrivateKey        { return u.key }
 
+// challengeSet reports whether p holds a usable provider. A typed nil — a
+// nil pointer boxed into the interface — compares non-nil with == but would
+// only blow up later inside lego, so it counts as unset (#242).
+func challengeSet(p challenge.Provider) bool {
+	if p == nil {
+		return false
+	}
+	v := reflect.ValueOf(p)
+	switch v.Kind() {
+	case reflect.Ptr, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
+		return !v.IsNil()
+	default:
+		return true
+	}
+}
+
 // New builds a Manager and registers the ACME account.
 func New(cfg Config) (*Manager, error) {
-	if (cfg.DNSProvider == nil) == (cfg.ALPNSolver == nil) {
+	if challengeSet(cfg.DNSProvider) == challengeSet(cfg.ALPNSolver) {
 		return nil, fmt.Errorf("certs: exactly one of DNSProvider or ALPNSolver must be set")
 	}
 	u := &user{email: cfg.Email, key: cfg.AccountKey}
@@ -53,7 +70,7 @@ func New(cfg Config) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.DNSProvider != nil {
+	if challengeSet(cfg.DNSProvider) {
 		if err := client.Challenge.SetDNS01Provider(cfg.DNSProvider); err != nil {
 			return nil, err
 		}
