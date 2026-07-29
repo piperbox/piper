@@ -147,6 +147,9 @@ func boxRemove(baseDomain string, yes bool, stdout, stderr io.Writer) int {
 	case errors.Is(err, relayclient.ErrNoAgent):
 		fmt.Fprintf(stderr, "error: no box %s on this account — run `piper box ls` to see them\n", baseDomain)
 		return 1
+	case errors.Is(err, relayclient.ErrNotOwner):
+		fmt.Fprintf(stderr, "error: %s belongs to an org and only an owner may remove it — ask an org owner to remove it\n", baseDomain)
+		return 1
 	case errors.Is(err, relayclient.ErrBadCredential):
 		fmt.Fprintln(stderr, "error: relay rejected your account credential; run `piper login` again")
 		return 1
