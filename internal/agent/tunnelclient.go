@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/piperbox/piper/internal/tunnel"
@@ -219,16 +220,32 @@ func (c *TunnelClient) control(req tunnel.ControlRequest) (tunnel.ControlRespons
 // the backoff growing so a misconfigured token doesn't busy-spin reconnects.
 const healthyThreshold = 10 * time.Second
 
+// handlerJoinTimeout bounds how long serveStreams waits for its in-flight
+// stream handlers after the session dies. A handler still in its local-dial
+// phase (PeekALPN, net.Dial) must finish before Run returns — piperd closes
+// the ALPN solver right after joining Run, and a handler dialing a just-closed
+// solver gets connection refused, the exact shutdown race #242 asks to remove.
+// Bounded so a wedged handler can't pin the join past the daemon's shutdown
+// budget (piperd's overall shutdown timeout is 20s; this sits well inside it).
+// Atomic (nanoseconds) so a test can shrink it while other tests' tunnel
+// goroutines are still draining — every serveStreams exit reads it.
+var handlerJoinTimeout atomic.Int64
+
+func init() { handlerJoinTimeout.Store(int64(5 * time.Second)) }
+
 func serveStreams(ctx context.Context, sess *tunnel.Session, dialLocal func(kind byte, stream net.Conn) (net.Conn, error)) {
 	defer sess.Close()
 	stopCancel := context.AfterFunc(ctx, func() { _ = sess.Close() })
 	defer stopCancel()
+	var handlers sync.WaitGroup
 	for {
 		kind, stream, err := sess.AcceptKind()
 		if err != nil {
-			return // session died; caller reconnects
+			break // session died; join handlers, then caller reconnects
 		}
+		handlers.Add(1)
 		go func() {
+			defer handlers.Done()
 			defer stream.Close()
 			local, err := dialLocal(kind, stream)
 			if err != nil {
@@ -241,6 +258,19 @@ func serveStreams(ctx context.Context, sess *tunnel.Session, dialLocal func(kind
 			go func() { io.Copy(stream, local); done <- struct{}{} }()
 			<-done
 		}()
+	}
+	// The accept loop is over, so the session is already dead or dying; make
+	// sure of it so handlers blocked on stream I/O unblock, then join them.
+	// The join is bounded: a handler whose local dial outlives the grace is
+	// abandoned rather than allowed to stall Run past the shutdown budget.
+	_ = sess.Close()
+	joinTimeout := time.Duration(handlerJoinTimeout.Load())
+	joined := make(chan struct{})
+	go func() { handlers.Wait(); close(joined) }()
+	select {
+	case <-joined:
+	case <-time.After(joinTimeout):
+		log.Printf("tunnel: stream handlers still running after %s; continuing without them", joinTimeout)
 	}
 }
 

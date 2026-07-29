@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -258,6 +259,102 @@ func TestTunnelClientRunExitsPromptlyOnCancel(t *testing.T) {
 		case <-done:
 		case <-time.After(2 * time.Second):
 			t.Fatal("Run did not return after cancel during reconnect backoff")
+		}
+	})
+}
+
+// TestTunnelClientRunJoinsInFlightHandlers pins the second half of #242: Run
+// must not return while an accepted stream handler is still in its local-dial
+// phase. piperd closes the ALPN solver right after joining Run, so a handler
+// that finished PeekALPN but hasn't dialed yet would hit a just-closed solver
+// (connection refused) if Run returned early. The join itself must also be
+// bounded so a wedged handler can't stall Run past the shutdown budget.
+func TestTunnelClientRunJoinsInFlightHandlers(t *testing.T) {
+	t.Run("waits for the in-flight handler", func(t *testing.T) {
+		addr, sessCh := fakeRelay(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		var relOnce sync.Once
+		releaseIt := func() { relOnce.Do(func() { close(release) }) }
+		t.Cleanup(releaseIt) // no leaked handler on failure
+		var c TunnelClient
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
+				close(entered)
+				<-release // in-flight: descheduled mid local-dial phase
+				return nil, errors.New("released during shutdown")
+			})
+		}()
+		relaySess := <-sessCh
+		stream, err := relaySess.OpenKind(tunnel.KindPassthrough)
+		if err != nil {
+			t.Fatalf("OpenKind: %v", err)
+		}
+		defer stream.Close()
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler never entered dialLocal")
+		}
+
+		cancel()
+		select {
+		case <-done:
+			t.Fatal("Run returned while an accepted stream handler was still in flight")
+		case <-time.After(200 * time.Millisecond):
+		}
+		releaseIt()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return after the in-flight handler finished")
+		}
+	})
+
+	t.Run("join is bounded", func(t *testing.T) {
+		old := handlerJoinTimeout.Load()
+		handlerJoinTimeout.Store(int64(100 * time.Millisecond))
+		t.Cleanup(func() { handlerJoinTimeout.Store(old) })
+
+		addr, sessCh := fakeRelay(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		entered := make(chan struct{})
+		release := make(chan struct{})
+		t.Cleanup(func() { close(release) })
+		var c TunnelClient
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
+				close(entered)
+				<-release // wedged: never finishes on its own
+				return nil, errors.New("released at test end")
+			})
+		}()
+		relaySess := <-sessCh
+		stream, err := relaySess.OpenKind(tunnel.KindPassthrough)
+		if err != nil {
+			t.Fatalf("OpenKind: %v", err)
+		}
+		defer stream.Close()
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("handler never entered dialLocal")
+		}
+
+		started := time.Now()
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return; handler join outlasted its bound")
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("Run took %v to give up on a wedged handler, want ~100ms", elapsed)
 		}
 	})
 }
