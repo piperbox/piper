@@ -24,18 +24,22 @@ that kills most homelab hosting.
 
 ## 60-second quick start
 
-On a Linux box (a Pi counts):
+On a Debian-family box (a Raspberry Pi counts):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
-piper agent daemonize        # durable service on :80/:443 — a server or Pi
-                             # (dev box: `piper agent up` runs it until reboot)
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://apt.piperbox.dev/piperbox.gpg -o /etc/apt/keyrings/piperbox.gpg
+sudo curl -fsSL https://apt.piperbox.dev/piperbox.sources -o /etc/apt/sources.list.d/piperbox.sources
+sudo apt update && sudo apt install piperd piper   # installs, enables, and starts the agent
 piper login                  # GitHub device-flow; stores your account credential
 piper connect                # enrolls this box on the public relay
                              # (run the sudo command it prints)
 sudo systemctl restart piperd
 piper deploy blog --path .   # → https://<hash>-<you>.public.getpiper.dev
 ```
+
+On macOS: `brew install piperbox/tap/piper && brew services start piper`, then
+the same `piper login` flow.
 
 That's a Dockerfile built, health-checked, and served on a public HTTPS URL —
 no port forwarding, no domain required. Prefer to point and click? Run bare

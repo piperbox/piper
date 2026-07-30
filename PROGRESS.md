@@ -14,6 +14,7 @@ Legend: ✅ done · 🟡 partial / stubbed · ⬜ not started. Issue tag/label c
 - ✅ Release pipeline (goreleaser: tag → GitHub Release + cross-compiled binaries/checksums); unblocks installer/image — [#58](https://github.com/piperbox/piper/issues/58)
 - ✅ apt repo: piperd+piper debs published to apt.piperbox.dev on stable tags, live-verified since v0.13.0 — [#444](https://github.com/piperbox/piper/issues/444)
 - ✅ Homebrew tap: `brew install piperbox/tap/piper` + brew services, formula published by goreleaser on stable tags, live since v0.14.0 — [#445](https://github.com/piperbox/piper/issues/445)
+- ✅ one-tier lifecycle: agent up/down/status wrap systemctl (Linux) / brew services (macOS); daemonize, rootless tier, and the CLI LaunchAgent deleted — [#446](https://github.com/piperbox/piper/issues/446)
 - ✅ Authenticated control API — bearer token on every `piperd` request; on-box `piperd token` bootstrap + `piper login` (creds in `~/.piper/piper`) — [#72](https://github.com/piperbox/piper/issues/72)
 - ✅ Tokenless on loopback — local CLI needs no login; bearer stays on the relay path (dedicated authenticated listener) and non-loopback binds — [#221](https://github.com/piperbox/piper/issues/221)
 

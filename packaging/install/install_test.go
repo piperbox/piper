@@ -181,7 +181,7 @@ func TestDefaultInstallsBothBinaries(t *testing.T) {
 	// Next-step hint: lifecycle belongs to the CLI, not the installer.
 	switch runtime.GOOS {
 	case "linux":
-		if !strings.Contains(out, "next: piper agent up") {
+		if !strings.Contains(out, "next: sudo apt install piperd piper") {
 			t.Errorf("expected linux next-step hint, got:\n%s", out)
 		}
 	case "darwin":
@@ -439,11 +439,13 @@ func repoRoot(t *testing.T) string {
 }
 
 func TestInstallDocumentation(t *testing.T) {
-	// The README is the lean quick-start entry point; install flags and env
-	// overrides live in docs/getting-started.md (see #181).
+	// The README is the lean quick-start entry point (apt on Linux, brew on
+	// macOS); the curl installer and its flags live in docs/getting-started.md
+	// (see #181, #446).
 	docs := map[string][]string{
 		"README.md": {
-			"raw.githubusercontent.com/piperbox/piper/main/install.sh",
+			"sudo apt install piperd piper",
+			"brew install piperbox/tap/piper",
 		},
 		filepath.Join("docs", "getting-started.md"): {
 			"--cli-only",

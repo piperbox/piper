@@ -275,7 +275,7 @@ func connect(o connectOpts, stdout, stderr io.Writer) int {
 	// account quota slot (#173).
 	if !config.SystemManaged() && !agentInstalled(o.dataDir) {
 		fmt.Fprintln(stderr, "error: no piperd installation found on this machine — `piper connect` must be run on the box where piperd is installed")
-		fmt.Fprintf(stderr, "(no systemd install, rootless user unit, launchd agent, or existing data dir %s found)\n", o.dataDir)
+		fmt.Fprintf(stderr, "(no systemd install, resolvable piperd binary, or existing data dir %s found)\n", o.dataDir)
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -325,51 +325,30 @@ func connect(o connectOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "box claimed: %s\n%s", en.BaseDomain, restartHint())
+	fmt.Fprintf(stdout, "box claimed: %s\nrestart piperd to connect: %s\n", en.BaseDomain, restartHint())
 	return 0
 }
 
-// restartHint returns the "restart piperd to connect" line for the relay.json
-// (non-systemd) branch of connect, choosing the restart command that matches how
-// piperd is actually managed on this box. The system-wide systemd install never
-// reaches here — it returns earlier on the config.SystemManaged() branch with its
-// own `sudo systemctl restart piperd` guidance — so the only install flavors this
-// branch can see are the rootless systemd user unit, the macOS launchd agent, or a
-// bare data dir whose manager we can't identify. A wrong example (the old
-// hardcoded `sudo systemctl restart piperd`) is worse than none, so the bare-data-
-// dir fallback prints the plain instruction with no command (#248).
+// restartHint names the restart command for a non-system-managed install.
+// One tier per platform: brew's service on macOS, the system unit elsewhere.
 func restartHint() string {
-	if unit, err := userUnitPath(); err == nil {
-		if _, err := os.Stat(unit); err == nil {
-			return "restart piperd to connect, e.g.:\n\n    systemctl --user restart piperd\n"
-		}
+	if agentGOOS == "darwin" {
+		return "brew services restart piper"
 	}
-	if plist, err := launchdPlistPath(); err == nil {
-		if _, err := os.Stat(plist); err == nil {
-			// Match agent.go's gui/$UID/<label> target rendering (guiTarget()).
-			return "restart piperd to connect, e.g.:\n\n    launchctl kickstart -k " + guiTarget() + "/" + launchdLabel + "\n"
-		}
-	}
-	return "restart piperd to connect\n"
+	return "sudo systemctl restart piperd"
 }
 
-// agentInstalled reports whether any piperd install is detectable on this
-// machine for the relay.json path: the data dir already exists (piperd has run
-// here), a rootless systemd user unit is installed, or a macOS launchd agent
-// is. connect uses it to fail loudly off-box (#173).
+// agentInstalled reports whether this box has piperd at all — connect must
+// fail loudly when pointed at a box with no agent (#173). One tier: an
+// existing data dir (an enrolled box), a system-managed install, or a
+// resolvable piperd binary (deb/brew/manual) all count.
 func agentInstalled(dataDir string) bool {
-	if fi, err := os.Stat(dataDir); err == nil && fi.IsDir() {
+	if _, err := os.Stat(dataDir); err == nil {
 		return true
 	}
-	if unit, err := userUnitPath(); err == nil {
-		if _, err := os.Stat(unit); err == nil {
-			return true
-		}
+	if config.SystemManaged() {
+		return true
 	}
-	if plist, err := launchdPlistPath(); err == nil {
-		if _, err := os.Stat(plist); err == nil {
-			return true
-		}
-	}
-	return false
+	_, err := piperdPath()
+	return err == nil
 }

@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -529,6 +528,12 @@ func TestConnectEnrollsAndWritesRelayFile(t *testing.T) {
 	if rf != want {
 		t.Fatalf("relay file = %+v, want %+v", rf, want)
 	}
+	if !strings.Contains(out.String(), "restart piperd to connect: ") {
+		t.Fatalf("stdout = %q, want a framed restart hint", out.String())
+	}
+	if !strings.HasSuffix(out.String(), "\n") {
+		t.Fatalf("stdout = %q, want a trailing newline", out.String())
+	}
 }
 
 func TestConnectWritesTerminated(t *testing.T) {
@@ -619,11 +624,14 @@ func TestConnectOffBoxFailsLoudly(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// No piperd install of any flavor: no /etc/piper, no rootless user unit or
-	// launchd agent (HOME is a fresh temp dir), and no existing data dir.
+	// No piperd install of any flavor: no /etc/piper, no resolvable piperd
+	// binary, and no existing data dir.
 	old := config.SystemEnvDir
 	config.SystemEnvDir = filepath.Join(t.TempDir(), "absent")
 	defer func() { config.SystemEnvDir = old }()
+	origPath := piperdPath
+	piperdPath = func() (string, error) { return "", errors.New("not found") }
+	defer func() { piperdPath = origPath }()
 	dataDir := filepath.Join(t.TempDir(), "absent")
 
 	var out, errb bytes.Buffer
@@ -641,51 +649,42 @@ func TestConnectOffBoxFailsLoudly(t *testing.T) {
 	}
 }
 
-// agentInstalled must recognize each install flavor individually — a false
-// negative for any one of them would lock that flavor's users (rootless
-// systemd, macOS launchd) out of `piper connect` (#173). The all-absent case
-// is also pinned end-to-end by TestConnectOffBoxFailsLoudly.
-func TestAgentInstalledDetectsEachFlavor(t *testing.T) {
-	cases := []struct {
-		name                 string
-		dataDir, unit, plist bool // whether each install marker exists
-		want                 bool
-	}{
-		{"existing data dir", true, false, false, true},
-		{"rootless user unit", false, true, false, true},
-		{"launchd agent", false, false, true, true},
-		{"no install of any flavor", false, false, false, false},
+// restartHint names the one restart command per platform: brew's service on
+// macOS, the system unit elsewhere.
+func TestRestartHintPerPlatform(t *testing.T) {
+	orig := agentGOOS
+	t.Cleanup(func() { agentGOOS = orig })
+	agentGOOS = "darwin"
+	if got := restartHint(); got != "brew services restart piper" {
+		t.Errorf("darwin hint = %q", got)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			dataDir := filepath.Join(t.TempDir(), "absent")
-			if tc.dataDir {
-				dataDir = t.TempDir()
-			}
-			unit := filepath.Join(t.TempDir(), "absent.service")
-			if tc.unit {
-				unit = filepath.Join(t.TempDir(), "piperd.service")
-				if err := os.WriteFile(unit, []byte("[Unit]"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			plist := filepath.Join(t.TempDir(), "absent.plist")
-			if tc.plist {
-				plist = filepath.Join(t.TempDir(), "dev.piperbox.piperd.plist")
-				if err := os.WriteFile(plist, []byte("plist"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
+	agentGOOS = "linux"
+	if got := restartHint(); got != "sudo systemctl restart piperd" {
+		t.Errorf("linux hint = %q", got)
+	}
+}
 
-			oldUnit, oldPlist := userUnitPath, launchdPlistPath
-			userUnitPath = func() (string, error) { return unit, nil }
-			launchdPlistPath = func() (string, error) { return plist, nil }
-			defer func() { userUnitPath, launchdPlistPath = oldUnit, oldPlist }()
-
-			if got := agentInstalled(dataDir); got != tc.want {
-				t.Fatalf("agentInstalled = %v, want %v", got, tc.want)
-			}
-		})
+// agentInstalled must recognize every surviving signal of an install: an
+// existing data dir (an enrolled box) or a resolvable piperd binary
+// (deb/brew/manual). The all-absent case is also pinned end-to-end by
+// TestConnectOffBoxFailsLoudly.
+func TestAgentInstalledProbesBinaryAndState(t *testing.T) {
+	dir := t.TempDir()
+	origPath := piperdPath
+	piperdPath = func() (string, error) { return "", errors.New("not found") }
+	t.Cleanup(func() { piperdPath = origPath })
+	// no data dir, no binary -> not installed
+	if agentInstalled(filepath.Join(dir, "absent")) {
+		t.Error("reported installed with no evidence")
+	}
+	// existing data dir counts (an enrolled box)
+	if !agentInstalled(dir) {
+		t.Error("existing data dir not treated as installed")
+	}
+	// a resolvable piperd binary counts (fresh deb/brew/manual install)
+	piperdPath = func() (string, error) { return "/usr/bin/piperd", nil }
+	if !agentInstalled(filepath.Join(dir, "absent")) {
+		t.Error("resolvable piperd not treated as installed")
 	}
 }
 
@@ -742,144 +741,5 @@ func TestConnectSystemManagedGuidesEnvInstall(t *testing.T) {
 		if !bytes.Contains(out.Bytes(), []byte(want)) {
 			t.Fatalf("stdout missing %q; got:\n%s", want, out.String())
 		}
-	}
-}
-
-// restartHint must pick the restart command that matches how piperd is actually
-// managed on the relay.json (non-systemd) branch: a rootless systemd user unit,
-// a macOS launchd agent, or a bare data dir whose manager is unknown. The old
-// hardcoded `sudo systemctl restart piperd` was wrong for every one of these —
-// that command is only right for the system-wide systemd install, which returns
-// on the earlier config.SystemManaged() branch and never reaches restartHint
-// (#248). A wrong example is worse than none, so the bare-data-dir fallback
-// carries no command at all.
-func TestRestartHintMatchesInstallFlavor(t *testing.T) {
-	// Expected launchd line, built independently of guiTarget()/launchdLabel so a
-	// production-side change to either is caught rather than mirrored.
-	launchdWant := "restart piperd to connect, e.g.:\n\n    launchctl kickstart -k gui/" +
-		strconv.Itoa(os.Getuid()) + "/com.piperbox.piperd\n"
-
-	cases := []struct {
-		name        string
-		unit        bool // rootless systemd user unit present
-		plist       bool // macOS launchd agent present
-		want        string
-		mustNotHave []string
-	}{
-		{
-			name: "rootless user unit",
-			unit: true,
-			want: "restart piperd to connect, e.g.:\n\n    systemctl --user restart piperd\n",
-			// A rootless install must never be told to `sudo systemctl restart`.
-			mustNotHave: []string{"sudo", "launchctl"},
-		},
-		{
-			name:        "launchd agent",
-			plist:       true,
-			want:        launchdWant,
-			mustNotHave: []string{"sudo", "systemctl"},
-		},
-		{
-			name:        "bare data dir (manager unknown)",
-			want:        "restart piperd to connect\n",
-			mustNotHave: []string{"sudo", "systemctl", "launchctl"},
-		},
-		{
-			// Both markers present: the systemd user unit is the more actionable
-			// hint, so it wins over launchd.
-			name:        "user unit wins over launchd",
-			unit:        true,
-			plist:       true,
-			want:        "restart piperd to connect, e.g.:\n\n    systemctl --user restart piperd\n",
-			mustNotHave: []string{"sudo", "launchctl"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			unit := filepath.Join(t.TempDir(), "absent.service")
-			if tc.unit {
-				unit = filepath.Join(t.TempDir(), "piperd.service")
-				if err := os.WriteFile(unit, []byte("[Unit]"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			plist := filepath.Join(t.TempDir(), "absent.plist")
-			if tc.plist {
-				plist = filepath.Join(t.TempDir(), "com.piperbox.piperd.plist")
-				if err := os.WriteFile(plist, []byte("plist"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			oldUnit, oldPlist := userUnitPath, launchdPlistPath
-			userUnitPath = func() (string, error) { return unit, nil }
-			launchdPlistPath = func() (string, error) { return plist, nil }
-			defer func() { userUnitPath, launchdPlistPath = oldUnit, oldPlist }()
-
-			got := restartHint()
-			if got != tc.want {
-				t.Fatalf("restartHint() = %q, want %q", got, tc.want)
-			}
-			for _, bad := range tc.mustNotHave {
-				if strings.Contains(got, bad) {
-					t.Fatalf("restartHint() = %q, must not contain %q", got, bad)
-				}
-			}
-		})
-	}
-}
-
-// The relay.json branch of connect must print the flavor-appropriate hint end to
-// end (not just restartHint in isolation): here HOME holds a rootless user unit,
-// so the enrollment succeeds and the printed hint is the --user restart, never
-// the old `sudo systemctl restart piperd` (#248).
-func TestConnectPrintsUserUnitRestartHint(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("PIPER_ADDR", "")
-	t.Setenv("PIPER_TOKEN", "")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/enroll" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"enrollment_token": "enr-1", "base_domain": "ab12-alice.public.getpiper.co",
-			"tunnel_endpoint": "relay.getpiper.co:7000",
-			"webhook_secret":  "whsec-1", "github_app": true,
-		})
-	}))
-	defer srv.Close()
-	if err := config.SaveClient(config.ClientConfig{
-		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// Install a rootless user unit under HOME so agentInstalled passes and the
-	// hint resolves to the user-unit form.
-	unitDir := filepath.Join(home, ".config", "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(unitDir, "piperd.service"), []byte("[Unit]"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	dataDir := filepath.Join(t.TempDir(), "absent") // no data dir; rely on the user unit
-	old := config.SystemEnvDir
-	config.SystemEnvDir = filepath.Join(t.TempDir(), "absent") // force the non-systemd path
-	defer func() { config.SystemEnvDir = old }()
-
-	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", dataDir}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, err = %s", code, errb.String())
-	}
-	if !bytes.Contains(out.Bytes(), []byte("systemctl --user restart piperd")) {
-		t.Fatalf("stdout = %q, want the --user restart hint", out.String())
-	}
-	if bytes.Contains(out.Bytes(), []byte("sudo systemctl restart piperd")) {
-		t.Fatalf("stdout = %q, must not carry the wrong sudo hint", out.String())
 	}
 }

@@ -301,11 +301,12 @@ func dialAddr(listenAddr string) string {
 // instead of Caddy (httpsAddr), with the peeked hello replayed into whichever
 // backend is dialed (#226).
 //
-// httpAddr/httpsAddr come from cfg and are NOT assumed to be :80/:443: a
-// rootless install cannot bind a low port, so the macOS LaunchAgent runs Caddy
-// on :8080/:8443. Hardcoding the privileged ports here made every such box
-// silently unroutable from the relay while its apps were perfectly healthy
-// (#399).
+// httpAddr/httpsAddr come from cfg and are NOT assumed to be :80/:443: any
+// install that relocates Caddy's listeners (a port already taken, a
+// non-default PIPER_HTTP_ADDR/PIPER_HTTPS_ADDR) needs the tunnel dialing
+// back into wherever Caddy actually is. Hardcoding the privileged ports here
+// made every such box silently unroutable from the relay while its apps were
+// perfectly healthy (#399).
 func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte, stream net.Conn) (net.Conn, error) {
 	return func(kind byte, stream net.Conn) (net.Conn, error) {
 		switch {

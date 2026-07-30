@@ -190,9 +190,10 @@ export PIPER_DATA_DIR=$HOME/.piper
 
 For anything past a one-off test, run `piperd` under systemd so it comes back on
 boot and restarts on failure. Put the TLS/relay env from the option above into
-`/etc/piper/piperd.env` (mode `0600`) instead of exporting it, then promote with
-`piper agent daemonize`. State lives at `PIPER_DATA_DIR=/var/lib/piper` (set by
-the unit, not `$HOME`):
+`/etc/piper/piperd.env` (mode `0600`) instead of exporting it, then install the
+unit and start it with `piper agent up`. State lives at
+`PIPER_DATA_DIR=/var/lib/piper` (set by the unit, not `$HOME`); an
+`apt install piperd piper` already does all of this (see the README).
 
 ```bash
 sudo install -m 0755 bin/piperd /usr/local/bin/piperd   # from-source builds; the
@@ -200,8 +201,9 @@ sudo install -m 0755 bin/piper  /usr/local/bin/piper    # curl installer places 
 sudo install -d -m 0700 /etc/piper
 sudo install -m 0600 packaging/systemd/piperd.env.example /etc/piper/piperd.env
 # edit /etc/piper/piperd.env — add PIPER_RELAY_ADDR, PIPER_ACME_EMAIL, etc.
-piper agent daemonize        # installs + enables the system service; keeps the
-                             # /etc/piper/piperd.env you just edited (self-sudo)
+sudo install -m 0644 packaging/systemd/piperd.service /etc/systemd/system/piperd.service
+sudo systemctl daemon-reload
+piper agent up                # starts the system service (self-sudo when needed)
 piper agent status
 sudo journalctl -u piperd -n 50 --no-pager
 ```
@@ -486,11 +488,12 @@ API — not for a genuine end-to-end push.
 ## Teardown
 
 ```bash
-# Box: stop piperd. Foreground run: Ctrl-C. Daemonized service:
+# Box: stop piperd. Foreground run: Ctrl-C. Systemd service:
 piper agent down                            # stop the system service
 sudo systemctl clean --what=state piperd    # drops /var/lib/piper
-piper agent daemonize --undo                # disables + removes the system unit
-                                            # (keeps /etc/piper/piperd.env and the binaries)
+sudo systemctl disable piperd               # disables the system unit
+sudo rm /etc/systemd/system/piperd.service  # removes it (keeps piperd.env and the binaries)
+sudo systemctl daemon-reload
 # Piper images are tagged piper/<app>:<ts>; containers get auto-generated names,
 # so clean up by image ancestor, per app:
 docker rm -f $(docker ps -aq --filter ancestor=piper/myapp) 2>/dev/null
@@ -522,43 +525,15 @@ sudo systemctl clean --what=state piper-relay
 
 ---
 
-## Linux (rootless user agent)
+## macOS (dev box, via Homebrew)
 
-On a dev box the agent can run rootless via `systemctl --user`:
-
-```bash
-piper agent status                 # running / stopped / not installed
-journalctl --user -u piperd -f     # agent logs
-piper agent down                   # stop it
-```
-
-**If `journalctl --user -u piperd` is empty:** the `systemd --user` journal is
-not persisted by default on minimal distros (e.g. Raspberry Pi OS), so a
-crash-looping agent leaves no entries there. Run piperd in the foreground with
-the user unit's environment to see the real startup error:
-
-```bash
-piper agent down
-XDG_DATA_HOME=~/.piper/piperd XDG_CONFIG_HOME=~/.piper/piperd \
-  PIPER_HTTP_ADDR=:8080 PIPER_HTTPS_ADDR=:8443 \
-  PIPER_CADDY_ADMIN=http://127.0.0.1:2020 ~/.local/bin/piperd
-```
-
-A `listen address … already held` error means another piperd (often a leftover
-system service) owns the port — stop it with `sudo systemctl stop piperd`. To
-persist the user journal instead, enable lingering (`loginctl enable-linger
-$USER`) with journald `Storage=persistent`.
-
----
-
-## macOS (rootless launchd agent)
-
-On a Mac dev box the agent runs rootless via launchd (see
+On a Mac dev box the agent runs via `brew services` (see
 [manual setup](../manual-setup.md#run-the-agent-on-macos-dev-box)):
 
 ```bash
-piper agent status          # running / loaded (not running) / stopped
-tail -f ~/.piper/piper.log  # agent logs (errors in ~/.piper/piper.err.log)
+piper agent status          # running / stopped
+tail -f "$(brew --prefix)/var/log/piperd.log"      # agent logs
+tail -f "$(brew --prefix)/var/log/piperd.err.log"  # errors
 piper agent down            # stop it
 ```
 

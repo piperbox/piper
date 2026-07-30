@@ -791,8 +791,8 @@ func TestRepushRelayAppsSyncsAnEmptySet(t *testing.T) {
 }
 
 // A relay-terminated KindHTTP stream must reach the box's *configured* HTTP
-// listener, not a hardcoded :80. A rootless install (the macOS LaunchAgent sets
-// PIPER_HTTP_ADDR=":8080" because it cannot bind a low port) otherwise refuses
+// listener, not a hardcoded :80. Any install that relocates the listener
+// (a non-default PIPER_HTTP_ADDR, a port already taken) otherwise refuses
 // every relay-forwarded request while its app is perfectly healthy (#399).
 func TestDialLocalHTTPGoesToConfiguredListener(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -824,7 +824,8 @@ func TestDialLocalHTTPGoesToConfiguredListener(t *testing.T) {
 }
 
 // A passthrough stream must reach the configured HTTPS listener for the same
-// reason — a rootless box serves TLS on :8443, not :443 (#399).
+// reason — any install with a non-default PIPER_HTTPS_ADDR is otherwise
+// unroutable (#399).
 func TestDialLocalPassthroughGoesToConfiguredListener(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -886,8 +887,8 @@ func TestDialAddrRewritesListenAddrToLoopback(t *testing.T) {
 // HTTPSListen, and the relay's passthrough streams are spliced to
 // cfg.HTTPSAddr (newDialLocal, #399) — so the two must be the same address.
 // Hardcoding ":443" broke every box that cannot bind it: the relay-colocated
-// box (the relay owns :443) and the rootless macOS install alike issued fine
-// and then failed arming with "address already in use" (#435).
+// box (the relay owns :443) and the brew-managed macOS install alike issued
+// fine and then failed arming with "address already in use" (#435).
 func TestDomainOptionsHTTPSListenFollowsConfig(t *testing.T) {
 	cfg := config.Config{HTTPSAddr: "127.0.0.1:8444"}
 	opts := newDomainOptions(cfg, nil, nil, nil, "relay.example")
