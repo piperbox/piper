@@ -24,13 +24,8 @@ that kills most homelab hosting.
 
 ## 60-second quick start
 
-On a Debian-family box (a Raspberry Pi counts):
-
 ```bash
-sudo install -d -m 0755 /etc/apt/keyrings
-sudo curl -fsSL https://apt.piperbox.dev/piperbox.gpg -o /etc/apt/keyrings/piperbox.gpg
-sudo curl -fsSL https://apt.piperbox.dev/piperbox.sources -o /etc/apt/sources.list.d/piperbox.sources
-sudo apt update && sudo apt install piperd piper   # installs, enables, and starts the agent
+curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
 piper login                  # GitHub device-flow; stores your account credential
 piper connect                # enrolls this box on the public relay
                              # (run the sudo command it prints)
@@ -38,8 +33,13 @@ sudo systemctl restart piperd
 piper deploy blog --path .   # → https://<hash>-<you>.public.getpiper.dev
 ```
 
-On macOS: `brew install piperbox/tap/piper && brew services start piper`, then
-the same `piper login` flow.
+The installer lands you on a real upgrade channel: on Debian/Ubuntu/Raspberry
+Pi OS it configures [apt.piperbox.dev](https://apt.piperbox.dev) and runs
+`sudo apt install piperd piper`; on macOS it hands off to Homebrew
+(`brew install piperbox/tap/piper`). On macOS, `connect` prints no sudo
+command to run — skip that step and run `brew services restart piper` in
+place of the `systemctl` line above. Everything else — and `--cli-only`
+laptop installs — gets verified binaries plus printed next steps.
 
 That's a Dockerfile built, health-checked, and served on a public HTTPS URL —
 no port forwarding, no domain required. Prefer to point and click? Run bare

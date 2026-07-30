@@ -178,14 +178,15 @@ func TestDefaultInstallsBothBinaries(t *testing.T) {
 			t.Errorf("%s not installed: %v\n%s", name, err, out)
 		}
 	}
-	// Next-step hint: lifecycle belongs to the CLI, not the installer.
+	// Next-step hint: lifecycle belongs to the CLI, not the installer. This
+	// pins a version, so dispatch always takes the diet path.
 	switch runtime.GOOS {
 	case "linux":
-		if !strings.Contains(out, "next: sudo apt install piperd piper") {
+		if !strings.Contains(out, "systemctl enable --now piperd") {
 			t.Errorf("expected linux next-step hint, got:\n%s", out)
 		}
 	case "darwin":
-		if !strings.Contains(out, "docs/manual-setup.md") {
+		if !strings.Contains(out, "brew install piperbox/tap/piper") {
 			t.Errorf("expected darwin next-step hint, got:\n%s", out)
 		}
 	}
@@ -375,8 +376,6 @@ func TestDefaultNoStableReleaseErrors(t *testing.T) {
 	}
 }
 
-// TestInstallerIsDumbBinaryPlacer guards the new contract: the installer never
-// manages services or touches system config — that is `piper agent`'s job.
 // TestDownloadAnnouncesEachBinary: a default install pulls ~36 MB of archives.
 // The bar itself is TTY-gated (curl and wget render a meter only when stderr is
 // a terminal), so the announcement is the part a piped or CI run still sees —
@@ -419,17 +418,267 @@ func TestArchiveDownloadShowsProgress(t *testing.T) {
 	}
 }
 
-func TestInstallerIsDumbBinaryPlacer(t *testing.T) {
+// TestInstallerNeverRunsServiceManagers is the successor to the old
+// dumb-binary-placer guard, updated for the dispatch era (the spec supersedes
+// #345): the installer may configure the apt repo and may PRINT service
+// commands, but must never RUN a service manager — deb postinst and brew
+// services own that. /etc/ references outside echo'd hints are limited to the
+// apt repo config and the os-release probe.
+func TestInstallerNeverRunsServiceManagers(t *testing.T) {
 	b, err := os.ReadFile(scriptPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := string(b)
-	if strings.Contains(script, "systemctl") {
-		t.Error("install.sh mentions systemctl; the installer must not manage services")
+	for i, line := range strings.Split(string(b), "\n") {
+		trimmed := strings.TrimSpace(line)
+		isEcho := strings.HasPrefix(trimmed, "echo")
+		for _, mgr := range []string{"systemctl", "launchctl"} {
+			if strings.Contains(line, mgr) && !isEcho {
+				t.Errorf("line %d runs %s (only echo'd hints may mention it): %s", i+1, mgr, trimmed)
+			}
+		}
+		if isEcho {
+			continue
+		}
+		rest := line
+		for {
+			idx := strings.Index(rest, "/etc/")
+			if idx < 0 {
+				break
+			}
+			tail := rest[idx:]
+			if !strings.HasPrefix(tail, "/etc/apt/") && !strings.HasPrefix(tail, "/etc/os-release") {
+				t.Errorf("line %d references %q — only /etc/apt/ and /etc/os-release are allowed outside echo'd hints", i+1, tail[:min(20, len(tail))])
+			}
+			rest = tail[len("/etc/"):]
+		}
 	}
-	if strings.Contains(script, "/etc/") {
-		t.Error("install.sh references /etc/; the installer must not touch system config")
+}
+
+// fakeBin installs an executable stub named name in dir; each invocation
+// appends "name <argv>" to logFile. body, when non-empty, replaces the default
+// log-and-exit-0 behavior (it still receives the log path as $PIPER_FAKE_LOG).
+func fakeBin(t *testing.T, dir, name, logFile, body string) {
+	t.Helper()
+	if body == "" {
+		body = fmt.Sprintf("echo %q \"$@\" >> %q\nexit 0\n", name, logFile)
+	}
+	script := "#!/bin/sh\n" + body
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// fakeUname reports the given kernel/machine so dispatch tests run identically
+// on any host OS.
+func fakeUname(t *testing.T, dir, kernel, machine string) {
+	t.Helper()
+	body := fmt.Sprintf("case \"$1\" in -m) echo %q ;; *) echo %q ;; esac\n", machine, kernel)
+	fakeBin(t, dir, "uname", "/dev/null", body)
+}
+
+// debianFixture writes an os-release identifying a Debian-family system.
+func debianFixture(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "os-release")
+	if err := os.WriteFile(p, []byte("ID=raspbian\nID_LIKE=debian\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// newAptServer serves the two repo-config files the apt path fetches.
+func newAptServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch filepath.Base(r.URL.Path) {
+		case "piperbox.gpg":
+			w.Write([]byte("fake-keyring"))
+		case "piperbox.sources":
+			w.Write([]byte("Types: deb\n"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestAptPathConfiguresRepoAndInstalls(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("apt-path assertions expect the sudo-prefixed call log; as root the prefix is empty")
+	}
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls.log")
+	fakeUname(t, bin, "Linux", "x86_64")
+	fakeBin(t, bin, "apt-get", log, "") // presence satisfies deb_family; sudo-prefixed calls go to the sudo fake
+	fakeBin(t, bin, "sudo", log, "")    // logs, never executes — the test box's /etc stays untouched
+	apt := newAptServer(t)
+
+	out, err := run(t, nil, map[string]string{
+		"PATH":             bin + ":" + os.Getenv("PATH"),
+		"PIPER_OS_RELEASE": debianFixture(t),
+		"PIPER_APT_URL":    apt.URL,
+		"PIPER_VERSION":    "", // no pin: dispatch may choose apt
+	})
+	if err != nil {
+		t.Fatalf("apt path failed: %v\n%s", err, out)
+	}
+	got, readErr := os.ReadFile(log)
+	if readErr != nil {
+		t.Fatalf("no calls logged: %v\n%s", readErr, out)
+	}
+	calls := string(got)
+	for _, want := range []string{
+		"sudo install -d -m 0755 /etc/apt/keyrings",
+		"/etc/apt/keyrings/piperbox.gpg",
+		"/etc/apt/sources.list.d/piperbox.sources",
+		"sudo apt-get update",
+		"sudo apt-get install -y piperd piper",
+	} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("call log missing %q:\n%s", want, calls)
+		}
+	}
+	if strings.Index(calls, "apt-get update") > strings.Index(calls, "apt-get install") {
+		t.Error("apt-get install ran before apt-get update")
+	}
+	if !strings.Contains(out, "installed piper + piperd via apt") {
+		t.Errorf("missing success line:\n%s", out)
+	}
+	// The success line's claim about piperd running depends on whether this
+	// host actually has systemd — install.sh checks /run/systemd/system, not
+	// a fake, so the test environment decides which variant to expect.
+	if _, statErr := os.Stat("/run/systemd/system"); statErr != nil {
+		if !strings.Contains(out, "no systemd detected, so piperd was not started") {
+			t.Errorf("host has no /run/systemd/system; expected the no-systemd variant:\n%s", out)
+		}
+	} else {
+		if !strings.Contains(out, "the piperd service is enabled and running") {
+			t.Errorf("host has /run/systemd/system; expected the systemd variant:\n%s", out)
+		}
+	}
+}
+
+func TestAptPathRollsBackOnUpdateFailure(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("apt-path assertions expect the sudo-prefixed call log; as root the prefix is empty")
+	}
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls.log")
+	fakeUname(t, bin, "Linux", "x86_64")
+	fakeBin(t, bin, "apt-get", log, "")
+	// sudo fails exactly on `apt-get update`, logging everything.
+	fakeBin(t, bin, "sudo", log, fmt.Sprintf(
+		"echo sudo \"$@\" >> %q\ncase \"$*\" in *\"apt-get update\"*) exit 1 ;; esac\nexit 0\n", log))
+	apt := newAptServer(t)
+
+	out, err := run(t, nil, map[string]string{
+		"PATH":             bin + ":" + os.Getenv("PATH"),
+		"PIPER_OS_RELEASE": debianFixture(t),
+		"PIPER_APT_URL":    apt.URL,
+		"PIPER_VERSION":    "",
+	})
+	if err == nil {
+		t.Fatalf("expected failure when apt-get update fails:\n%s", out)
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "rm -f /etc/apt/keyrings/piperbox.gpg /etc/apt/sources.list.d/piperbox.sources") {
+		t.Errorf("rollback rm not invoked:\n%s", calls)
+	}
+	if !strings.Contains(out, "rolled back") {
+		t.Errorf("expected rollback message:\n%s", out)
+	}
+}
+
+func TestBrewPathInstallsTapAndStartsService(t *testing.T) {
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls.log")
+	fakeUname(t, bin, "Darwin", "arm64")
+	fakeBin(t, bin, "brew", log, fmt.Sprintf(
+		"echo brew \"$@\" >> %q\ncase \"$1\" in --prefix) echo /opt/fakebrew ;; esac\nexit 0\n", log))
+
+	out, err := run(t, nil, map[string]string{
+		"PATH":          bin + ":" + os.Getenv("PATH"),
+		"PIPER_VERSION": "",
+	})
+	if err != nil {
+		t.Fatalf("brew path failed: %v\n%s", err, out)
+	}
+	calls, _ := os.ReadFile(log)
+	for _, want := range []string{"brew install piperbox/tap/piper", "brew services start piper"} {
+		if !strings.Contains(string(calls), want) {
+			t.Errorf("call log missing %q:\n%s", want, calls)
+		}
+	}
+	if !strings.Contains(out, "installed piper + piperd via Homebrew") {
+		t.Errorf("missing success line:\n%s", out)
+	}
+}
+
+func TestVersionPinForcesDietOnDebian(t *testing.T) {
+	tag := "v9.9.9"
+	// Diet downloads use the FAKED os/arch (linux/amd64), not the host's.
+	ver := strings.TrimPrefix(tag, "v")
+	assets := map[string][]byte{
+		"piper_" + ver + "_linux_amd64.tar.gz":  tarGz(t, "piper", "fake-piper"),
+		"piperd_" + ver + "_linux_amd64.tar.gz": tarGz(t, "piperd", "fake-piperd"),
+	}
+	srv := newReleaseServer(t, assets, nil)
+	bin := t.TempDir()
+	log := filepath.Join(t.TempDir(), "calls.log")
+	fakeUname(t, bin, "Linux", "x86_64")
+	fakeBin(t, bin, "apt-get", log, "")
+	fakeBin(t, bin, "sudo", log, "")
+
+	prefix := t.TempDir()
+	out, err := run(t, nil, map[string]string{
+		"PATH":             bin + ":" + os.Getenv("PATH"),
+		"PIPER_OS_RELEASE": debianFixture(t),
+		"PIPER_BASE_URL":   srv.URL,
+		"PIPER_VERSION":    tag,
+		"PIPER_PREFIX":     prefix,
+	})
+	if err != nil {
+		t.Fatalf("diet install failed: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(prefix, "piperd")); err != nil {
+		t.Fatalf("version pin must take the diet path: %v\n%s", err, out)
+	}
+	if calls, _ := os.ReadFile(log); strings.Contains(string(calls), "apt-get") {
+		t.Errorf("version pin must never touch apt:\n%s", calls)
+	}
+}
+
+func TestDietLinuxPrintsServiceCommands(t *testing.T) {
+	tag := "v9.9.9"
+	ver := strings.TrimPrefix(tag, "v")
+	assets := map[string][]byte{
+		"piper_" + ver + "_linux_amd64.tar.gz":  tarGz(t, "piper", "fake-piper"),
+		"piperd_" + ver + "_linux_amd64.tar.gz": tarGz(t, "piperd", "fake-piperd"),
+	}
+	srv := newReleaseServer(t, assets, nil)
+	bin := t.TempDir()
+	fakeUname(t, bin, "Linux", "x86_64")
+
+	out, err := run(t, nil, map[string]string{
+		"PATH":             bin + ":" + os.Getenv("PATH"),
+		"PIPER_OS_RELEASE": "/nonexistent", // not deb-family -> diet
+		"PIPER_BASE_URL":   srv.URL,
+		"PIPER_VERSION":    tag,
+		"PIPER_PREFIX":     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("diet install failed: %v\n%s", err, out)
+	}
+	for _, want := range []string{
+		"piperd.service",
+		"systemctl enable --now piperd",
+		"docs/manual-setup.md",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("diet next-steps missing %q:\n%s", want, out)
+		}
 	}
 }
 
@@ -439,18 +688,25 @@ func repoRoot(t *testing.T) string {
 }
 
 func TestInstallDocumentation(t *testing.T) {
-	// The README is the lean quick-start entry point (apt on Linux, brew on
-	// macOS); the curl installer and its flags live in docs/getting-started.md
-	// (see #181, #446).
+	// The README leads with the universal curl front door; the per-channel
+	// detail (apt lines, brew, diet flags, source builds) lives in
+	// docs/getting-started.md (#181, #447).
 	docs := map[string][]string{
 		"README.md": {
+			"install.sh | sh",
 			"sudo apt install piperd piper",
 			"brew install piperbox/tap/piper",
 		},
 		filepath.Join("docs", "getting-started.md"): {
+			"apt.piperbox.dev",
+			"brew services start piper",
 			"--cli-only",
 			"--rc",
 			"PIPER_ADDR",
+		},
+		filepath.Join("docs", "manual-setup.md"): {
+			"systemctl enable --now piperd",
+			"piperd.service",
 		},
 	}
 	for name, wants := range docs {

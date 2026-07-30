@@ -99,6 +99,7 @@ Goal: piperd installable and self-sustaining on the box (Pi/VPS/laptop) — serv
 - ✅ Container image + compose (host `docker.sock`; registry publish tracked separately) — [#45](https://github.com/piperbox/piper/issues/45)
 - ✅ One-line `curl … | sh` installer (OS/arch detect, checksum-verified, `--cli-only`/`--rc`) — [#46](https://github.com/piperbox/piper/issues/46)
 - ✅ CLI-owned lifecycle: installer places binaries only; `piper agent up`/`down` per-tier start/stop, `daemonize [--undo]` owns durability — [#340](https://github.com/piperbox/piper/issues/340)
+- ✅ installer dispatch: curl|sh configures apt (Debian-family) / hands off to brew (macOS) / diet fallback with printed service steps — [#447](https://github.com/piperbox/piper/issues/447)
 - ✅ Standalone `piper` CLI on PATH (`--cli-only`; drives a `piperd` on another host on the same network via `PIPER_ADDR`) — [#47](https://github.com/piperbox/piper/issues/47)
 
 Descoped from the epic, tracked standalone:

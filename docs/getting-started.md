@@ -7,7 +7,21 @@ a LAN-only box never needs the relay sections.
 
 ## Install
 
-### Linux (Debian-family, e.g. Raspberry Pi OS)
+The universal front door is one command, on any platform:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
+```
+
+It detects your platform and hands off to the native package channel where
+one exists — apt on Debian-family Linux, Homebrew on macOS — so every install
+lands on a real upgrade channel. Everywhere else it falls back to verified
+binaries plus printed next steps. The sections below cover what each channel
+actually does, and how to skip straight to it by hand.
+
+### apt (Debian-family, e.g. Raspberry Pi OS)
+
+The curl installer runs exactly this on Debian, Ubuntu, and Raspberry Pi OS:
 
 ```bash
 sudo install -d -m 0755 /etc/apt/keyrings
@@ -17,9 +31,9 @@ sudo apt update && sudo apt install piperd piper
 ```
 
 `apt install piperd piper` already installs, enables, and starts the systemd
-service — it's durable from install, no separate step needed. `piper agent
-up`, `piper agent down`, and `piper agent status` drive that one system
-service from then on:
+service — it's durable from install, no separate step needed, and `apt
+upgrade` restarts a running piperd for you. `piper agent up`, `piper agent
+down`, and `piper agent status` drive that one system service from then on:
 
 ```bash
 piper agent up             # start it (self-sudo when needed)
@@ -36,9 +50,29 @@ lives at `PIPER_DATA_DIR=/var/lib/piper`, and it binds `:80`/`:443` via
 Apps are served at `http://<name>.piper.localhost`. Your user must be able to
 reach a Docker socket — be in the `docker` group, or set `DOCKER_HOST`.
 
-Not on a Debian-family distro, want just the CLI (e.g. to drive a box from
-your laptop), or building from source? The installer places binaries only, no
-service management:
+### Homebrew (macOS)
+
+```bash
+brew install piperbox/tap/piper
+brew services start piper
+```
+
+`brew services start piper` runs piperd now and at every login (equivalent to
+`piper agent up`/`down`/`status`, which wrap the same `brew services` calls).
+For a headless Mac where piperd should come up at boot, before any login, use
+the system-level variant instead: `sudo brew services start piper`. State
+lives at `~/.piper/piperd`, and apps are served at
+`http://<name>.piper.localhost`. The relay/public-URL flow works here too:
+run `piper connect`, then `brew services restart piper` to pick up the
+enrollment. After `brew upgrade`, run `brew services restart piper` to pick
+up the new binary. See
+[`manual-setup.md`](manual-setup.md#run-the-agent-on-macos-dev-box).
+
+### Anywhere else (diet)
+
+Not on a Debian-family distro, no Homebrew, or want just the CLI (e.g. to
+drive a box from your laptop)? The same curl command falls back to placing
+verified binaries only, no service management:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
@@ -49,17 +83,15 @@ their `checksums.txt`, and installs `piper` + `piperd` to `~/.local/bin` (or
 `/usr/local/bin` when run as root; `PIPER_PREFIX` overrides). It never runs
 `systemctl`, never touches `/etc`, and never prompts for `sudo`. Re-run any
 time to upgrade. Add `--rc` to install the latest release candidate instead of
-the latest stable release, or `--cli-only` for just `piper`. Then install the
-systemd unit by hand: see [`manual-setup.md`](manual-setup.md).
+the latest stable release, `--version vX.Y.Z` to pin a specific release, or
+`--cli-only` for just `piper`. Then install the systemd unit by hand: see
+[`manual-setup.md`](manual-setup.md).
 
-### macOS (dev boxes)
+### From source
 
-`piper agent up`/`down`/`status` wrap `brew services` — install via
-`brew install piperbox/tap/piper`, then `brew services start piper` (or
-`piper agent up`, equivalent). State lives at `~/.piper/piperd`, and apps are
-served at `http://<name>.piper.localhost`. This path is LAN-only; the
-relay/public-URL flow is Linux/Pi (systemd) only. See
-[`manual-setup.md`](manual-setup.md#run-the-agent-on-macos-dev-box).
+Prefer to build `piperd`/`piper-relay` from source, run piperd in Docker via Compose,
+run the relay as a service, or wire your own automation instead of the
+installer? See [`manual-setup.md`](manual-setup.md).
 
 ### Upgrading from a pre-0.15 install
 
@@ -71,10 +103,22 @@ The rootless tier and CLI-generated LaunchAgent are gone. One-time cleanup:
   `~/.piper/com.piperbox.piperd.plist`, then `brew install piperbox/tap/piper
   && brew services start piper`. Data in `~/.piper/piperd` is picked up as-is.
 
-Shell completions are a planned follow-up.
+Already on the old **system**-tier systemd install (not rootless) and
+switching to apt? A hand-placed `/etc/systemd/system/piperd.service` shadows
+the deb's own unit at `/usr/lib/systemd/system/piperd.service`, and a stale
+`/usr/local/bin/piper`/`/usr/local/bin/piperd` shadows the deb's
+`/usr/bin/piper{,d}` on `PATH` — apt installs cleanly alongside either but the
+old files silently win. After `apt install piperd piper` succeeds, remove
+them:
 
-Prefer to build from source, run piperd in Docker via Compose, run the relay as
-a service, or wire your own automation? See [`manual-setup.md`](manual-setup.md).
+```bash
+sudo rm -f /etc/systemd/system/piperd.service
+sudo rm -f /usr/local/bin/piper /usr/local/bin/piperd
+sudo systemctl daemon-reload
+sudo systemctl enable --now piperd    # now resolves to the deb's own unit
+```
+
+Shell completions are a planned follow-up.
 
 ## The interactive TUI
 

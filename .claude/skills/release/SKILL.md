@@ -89,6 +89,14 @@ Add `PIPER_RC=1` for a prerelease — without it the installer resolves `release
 
 This matters most when anything about repo identity, hosting, or the installer itself changed.
 
+Full-dispatch smoke (exercises curl → apt-repo config → apt install end-to-end):
+
+```sh
+docker run --rm debian:stable sh -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null && curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh && piper --version && piperd --version'
+```
+
+Expected: installer configures apt.piperbox.dev, installs both debs, both versions print the latest stable. (Runs as root in the container, so no sudo is involved.)
+
 ### apt repo smoke (stable tags only)
 
 A stable tag (no `-` suffix) dispatches a publish to `piperbox/apt`. Confirm the run went green:
@@ -113,6 +121,14 @@ goreleaser pushes the updated formula to piperbox/homebrew-tap. Confirm it lande
 gh api repos/piperbox/homebrew-tap/commits/main -q '.commit.message'   # names the new version
 gh run list -R piperbox/homebrew-tap -L 1
 ```
+
+Smoke-test the tap (non-invasive — do not `brew services start` on a box already running piperd):
+
+```sh
+brew install piperbox/tap/piper && piper --version && piperd --version && brew uninstall piper
+```
+
+Expected: both versions print the tag just cut.
 
 ## 6. Publish the notes
 
