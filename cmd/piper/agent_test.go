@@ -567,6 +567,9 @@ func TestAgentDarwinStatusNotInstalled(t *testing.T) {
 func TestAgentUsage(t *testing.T) {
 	agentGOOS = "darwin"
 	defer func() { agentGOOS = runtime.GOOS }()
+	// brewFound stubbed false: usage must win regardless of Homebrew's
+	// presence on the machine running the test (e.g. CI runners lack it).
+	stubBrew(t, false, func([]string) (string, error) { return "", nil })
 	var out, errb bytes.Buffer
 	if code := agent([]string{"bogus"}, &out, &errb); code != 2 {
 		t.Fatalf("code = %d, want 2", code)

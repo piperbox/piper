@@ -286,6 +286,12 @@ func agentDarwin(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "usage: piper agent <up|down|status>")
 		return 2
 	}
+	switch args[0] {
+	case "up", "down", "status":
+	default:
+		fmt.Fprintln(stderr, "usage: piper agent <up|down|status>")
+		return 2
+	}
 	if !brewFound() {
 		fmt.Fprintln(stderr, "error: Homebrew not found — "+notInstalledDarwin)
 		return 1
