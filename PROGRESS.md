@@ -12,6 +12,7 @@ Legend: ✅ done · 🟡 partial / stubbed · ⬜ not started. Issue tag/label c
 - ✅ Config loading from env with defaults — [#15](https://github.com/piperbox/piper/pull/15)
 - ✅ CI `verify` (gofmt/vet/test/cross) gates PRs; no-cgo arm64 cross-compile green — [#13](https://github.com/piperbox/piper/issues/13)
 - ✅ Release pipeline (goreleaser: tag → GitHub Release + cross-compiled binaries/checksums); unblocks installer/image — [#58](https://github.com/piperbox/piper/issues/58)
+- ✅ apt repo: piperd+piper debs published to apt.piperbox.dev on stable tags, self-verified — [#444](https://github.com/piperbox/piper/issues/444)
 - ✅ Authenticated control API — bearer token on every `piperd` request; on-box `piperd token` bootstrap + `piper login` (creds in `~/.piper/piper`) — [#72](https://github.com/piperbox/piper/issues/72)
 - ✅ Tokenless on loopback — local CLI needs no login; bearer stays on the relay path (dedicated authenticated listener) and non-loopback binds — [#221](https://github.com/piperbox/piper/issues/221)
 

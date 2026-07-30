@@ -89,6 +89,22 @@ Add `PIPER_RC=1` for a prerelease — without it the installer resolves `release
 
 This matters most when anything about repo identity, hosting, or the installer itself changed.
 
+### apt repo smoke (stable tags only)
+
+A stable tag (no `-` suffix) dispatches a publish to `piperbox/apt`. Confirm the run went green:
+
+```sh
+gh run list -R piperbox/apt -w Publish -L 1
+```
+
+Then smoke-test the published repo end-to-end:
+
+```sh
+docker run --rm debian:stable sh -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null && mkdir -p /etc/apt/keyrings && curl -fsSL https://apt.piperbox.dev/piperbox.gpg -o /etc/apt/keyrings/piperbox.gpg && curl -fsSL https://apt.piperbox.dev/piperbox.sources -o /etc/apt/sources.list.d/piperbox.sources && apt-get update -qq && apt-get install -y piperd piper && piper --version && piperd --version'
+```
+
+Expected: both versions print the tag just cut. If it times out on DNS/cert propagation (first publish only), re-run once before debugging.
+
 ## 6. Publish the notes
 
 goreleaser's auto-body is a bare commit list. Always hand-write them.

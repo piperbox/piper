@@ -33,3 +33,13 @@ jobs:
           # release and its RC point at the same commit (v0.2.1 + v0.2.1-rc.2) —
           # it then rebuilt the RC and collided with its existing assets.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+
+      - name: Publish to apt repo
+        # Stable tags only: RCs carry a -suffix and never reach apt.
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.APT_REPO_TOKEN }}
+        run: |
+          gh api repos/piperbox/apt/dispatches \
+            -f event_type=publish \
+            -f 'client_payload[tag]=${{ github.ref_name }}'
