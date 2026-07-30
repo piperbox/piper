@@ -56,35 +56,28 @@ func TestPiperdEnvExample(t *testing.T) {
 	}
 }
 
+// TestPiperdDocumentation pins the one-tier install story in the docs: the
+// deleted daemonize/rootless verbs must not resurface, and each platform's
+// managed path is named.
 func TestPiperdDocumentation(t *testing.T) {
-	getting := repositoryFile(t, "docs", "getting-started.md")
-	for _, text := range []string{
-		"piper agent up",
-		"piper agent daemonize",
-		"piper agent daemonize --undo",
-	} {
-		if !strings.Contains(getting, text) {
-			t.Errorf("docs/getting-started.md missing %q", text)
+	gettingStarted := repositoryFile(t, "docs", "getting-started.md")
+	manualSetup := repositoryFile(t, "docs", "manual-setup.md")
+	readme := repositoryFile(t, "README.md")
+
+	for name, doc := range map[string]string{"getting-started": gettingStarted, "manual-setup": manualSetup, "README": readme} {
+		if strings.Contains(doc, "daemonize") {
+			t.Errorf("%s still mentions daemonize", name)
+		}
+		if strings.Count(doc, "systemctl --user") > 1 {
+			t.Errorf("%s documents the rootless user unit beyond the one-time cleanup note", name)
 		}
 	}
-
-	manual := repositoryFile(t, "docs", "manual-setup.md")
-	for _, text := range []string{
-		"piper agent daemonize",
-	} {
-		if !strings.Contains(manual, text) {
-			t.Errorf("docs/manual-setup.md missing %q", text)
+	for _, want := range []string{"apt install piperd", "brew services start piper"} {
+		if !strings.Contains(gettingStarted, want) {
+			t.Errorf("getting-started.md missing %q", want)
 		}
 	}
-
-	runbook := repositoryFile(t, "docs", "runbooks", "git-deploy-e2e.md")
-	for _, text := range []string{
-		"piper agent daemonize",
-		"PIPER_DATA_DIR=/var/lib/piper",
-		"journalctl -u piperd",
-	} {
-		if !strings.Contains(runbook, text) {
-			t.Errorf("runbook missing %q", text)
-		}
+	if !strings.Contains(manualSetup, "systemctl enable --now piperd") {
+		t.Errorf("manual-setup.md missing the manual unit-install command")
 	}
 }

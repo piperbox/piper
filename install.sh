@@ -137,7 +137,7 @@ else
 	download_verify piper "$tag" "$os" "$arch" "$prefix"
 	echo "installed piper + piperd $tag -> $prefix"
 	if [ "$os" = linux ]; then
-		echo "next: piper agent up   (or: piper agent daemonize — durable system service on :80/:443)"
+		echo "next: sudo apt install piperd piper (managed service — see README) or docs/manual-setup.md"
 	else
 		echo "next: see docs/manual-setup.md (Run the agent on macOS)"
 	fi

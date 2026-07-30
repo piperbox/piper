@@ -7,99 +7,71 @@ a LAN-only box never needs the relay sections.
 
 ## Install
 
-One line puts the binaries on the box:
+### Linux (Debian-family, e.g. Raspberry Pi OS)
+
+```bash
+sudo install -d -m 0755 /etc/apt/keyrings
+sudo curl -fsSL https://apt.piperbox.dev/piperbox.gpg -o /etc/apt/keyrings/piperbox.gpg
+sudo curl -fsSL https://apt.piperbox.dev/piperbox.sources -o /etc/apt/sources.list.d/piperbox.sources
+sudo apt update && sudo apt install piperd piper
+```
+
+`apt install piperd piper` already installs, enables, and starts the systemd
+service — it's durable from install, no separate step needed. `piper agent
+up`, `piper agent down`, and `piper agent status` drive that one system
+service from then on:
+
+```bash
+piper agent up             # start it (self-sudo when needed)
+piper agent status         # running / stopped / not installed; when running,
+                           # prints the control-API address and data dir
+piper agent down           # stop it
+```
+
+`up`/`down` need root: `piper` re-runs itself under `sudo` and prompts for
+your password (running it as real root works too). `status` needs none. State
+lives at `PIPER_DATA_DIR=/var/lib/piper`, and it binds `:80`/`:443` via
+`CAP_NET_BIND_SERVICE` — no root needed once running.
+
+Apps are served at `http://<name>.piper.localhost`. Your user must be able to
+reach a Docker socket — be in the `docker` group, or set `DOCKER_HOST`.
+
+Not on a Debian-family distro, want just the CLI (e.g. to drive a box from
+your laptop), or building from source? The installer places binaries only, no
+service management:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
 ```
 
-The installer **only places binaries**: it detects your OS/arch (Linux and
-macOS), downloads the matching release binaries, verifies their
-`checksums.txt`, and installs `piper` + `piperd` to `~/.local/bin` (or
+It detects your OS/arch, downloads the matching release binaries, verifies
+their `checksums.txt`, and installs `piper` + `piperd` to `~/.local/bin` (or
 `/usr/local/bin` when run as root; `PIPER_PREFIX` overrides). It never runs
 `systemctl`, never touches `/etc`, and never prompts for `sudo`. Re-run any
 time to upgrade. Add `--rc` to install the latest release candidate instead of
-the latest stable release, or `--cli-only` for just `piper` — for driving
-`piperd` from another machine, e.g. your laptop and a Pi on the same LAN.
-
-Running the agent is then a `piper` command, with two modes:
-**`up` runs it until reboot; `daemonize` makes it permanent.**
-
-### Rootless on Linux (dev boxes)
-
-`piper agent up` gives you a rootless dev agent — piperd runs as **you** on
-high ports (`:8080`/`:8443`) under `~/.piper`, as a systemd **user** unit that
-`up` materializes itself, seeding `~/.piper/piperd.env` from files embedded in
-the CLI — nothing to download, nothing to wire by hand.
-
-```bash
-piper agent up            # start it (no sudo)
-piper agent status        # running / stopped / not set up; when running,
-                          # prints the control-API address, app ports, and data dir
-piper agent down          # stop it
-```
-
-Rootless is intentionally ephemeral: it does **not** survive a reboot, and
-`up` prints a note saying so — re-run it after boot, or `daemonize` (below)
-when you want a real service. State lives under `~/.piper/piperd`, and the
-embedded Caddy's admin API sits on `:2020`.
-
-Apps are served at `http://<name>.piper.localhost:8080`. Your user must be able to
-reach a Docker socket — be in the `docker` group, or set `DOCKER_HOST`.
-
-**If `piper agent up` reports a crash-loop**, the startup error goes to the
-`systemd --user` journal, which minimal distros (e.g. Raspberry Pi OS) don't
-persist — so `journalctl --user -u piperd` can be empty. Run piperd
-in the foreground with the unit's environment to see the real error:
-
-```bash
-piper agent down
-XDG_DATA_HOME=~/.piper/piperd XDG_CONFIG_HOME=~/.piper/piperd \
-  PIPER_HTTP_ADDR=:8080 PIPER_HTTPS_ADDR=:8443 \
-  PIPER_CADDY_ADMIN=http://127.0.0.1:2020 ~/.local/bin/piperd
-```
-
-A `listen address … already held` error means another piperd (commonly a
-leftover system service) owns the port — stop it with `sudo systemctl stop
-piperd`.
-
-**Promote to a real daemon.** When you want a durable, boot-surviving service on
-`:80`/`:443` (a Pi, a home server), promote it:
-
-```bash
-piper agent daemonize
-```
-
-This is the one durable, privileged operation: it installs and enables the
-systemd **system** service (`enable --now`), and it needs root — no `sudo`
-prefix required, `piper` re-runs itself under `sudo` and prompts for your
-password (running it as real root works too). It works with or without a prior
-`up`, and keeps an existing `/etc/piper/piperd.env`. It's a fresh durable
-install — state is **not** migrated from `~/.piper` to `/var/lib/piper`;
-re-enroll and redeploy. From then on `piper agent up`/`down`/`status` control
-the system service (self-`sudo` when needed).
-
-To demote again:
-
-```bash
-piper agent daemonize --undo
-```
-
-This stops and disables the system service and removes its unit, keeping
-`/etc/piper/piperd.env` and the binaries (again, no state migration back); a
-later `piper agent up` runs rootless again.
+the latest stable release, or `--cli-only` for just `piper`. Then install the
+systemd unit by hand: see [`manual-setup.md`](manual-setup.md).
 
 ### macOS (dev boxes)
 
-`piper agent up`/`down`/`status` drive a launchd agent the CLI generates for
-you — nothing to install by hand, and it points at whichever `piperd` sits
-beside the `piper` you ran. Like Linux rootless it is ephemeral: the plist is
-kept out of `~/Library/LaunchAgents`, so login never auto-starts it and a reboot
-ends it — run `piper agent up` again. There is no `daemonize` on macOS; it's a
-dev box, so durability stays a Linux system-service concern. See
+`piper agent up`/`down`/`status` wrap `brew services` — install via
+`brew install piperbox/tap/piper`, then `brew services start piper` (or
+`piper agent up`, equivalent). State lives at `~/.piper/piperd`, and apps are
+served at `http://<name>.piper.localhost`. This path is LAN-only; the
+relay/public-URL flow is Linux/Pi (systemd) only. See
 [`manual-setup.md`](manual-setup.md#run-the-agent-on-macos-dev-box).
 
-Shell completions and a Homebrew tap are planned follow-ups.
+### Upgrading from a pre-0.15 install
+
+The rootless tier and CLI-generated LaunchAgent are gone. One-time cleanup:
+
+- Linux rootless: `systemctl --user disable --now piperd` and delete
+  `~/.config/systemd/user/piperd.service`, then install via apt.
+- macOS: `launchctl bootout gui/$(id -u)/com.piperbox.piperd` and delete
+  `~/.piper/com.piperbox.piperd.plist`, then `brew install piperbox/tap/piper
+  && brew services start piper`. Data in `~/.piper/piperd` is picked up as-is.
+
+Shell completions are a planned follow-up.
 
 Prefer to build from source, run piperd in Docker via Compose, run the relay as
 a service, or wire your own automation? See [`manual-setup.md`](manual-setup.md).
