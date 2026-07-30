@@ -66,13 +66,13 @@ The workflow takes ~4 minutes. goreleaser auto-marks `rc`/`beta`/`alpha` tags as
 
 ## 5. Verify what actually published
 
-**Expect 18 assets.** Three binaries (`piper`, `piperd`, `piper-relay`) × 5 platforms (linux amd64/arm64/armv7, darwin amd64/arm64) = 15, plus `install.sh`, `piper-relay.service`, and `checksums.txt`.
+**Expect 25 assets.** Three binaries (`piper`, `piperd`, `piper-relay`) × 5 platforms (linux amd64/arm64/armv7, darwin amd64/arm64) = 15, plus six `.deb` packages (`piperd`/`piper` × amd64/arm64/armhf), `piperd.service`, `install.sh`, `piper-relay.service`, and `checksums.txt`.
 
 ```sh
 gh release view <tag> --json assets --jq '.assets | length'
 ```
 
-Releases before `v0.7.0` had 22 — the four `piperd` unit/env files are no longer published because the CLI embeds them. If you see 22, something regressed.
+Releases before `v0.7.0` had 22 — the four `piperd` unit/env files are no longer published because the CLI embeds them. `v0.13.0` added the debs and `piperd.service` (18 → 25). If you see 18, the nfpm/deb pipeline regressed.
 
 ### Smoke-test the published installer
 
