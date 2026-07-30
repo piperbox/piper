@@ -280,9 +280,9 @@ func statusOutput(t *testing.T) string {
 	return out.String()
 }
 
-// The whole point of #375: `piper agent daemonize` installs a new binary but
-// leaves the old process running, so an upgrade silently does not take and
-// looks exactly like a fix that did not work. Status must say so.
+// The whole point of #375: a binary replaced on disk without a service
+// restart leaves the old process running, so an upgrade silently does not
+// take and looks exactly like a fix that did not work. Status must say so.
 func TestAgentStatusFlagsUnrestartedUpgrade(t *testing.T) {
 	onLinux(t)
 	stubVersions(t, "0.8.4", nil, "0.8.5", nil)

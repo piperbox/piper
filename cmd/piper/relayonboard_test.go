@@ -528,6 +528,12 @@ func TestConnectEnrollsAndWritesRelayFile(t *testing.T) {
 	if rf != want {
 		t.Fatalf("relay file = %+v, want %+v", rf, want)
 	}
+	if !strings.Contains(out.String(), "restart piperd to connect: ") {
+		t.Fatalf("stdout = %q, want a framed restart hint", out.String())
+	}
+	if !strings.HasSuffix(out.String(), "\n") {
+		t.Fatalf("stdout = %q, want a trailing newline", out.String())
+	}
 }
 
 func TestConnectWritesTerminated(t *testing.T) {

@@ -78,9 +78,10 @@ var binaryVersion = func(path string) (string, error) {
 }
 
 // installedPiperdVersion runs the on-disk piperd's own --version. This is the
-// half that catches the daemonize trap: `piper agent daemonize` installs a new
-// binary but leaves the old process running, so disk and running disagree and
-// the upgrade silently has not taken (#375). A var so tests can stub it.
+// half that catches a disk-vs-running mismatch: a binary replaced on disk
+// without a service restart leaves the old process running, so disk and
+// running disagree and the upgrade silently has not taken (#375). A var so
+// tests can stub it.
 var installedPiperdVersion = func() (string, error) {
 	p, err := piperdPath()
 	if err != nil {
@@ -438,9 +439,8 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 // (e.g. PIPER_API_ADDR=0.0.0.0:8088 for LAN access). Returns nil when the
 // agent isn't running or /proc can't be read (e.g. the system piperd's
 // environ as non-root, the common case). A var so tests stub it.
-var agentEnviron = func(scope ...string) map[string]string {
-	args := append(append([]string{}, scope...), "show", userUnitName, "--property=MainPID", "--value")
-	out, err := systemctlRun(args...)
+var agentEnviron = func() map[string]string {
+	out, err := systemctlRun("show", userUnitName, "--property=MainPID", "--value")
 	if err != nil {
 		return nil
 	}

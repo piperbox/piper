@@ -532,7 +532,8 @@ On a Mac dev box the agent runs via `brew services` (see
 
 ```bash
 piper agent status          # running / stopped
-tail -f ~/.piper/piper.log  # agent logs (errors in ~/.piper/piper.err.log)
+tail -f "$(brew --prefix)/var/log/piperd.log"      # agent logs
+tail -f "$(brew --prefix)/var/log/piperd.err.log"  # errors
 piper agent down            # stop it
 ```
 

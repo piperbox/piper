@@ -791,10 +791,9 @@ func TestRepushRelayAppsSyncsAnEmptySet(t *testing.T) {
 }
 
 // A relay-terminated KindHTTP stream must reach the box's *configured* HTTP
-// listener, not a hardcoded :80. A brew-managed install (the macOS brew
-// service sets PIPER_HTTP_ADDR=":8080" because it cannot bind a low port)
-// otherwise refuses every relay-forwarded request while its app is perfectly
-// healthy (#399).
+// listener, not a hardcoded :80. Any install that relocates the listener
+// (a non-default PIPER_HTTP_ADDR, a port already taken) otherwise refuses
+// every relay-forwarded request while its app is perfectly healthy (#399).
 func TestDialLocalHTTPGoesToConfiguredListener(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -825,7 +824,8 @@ func TestDialLocalHTTPGoesToConfiguredListener(t *testing.T) {
 }
 
 // A passthrough stream must reach the configured HTTPS listener for the same
-// reason — a brew-managed box serves TLS on :8443, not :443 (#399).
+// reason — any install with a non-default PIPER_HTTPS_ADDR is otherwise
+// unroutable (#399).
 func TestDialLocalPassthroughGoesToConfiguredListener(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -33,6 +33,7 @@ sudo curl -fsSL https://apt.piperbox.dev/piperbox.sources -o /etc/apt/sources.li
 sudo apt update && sudo apt install piperd piper   # installs, enables, and starts the agent
 piper login                  # GitHub device-flow; stores your account credential
 piper connect                # enrolls this box on the public relay
+                             # (run the sudo command it prints)
 sudo systemctl restart piperd
 piper deploy blog --path .   # → https://<hash>-<you>.public.getpiper.dev
 ```

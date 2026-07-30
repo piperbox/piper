@@ -325,7 +325,7 @@ func connect(o connectOpts, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "box claimed: %s\n%s", en.BaseDomain, restartHint())
+	fmt.Fprintf(stdout, "box claimed: %s\nrestart piperd to connect: %s\n", en.BaseDomain, restartHint())
 	return 0
 }
 
