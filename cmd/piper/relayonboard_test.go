@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -643,18 +642,17 @@ func TestConnectOffBoxFailsLoudly(t *testing.T) {
 
 // agentInstalled must recognize each install flavor individually — a false
 // negative for any one of them would lock that flavor's users (rootless
-// systemd, macOS launchd) out of `piper connect` (#173). The all-absent case
-// is also pinned end-to-end by TestConnectOffBoxFailsLoudly.
+// systemd) out of `piper connect` (#173). The all-absent case is also pinned
+// end-to-end by TestConnectOffBoxFailsLoudly.
 func TestAgentInstalledDetectsEachFlavor(t *testing.T) {
 	cases := []struct {
-		name                 string
-		dataDir, unit, plist bool // whether each install marker exists
-		want                 bool
+		name          string
+		dataDir, unit bool // whether each install marker exists
+		want          bool
 	}{
-		{"existing data dir", true, false, false, true},
-		{"rootless user unit", false, true, false, true},
-		{"launchd agent", false, false, true, true},
-		{"no install of any flavor", false, false, false, false},
+		{"existing data dir", true, false, true},
+		{"rootless user unit", false, true, true},
+		{"no install of any flavor", false, false, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -669,18 +667,10 @@ func TestAgentInstalledDetectsEachFlavor(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			plist := filepath.Join(t.TempDir(), "absent.plist")
-			if tc.plist {
-				plist = filepath.Join(t.TempDir(), "dev.piperbox.piperd.plist")
-				if err := os.WriteFile(plist, []byte("plist"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
 
-			oldUnit, oldPlist := userUnitPath, launchdPlistPath
+			oldUnit := userUnitPath
 			userUnitPath = func() (string, error) { return unit, nil }
-			launchdPlistPath = func() (string, error) { return plist, nil }
-			defer func() { userUnitPath, launchdPlistPath = oldUnit, oldPlist }()
+			defer func() { userUnitPath = oldUnit }()
 
 			if got := agentInstalled(dataDir); got != tc.want {
 				t.Fatalf("agentInstalled = %v, want %v", got, tc.want)
@@ -747,22 +737,17 @@ func TestConnectSystemManagedGuidesEnvInstall(t *testing.T) {
 
 // restartHint must pick the restart command that matches how piperd is actually
 // managed on the relay.json (non-systemd) branch: a rootless systemd user unit,
-// a macOS launchd agent, or a bare data dir whose manager is unknown. The old
-// hardcoded `sudo systemctl restart piperd` was wrong for every one of these —
-// that command is only right for the system-wide systemd install, which returns
-// on the earlier config.SystemManaged() branch and never reaches restartHint
-// (#248). A wrong example is worse than none, so the bare-data-dir fallback
-// carries no command at all.
+// or a bare data dir whose manager is unknown (macOS is brew-managed and gets
+// its own hint in a later task). The old hardcoded `sudo systemctl restart
+// piperd` was wrong for every one of these — that command is only right for the
+// system-wide systemd install, which returns on the earlier
+// config.SystemManaged() branch and never reaches restartHint (#248). A wrong
+// example is worse than none, so the bare-data-dir fallback carries no command
+// at all.
 func TestRestartHintMatchesInstallFlavor(t *testing.T) {
-	// Expected launchd line, built independently of guiTarget()/launchdLabel so a
-	// production-side change to either is caught rather than mirrored.
-	launchdWant := "restart piperd to connect, e.g.:\n\n    launchctl kickstart -k gui/" +
-		strconv.Itoa(os.Getuid()) + "/com.piperbox.piperd\n"
-
 	cases := []struct {
 		name        string
 		unit        bool // rootless systemd user unit present
-		plist       bool // macOS launchd agent present
 		want        string
 		mustNotHave []string
 	}{
@@ -774,24 +759,9 @@ func TestRestartHintMatchesInstallFlavor(t *testing.T) {
 			mustNotHave: []string{"sudo", "launchctl"},
 		},
 		{
-			name:        "launchd agent",
-			plist:       true,
-			want:        launchdWant,
-			mustNotHave: []string{"sudo", "systemctl"},
-		},
-		{
 			name:        "bare data dir (manager unknown)",
 			want:        "restart piperd to connect\n",
 			mustNotHave: []string{"sudo", "systemctl", "launchctl"},
-		},
-		{
-			// Both markers present: the systemd user unit is the more actionable
-			// hint, so it wins over launchd.
-			name:        "user unit wins over launchd",
-			unit:        true,
-			plist:       true,
-			want:        "restart piperd to connect, e.g.:\n\n    systemctl --user restart piperd\n",
-			mustNotHave: []string{"sudo", "launchctl"},
 		},
 	}
 	for _, tc := range cases {
@@ -803,18 +773,10 @@ func TestRestartHintMatchesInstallFlavor(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			plist := filepath.Join(t.TempDir(), "absent.plist")
-			if tc.plist {
-				plist = filepath.Join(t.TempDir(), "com.piperbox.piperd.plist")
-				if err := os.WriteFile(plist, []byte("plist"), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
 
-			oldUnit, oldPlist := userUnitPath, launchdPlistPath
+			oldUnit := userUnitPath
 			userUnitPath = func() (string, error) { return unit, nil }
-			launchdPlistPath = func() (string, error) { return plist, nil }
-			defer func() { userUnitPath, launchdPlistPath = oldUnit, oldPlist }()
+			defer func() { userUnitPath = oldUnit }()
 
 			got := restartHint()
 			if got != tc.want {

@@ -1,7 +1,7 @@
 package main
 
 import (
-	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,42 +20,12 @@ import (
 	"github.com/piperbox/piper/internal/config"
 )
 
-//go:embed piperd.env.macos.example
-var embeddedMacEnv string
-
-const launchdLabel = "com.piperbox.piperd"
-
 // agentGOOS is runtime.GOOS; a var so tests can exercise the non-darwin gate.
 var agentGOOS = runtime.GOOS
 
-// launchdPlistPath returns where `piper agent up` materializes the LaunchAgent.
-// It is deliberately NOT ~/Library/LaunchAgents: launchd scans that directory at
-// every login and would auto-start piperd, but macOS is a dev target with no
-// `daemonize` tier — `up` runs it, a reboot ends it. A var so tests can point it
-// at a temp file.
-var launchdPlistPath = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".piper", launchdLabel+".plist"), nil
-}
-
-// legacyLaunchAgentPath is the login-scanned plist that piper shipped before the
-// agent generated its own. `up` evicts it (see agentUp); a var so tests can
-// point it at a temp file.
-var legacyLaunchAgentPath = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist"), nil
-}
-
-// piperdPath resolves the piperd the LaunchAgent should exec: the one sitting
-// next to this piper binary (the installer places both in one prefix), else
-// whatever is on PATH. Resolving it here is what keeps the plist correct for any
-// prefix, instead of pinning one install location. A var so tests can stub it.
+// piperdPath resolves the piperd whose --version installedPiperdVersion reports:
+// the one sitting next to this piper binary (the installer places both in one
+// prefix), else whatever is on PATH. A var so tests can stub it.
 var piperdPath = func() (string, error) {
 	if exe, err := os.Executable(); err == nil {
 		if cand := filepath.Join(filepath.Dir(exe), "piperd"); fileExists(cand) {
@@ -202,15 +172,6 @@ func printAgentVersions(stdout io.Writer, apiAddr string) {
 	fmt.Fprintf(stdout, "  version      %s\n", running)
 }
 
-// launchctlRun runs `launchctl <args...>` and returns combined output; a var so
-// tests can substitute it without shelling out to a real launchd.
-var launchctlRun = func(args ...string) (string, error) {
-	out, err := exec.Command("launchctl", args...).CombinedOutput()
-	return string(out), err
-}
-
-func guiTarget() string { return "gui/" + strconv.Itoa(os.Getuid()) }
-
 const userUnitName = "piperd"
 
 // systemctlRun runs `systemctl <args...>` and returns combined output; a var so
@@ -296,16 +257,6 @@ var userUnitPath = func() (string, error) {
 	return filepath.Join(home, ".config", "systemd", "user", userUnitName+".service"), nil
 }
 
-// userEnvPath returns the rootless agent's env-file path; a var so tests can
-// point it at a temp file.
-var userEnvPath = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".piper", "piperd.env"), nil
-}
-
 // agentEUID is os.Geteuid; a var so tests can stub identity.
 var agentEUID = os.Geteuid
 
@@ -322,27 +273,80 @@ func agent(args []string, stdout, stderr io.Writer) int {
 	}
 }
 
+// brewServicesRun shells out to `brew services <args...>`; a var so tests can
+// substitute it without a real Homebrew.
+var brewServicesRun = func(args ...string) (string, error) {
+	out, err := exec.Command("brew", append([]string{"services"}, args...)...).CombinedOutput()
+	return string(out), err
+}
+
+// brewFound reports whether Homebrew is on PATH; a var so tests can stub it.
+var brewFound = func() bool {
+	_, err := exec.LookPath("brew")
+	return err == nil
+}
+
+const notInstalledDarwin = "piperd on macOS is managed by Homebrew — `brew install piperbox/tap/piper`"
+
+// agentDarwin delegates lifecycle to brew services: the formula's service
+// block owns the launchd plumbing, so the CLI never touches plists.
 func agentDarwin(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, "usage: piper agent <up|down|status>")
 		return 2
 	}
+	if !brewFound() {
+		fmt.Fprintln(stderr, "error: Homebrew not found — "+notInstalledDarwin)
+		return 1
+	}
 	switch args[0] {
 	case "up":
-		return agentUp(stdout, stderr)
+		out, err := brewServicesRun("start", "piper")
+		if err != nil {
+			fmt.Fprintf(stderr, "error: brew services start failed: %v\n%s\nhint: %s\n", err, out, notInstalledDarwin)
+			return 1
+		}
+		fmt.Fprintln(stdout, "piperd started (brew services — runs now and at every login)")
+		return 0
 	case "down":
-		return agentDown(stdout, stderr)
+		out, err := brewServicesRun("stop", "piper")
+		if err != nil {
+			fmt.Fprintf(stderr, "error: brew services stop failed: %v\n%s", err, out)
+			return 1
+		}
+		fmt.Fprintln(stdout, "piperd stopped")
+		return 0
 	case "status":
-		return agentStatus(stdout, stderr)
-	case "daemonize":
-		// macOS is a dev target: piperd runs rootless on high ports for as long
-		// as you're logged in. Durability is the Linux system-service tier.
-		fmt.Fprintln(stderr, "error: `piper agent daemonize` is Linux-only — on macOS piperd is a dev agent that `piper agent up` runs until you stop it or reboot")
-		return 2
+		return agentStatusDarwin(stdout)
 	default:
 		fmt.Fprintln(stderr, "usage: piper agent <up|down|status>")
 		return 2
 	}
+}
+
+func agentStatusDarwin(stdout io.Writer) int {
+	out, err := brewServicesRun("info", "piper", "--json")
+	if err != nil {
+		fmt.Fprintln(stdout, "piperd: not installed — "+notInstalledDarwin)
+		return 0
+	}
+	var infos []struct {
+		Running bool   `json:"running"`
+		Status  string `json:"status"`
+	}
+	if json.Unmarshal([]byte(out), &infos) != nil || len(infos) == 0 {
+		fmt.Fprintln(stdout, "piperd: unknown (unexpected brew services output)")
+		return 0
+	}
+	if infos[0].Running {
+		fmt.Fprintln(stdout, "piperd: running (brew services)")
+		// The formula's service block leaves the control API on piperd's
+		// default.
+		printAgentVersions(stdout, "127.0.0.1:8088")
+		return 0
+	}
+	fmt.Fprintln(stdout, "piperd: stopped")
+	return 0
 }
 
 // agentLinux drives the one and only tier: the systemd system service,
@@ -437,27 +441,6 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// seedUserEnv writes content to the rootless agent's env file if it isn't there
-// yet — skip-if-exists, so operator edits are never clobbered.
-func seedUserEnv(content string, stderr io.Writer) int {
-	envPath, err := userEnvPath()
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	if _, err := os.Stat(envPath); err != nil {
-		if err := os.MkdirAll(filepath.Dir(envPath), 0o700); err != nil {
-			fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		if err := os.WriteFile(envPath, []byte(content), 0o600); err != nil {
-			fmt.Fprintf(stderr, "error: writing env: %v\n", err)
-			return 1
-		}
-	}
-	return 0
-}
-
 // agentEnviron reads the running agent's start-time environment from
 // /proc/<MainPID>/environ (NUL-separated KEY=VALUE), so `status` can report the
 // address the agent is actually bound to — honoring any env-file overrides
@@ -494,152 +477,6 @@ func envOr(env map[string]string, key, def string) string {
 		return v
 	}
 	return def
-}
-
-// launchdPlistTemplate is the LaunchAgent `up` materializes. The job is a
-// /bin/sh wrapper so it can pin the rootless environment (high ports, and a
-// Caddy admin off the default :2019, matching the Linux rootless unit), source
-// the optional env file, and append to the agent's logs before exec'ing piperd.
-// The verbs are %s label, %s resolved piperd path. RunAtLoad starts the job as
-// soon as `up` bootstraps it and KeepAlive restarts it if it crashes — both
-// scoped to this login session, since the plist is not login-scanned.
-const launchdPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>%s</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/sh</string>
-    <string>-c</string>
-    <string>mkdir -p "$HOME/.piper"
-export XDG_DATA_HOME="$HOME/.piper/piperd" XDG_CONFIG_HOME="$HOME/.piper/piperd"
-export PIPER_HTTP_ADDR=":8080" PIPER_HTTPS_ADDR=":8443" PIPER_CADDY_ADMIN="http://127.0.0.1:2020"
-set -a
-[ -f "$HOME/.piper/piperd.env" ] &amp;&amp; . "$HOME/.piper/piperd.env"
-set +a
-exec &gt;&gt; "$HOME/.piper/piper.log" 2&gt;&gt; "$HOME/.piper/piper.err.log"
-exec "%s"</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-</dict>
-</plist>
-`
-
-// xmlText escapes s for an XML text node.
-var xmlText = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace
-
-func renderLaunchdPlist(piperd string) string {
-	return fmt.Sprintf(launchdPlistTemplate, launchdLabel, xmlText(piperd))
-}
-
-// materializeLaunchd writes the LaunchAgent for the piperd this CLI resolved,
-// rewriting a stale one (an older piper's, or one naming a binary that has since
-// moved), and seeds the env file without clobbering edits.
-func materializeLaunchd(stderr io.Writer) int {
-	piperd, err := piperdPath()
-	if err != nil {
-		fmt.Fprintln(stderr, "error: piperd not found next to the piper binary or on PATH — run the installer first (see README)")
-		return 1
-	}
-	plist, err := launchdPlistPath()
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	want := renderLaunchdPlist(piperd)
-	if cur, err := os.ReadFile(plist); err != nil || string(cur) != want {
-		if err := os.MkdirAll(filepath.Dir(plist), 0o700); err != nil {
-			fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		if err := os.WriteFile(plist, []byte(want), 0o644); err != nil {
-			fmt.Fprintf(stderr, "error: writing launchd agent: %v\n", err)
-			return 1
-		}
-	}
-	return seedUserEnv(embeddedMacEnv, stderr)
-}
-
-// evictLoginScannedPlist removes the LaunchAgent piper used to ship into
-// ~/Library/LaunchAgents. launchd loads that directory at every login, so left
-// in place it keeps starting a stale piperd behind this one's back — and it
-// carries the same label, so bootstrap would fail while it is loaded.
-func evictLoginScannedPlist(stderr io.Writer) int {
-	legacy, err := legacyLaunchAgentPath()
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	if !fileExists(legacy) {
-		return 0
-	}
-	launchctlRun("bootout", guiTarget()+"/"+launchdLabel) // best-effort: it may not be loaded
-	if err := os.Remove(legacy); err != nil {
-		fmt.Fprintf(stderr, "warning: could not remove the old login-scanned agent at %s (it will keep starting piperd at login): %v\n", legacy, err)
-	}
-	return 0
-}
-
-func agentUp(stdout, stderr io.Writer) int {
-	if code := evictLoginScannedPlist(stderr); code != 0 {
-		return code
-	}
-	if code := materializeLaunchd(stderr); code != 0 {
-		return code
-	}
-	plist, err := launchdPlistPath()
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	out, err := launchctlRun("bootstrap", guiTarget(), plist)
-	if err != nil {
-		if strings.Contains(out, "already") || strings.Contains(out, "5: Input/output error") {
-			fmt.Fprintln(stdout, "piperd already running")
-			return 0
-		}
-		fmt.Fprintf(stderr, "error: launchctl bootstrap failed: %v\n%s", err, out)
-		return 1
-	}
-	fmt.Fprintln(stdout, "piperd started")
-	fmt.Fprintln(stdout, "note: won't survive a reboot — run `piper agent up` again after one")
-	return 0
-}
-
-func agentDown(stdout, stderr io.Writer) int {
-	out, err := launchctlRun("bootout", guiTarget()+"/"+launchdLabel)
-	if err != nil {
-		if strings.Contains(out, "No such process") || strings.Contains(out, "not find") {
-			fmt.Fprintln(stdout, "piperd already stopped")
-			return 0
-		}
-		fmt.Fprintf(stderr, "error: launchctl bootout failed: %v\n%s", err, out)
-		return 1
-	}
-	fmt.Fprintln(stdout, "piperd stopped")
-	return 0
-}
-
-func agentStatus(stdout, stderr io.Writer) int {
-	out, err := launchctlRun("print", guiTarget()+"/"+launchdLabel)
-	if err != nil {
-		fmt.Fprintln(stdout, "piperd: stopped")
-		return 0
-	}
-	if strings.Contains(out, "state = running") {
-		fmt.Fprintln(stdout, "piperd: running")
-		// The LaunchAgent pins high ports but leaves the control API on
-		// piperd's default, so there is no plist env to consult.
-		printAgentVersions(stdout, "127.0.0.1:8088")
-	} else {
-		fmt.Fprintln(stdout, "piperd: loaded (not running)")
-	}
-	return 0
 }
 
 // selfExecSudo re-runs this binary under sudo with its own absolute path,

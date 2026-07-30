@@ -3,13 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -439,246 +438,129 @@ func TestDialableAddrRewritesWildcardBinds(t *testing.T) {
 
 var errFake = fmt.Errorf("exit status 3")
 
-// onDarwin points agentGOOS at darwin for the launchd tests; restores via
-// t.Cleanup.
-func onDarwin(t *testing.T) {
+// stubBrew replaces brewServicesRun and brewFound with scripted fakes; returns
+// the call log.
+func stubBrew(t *testing.T, found bool, script func(args []string) (string, error)) *[][]string {
 	t.Helper()
+	var calls [][]string
+	origRun, origFound := brewServicesRun, brewFound
+	brewServicesRun = func(args ...string) (string, error) {
+		calls = append(calls, args)
+		return script(args)
+	}
+	brewFound = func() bool { return found }
+	t.Cleanup(func() { brewServicesRun, brewFound = origRun, origFound })
+	return &calls
+}
+
+func TestAgentDarwinNoBrew(t *testing.T) {
 	agentGOOS = "darwin"
 	t.Cleanup(func() { agentGOOS = runtime.GOOS })
-}
-
-// darwinPaths points the generated plist, the login-scanned legacy plist, the
-// env file, and the resolved piperd binary into a temp dir, so `up`
-// materializes into a sandbox. Restore via the returned func.
-func darwinPaths(t *testing.T) (plist, legacy, env, piperd string, restore func()) {
-	t.Helper()
-	dir := t.TempDir()
-	plist = filepath.Join(dir, ".piper", "com.piperbox.piperd.plist")
-	legacy = filepath.Join(dir, "Library", "LaunchAgents", "com.piperbox.piperd.plist")
-	env = filepath.Join(dir, ".piper", "piperd.env")
-	piperd = filepath.Join(dir, "bin", "piperd")
-	oldPlist, oldLegacy, oldEnv, oldBin := launchdPlistPath, legacyLaunchAgentPath, userEnvPath, piperdPath
-	launchdPlistPath = func() (string, error) { return plist, nil }
-	legacyLaunchAgentPath = func() (string, error) { return legacy, nil }
-	userEnvPath = func() (string, error) { return env, nil }
-	piperdPath = func() (string, error) { return piperd, nil }
-	return plist, legacy, env, piperd, func() {
-		launchdPlistPath, legacyLaunchAgentPath, userEnvPath, piperdPath = oldPlist, oldLegacy, oldEnv, oldBin
-	}
-}
-
-// TestLaunchdPlistIsNotLoginScanned pins the core of macOS's ephemeral
-// contract: the plist must live outside ~/Library/LaunchAgents, which launchd
-// scans and auto-loads at every login.
-func TestLaunchdPlistIsNotLoginScanned(t *testing.T) {
-	got, err := launchdPlistPath()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(got, filepath.Join("Library", "LaunchAgents")) {
-		t.Errorf("plist path %q is login-scanned; piperd would survive a reboot", got)
-	}
-	if !strings.Contains(got, filepath.Join(".piper", "com.piperbox.piperd.plist")) {
-		t.Errorf("plist path = %q, want it under ~/.piper", got)
-	}
-}
-
-func TestAgentUpBootstraps(t *testing.T) {
-	onDarwin(t)
-	plist, _, _, _, restore := darwinPaths(t)
-	defer restore()
-
-	var gotArgs []string
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { gotArgs = args; return "", nil }
-	defer func() { launchctlRun = oldRun }()
-
+	stubBrew(t, false, func([]string) (string, error) { return "", nil })
 	var out, errb bytes.Buffer
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
+	if code := agent([]string{"up"}, &out, &errb); code != 1 {
+		t.Fatalf("code = %d, want 1", code)
 	}
-	if len(gotArgs) < 3 || gotArgs[0] != "bootstrap" || gotArgs[2] != plist {
-		t.Errorf("launchctl args = %v, want bootstrap <gui> %s", gotArgs, plist)
-	}
-	if !strings.Contains(out.String(), "started") {
-		t.Errorf("stdout = %q", out.String())
+	if !strings.Contains(errb.String(), "brew install piperbox/tap/piper") {
+		t.Errorf("stderr %q lacks the install hint", errb.String())
 	}
 }
 
-// TestAgentUpDarwinMaterializesPlist is the fix for the shipped plist's
-// hard-coded /usr/local/bin/piperd: the generated one execs whichever piperd
-// the CLI actually resolved.
-func TestAgentUpDarwinMaterializesPlist(t *testing.T) {
-	onDarwin(t)
-	plist, _, _, piperd, restore := darwinPaths(t)
-	defer restore()
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { return "", nil }
-	defer func() { launchctlRun = oldRun }()
-
-	var out, errb bytes.Buffer
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
-	}
-	b, err := os.ReadFile(plist)
-	if err != nil {
-		t.Fatalf("plist not materialized: %v", err)
-	}
-	got := string(b)
-	for _, want := range []string{
-		"<string>com.piperbox.piperd</string>",
-		"<key>KeepAlive</key>",
-		`PIPER_HTTP_ADDR=":8080"`,
-		`PIPER_HTTPS_ADDR=":8443"`,
-		`PIPER_CADDY_ADMIN="http://127.0.0.1:2020"`,
-		`XDG_DATA_HOME="$HOME/.piper/piperd"`,
-		`$HOME/.piper/piper.log`,
-		`exec "` + piperd + `"`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("generated plist missing %q\n%s", want, got)
-		}
-	}
-	if strings.Contains(got, "/usr/local/bin/piperd") {
-		t.Errorf("generated plist still hard-codes the system-tier path:\n%s", got)
-	}
-}
-
-// TestAgentUpDarwinRefreshesStalePlist covers the self-heal: a plist written by
-// an older piper (pointing at a binary that has since moved) is rewritten.
-func TestAgentUpDarwinRefreshesStalePlist(t *testing.T) {
-	onDarwin(t)
-	plist, _, _, piperd, restore := darwinPaths(t)
-	defer restore()
-	os.MkdirAll(filepath.Dir(plist), 0o755)
-	os.WriteFile(plist, []byte("stale plist execing /usr/local/bin/piperd"), 0o644)
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { return "", nil }
-	defer func() { launchctlRun = oldRun }()
-
-	var out, errb bytes.Buffer
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
-	}
-	if b, _ := os.ReadFile(plist); !strings.Contains(string(b), `exec "`+piperd+`"`) {
-		t.Errorf("stale plist not refreshed; got %q", string(b))
-	}
-}
-
-// TestAgentUpDarwinEvictsLoginScannedPlist covers the migration off the shipped
-// LaunchAgent: it is booted out (it holds the same label, so bootstrap would
-// fail) and deleted, so login stops starting a stale piperd behind our back.
-func TestAgentUpDarwinEvictsLoginScannedPlist(t *testing.T) {
-	onDarwin(t)
-	_, legacy, _, _, restore := darwinPaths(t)
-	defer restore()
-	os.MkdirAll(filepath.Dir(legacy), 0o755)
-	os.WriteFile(legacy, []byte("shipped plist execing /usr/local/bin/piperd"), 0o644)
-
-	var calls [][]string
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { calls = append(calls, args); return "", nil }
-	defer func() { launchctlRun = oldRun }()
-
-	var out, errb bytes.Buffer
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
-	}
-	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
-		t.Errorf("login-scanned plist still present at %s", legacy)
-	}
-	if len(calls) < 2 || calls[0][0] != "bootout" || calls[1][0] != "bootstrap" {
-		t.Errorf("calls = %v, want bootout before bootstrap", calls)
-	}
-}
-
-func TestAgentUpDarwinSeedsEnvWithoutClobbering(t *testing.T) {
-	onDarwin(t)
-	_, _, env, _, restore := darwinPaths(t)
-	defer restore()
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { return "", nil }
-	defer func() { launchctlRun = oldRun }()
-
-	var out, errb bytes.Buffer
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
-	}
-	if b, _ := os.ReadFile(env); string(b) != embeddedMacEnv {
-		t.Fatalf("env not seeded; got %q", string(b))
-	}
-
-	edited := "PIPER_BASE_DOMAIN=dev.local\n"
-	os.WriteFile(env, []byte(edited), 0o600)
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("second up: code = %d, stderr = %s", code, errb.String())
-	}
-	if b, _ := os.ReadFile(env); string(b) != edited {
-		t.Errorf("env clobbered: got %q", string(b))
-	}
-}
-
-// TestAgentUpDarwinSaysItIsEphemeral holds macOS to the same contract as Linux
-// rootless: `up` runs it until reboot, and nothing promotes it.
-func TestAgentUpDarwinSaysItIsEphemeral(t *testing.T) {
-	onDarwin(t)
-	_, _, _, _, restore := darwinPaths(t)
-	defer restore()
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { return "", nil }
-	defer func() { launchctlRun = oldRun }()
-
-	var out, errb bytes.Buffer
-	if code := agent([]string{"up"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
-	}
-	if !strings.Contains(out.String(), "won't survive a reboot") {
-		t.Errorf("stdout = %q, want the ephemeral note", out.String())
-	}
-}
-
-func TestAgentDaemonizeUnsupportedOnDarwin(t *testing.T) {
-	onDarwin(t)
-	var out, errb bytes.Buffer
-	if code := agent([]string{"daemonize"}, &out, &errb); code != 2 {
-		t.Fatalf("code = %d, want 2", code)
-	}
-	if !strings.Contains(errb.String(), "macOS") {
-		t.Errorf("stderr = %q, want it to name macOS", errb.String())
-	}
-}
-
-func TestAgentStatusDarwinStoppedBeforeFirstUp(t *testing.T) {
-	onDarwin(t)
-	_, _, _, _, restore := darwinPaths(t)
-	defer restore()
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { return "", errFake }
-	defer func() { launchctlRun = oldRun }()
-
-	var out, errb bytes.Buffer
-	if code := agent([]string{"status"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
-	}
-	if !strings.Contains(out.String(), "stopped") {
-		t.Errorf("stdout = %q, want stopped", out.String())
-	}
-}
-
-func TestAgentDownBootsOut(t *testing.T) {
+func TestAgentDarwinUpStartsBrewService(t *testing.T) {
 	agentGOOS = "darwin"
-	defer func() { agentGOOS = runtime.GOOS }()
-	var gotArgs []string
-	oldRun := launchctlRun
-	launchctlRun = func(args ...string) (string, error) { gotArgs = args; return "", nil }
-	defer func() { launchctlRun = oldRun }()
+	t.Cleanup(func() { agentGOOS = runtime.GOOS })
+	calls := stubBrew(t, true, func(args []string) (string, error) { return "", nil })
+	var out, errb bytes.Buffer
+	if code := agent([]string{"up"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d (stderr %s)", code, errb.String())
+	}
+	if len(*calls) != 1 || (*calls)[0][0] != "start" || (*calls)[0][1] != "piper" {
+		t.Errorf("brew services calls = %v, want [[start piper]]", *calls)
+	}
+	if !strings.Contains(out.String(), "piperd started") {
+		t.Errorf("stdout %q", out.String())
+	}
+}
 
+func TestAgentDarwinUpFailurePassesThroughHint(t *testing.T) {
+	agentGOOS = "darwin"
+	t.Cleanup(func() { agentGOOS = runtime.GOOS })
+	stubBrew(t, true, func([]string) (string, error) {
+		return "Error: No available formula with the name \"piper\"", errors.New("exit 1")
+	})
+	var out, errb bytes.Buffer
+	if code := agent([]string{"up"}, &out, &errb); code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(errb.String(), "brew install piperbox/tap/piper") {
+		t.Errorf("stderr %q lacks the install hint", errb.String())
+	}
+}
+
+func TestAgentDarwinDownStopsBrewService(t *testing.T) {
+	agentGOOS = "darwin"
+	t.Cleanup(func() { agentGOOS = runtime.GOOS })
+	calls := stubBrew(t, true, func(args []string) (string, error) { return "", nil })
 	var out, errb bytes.Buffer
 	if code := agent([]string{"down"}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, errb.String())
+		t.Fatalf("code = %d", code)
 	}
-	if len(gotArgs) < 1 || gotArgs[0] != "bootout" {
-		t.Errorf("launchctl args = %v, want bootout ...", gotArgs)
+	if len(*calls) != 1 || (*calls)[0][0] != "stop" {
+		t.Errorf("calls = %v, want [[stop piper]]", *calls)
+	}
+}
+
+func TestAgentDarwinStatusRunning(t *testing.T) {
+	agentGOOS = "darwin"
+	t.Cleanup(func() { agentGOOS = runtime.GOOS })
+	stubBrew(t, true, func(args []string) (string, error) {
+		return `[{"name":"piper","running":true,"status":"started"}]`, nil
+	})
+	origVer := runningAgentVersion
+	runningAgentVersion = func(string) (string, error) { return "9.9.9", nil }
+	t.Cleanup(func() { runningAgentVersion = origVer })
+	origDisk := installedPiperdVersion
+	installedPiperdVersion = func() (string, error) { return "9.9.9", nil }
+	t.Cleanup(func() { installedPiperdVersion = origDisk })
+	var out, errb bytes.Buffer
+	if code := agent([]string{"status"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if !strings.Contains(out.String(), "piperd: running (brew services)") {
+		t.Errorf("stdout %q", out.String())
+	}
+	if !strings.Contains(out.String(), "9.9.9") {
+		t.Errorf("stdout %q lacks version", out.String())
+	}
+}
+
+func TestAgentDarwinStatusStopped(t *testing.T) {
+	agentGOOS = "darwin"
+	t.Cleanup(func() { agentGOOS = runtime.GOOS })
+	stubBrew(t, true, func(args []string) (string, error) {
+		return `[{"name":"piper","running":false,"status":"none"}]`, nil
+	})
+	var out, errb bytes.Buffer
+	if code := agent([]string{"status"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if !strings.Contains(out.String(), "piperd: stopped") {
+		t.Errorf("stdout %q", out.String())
+	}
+}
+
+func TestAgentDarwinStatusNotInstalled(t *testing.T) {
+	agentGOOS = "darwin"
+	t.Cleanup(func() { agentGOOS = runtime.GOOS })
+	stubBrew(t, true, func(args []string) (string, error) {
+		return "Error: No available formula", errors.New("exit 1")
+	})
+	var out, errb bytes.Buffer
+	if code := agent([]string{"status"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if !strings.Contains(out.String(), "not installed") {
+		t.Errorf("stdout %q", out.String())
 	}
 }
 
@@ -691,40 +573,6 @@ func TestAgentUsage(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "usage: piper agent") {
 		t.Errorf("stderr = %q", errb.String())
-	}
-}
-
-// TestMacosDocsMatchGeneratedAgent inherits the doc contract the shipped-plist
-// package used to own: nothing may point users at a plist to install by hand,
-// and the macOS flow is the same `piper agent` verbs as everywhere else.
-func TestMacosDocsMatchGeneratedAgent(t *testing.T) {
-	repoFile := func(parts ...string) string {
-		t.Helper()
-		b, err := os.ReadFile(filepath.Join(append([]string{"..", ".."}, parts...)...))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return string(b)
-	}
-	for _, doc := range [][]string{
-		{"docs", "manual-setup.md"},
-		{"docs", "getting-started.md"},
-	} {
-		if body := repoFile(doc...); strings.Contains(body, "packaging/launchd") {
-			t.Errorf("%s still points at the deleted shipped plist", filepath.Join(doc...))
-		}
-	}
-	manual := repoFile("docs", "manual-setup.md")
-	for _, s := range []string{"piper agent up", "piper agent down"} {
-		if !strings.Contains(manual, s) {
-			t.Errorf("docs/manual-setup.md missing %q", s)
-		}
-	}
-	runbook := repoFile("docs", "runbooks", "git-deploy-e2e.md")
-	for _, s := range []string{"piper agent status", "~/.piper/piper.log", "piper agent down"} {
-		if !strings.Contains(runbook, s) {
-			t.Errorf("runbook missing %q", s)
-		}
 	}
 }
 
