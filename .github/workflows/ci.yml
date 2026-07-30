@@ -32,9 +32,14 @@ jobs:
               - '.dockerignore'
               - 'deploy/compose/**'
               - '.github/workflows/ci.yml'
+            packaging:
+              - '.goreleaser.yaml'
+              - 'packaging/**'
+              - 'test/packaging/**'
+              - '.github/workflows/ci.yml'
 
       - uses: actions/setup-go@v6
-        if: steps.changes.outputs.code == 'true'
+        if: steps.changes.outputs.code == 'true' || steps.changes.outputs.packaging == 'true'
         with:
           go-version: "1.26"
 
@@ -67,6 +72,18 @@ jobs:
           distribution: goreleaser
           version: "~> v2"
           args: check
+
+      - name: Build snapshot packages
+        if: steps.changes.outputs.packaging == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --snapshot --clean
+
+      - name: Verify deb contents
+        if: steps.changes.outputs.packaging == 'true'
+        run: ./test/packaging/verify_deb.sh
 
       - name: Set up QEMU
         if: steps.changes.outputs.docker == 'true'

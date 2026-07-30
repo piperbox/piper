@@ -59,6 +59,46 @@ archives:
     ids: [piper-relay]
     name_template: "piper-relay_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
 
+nfpms:
+  - id: piperd
+    ids: [piperd]
+    package_name: piperd
+    # ConventionalFileName is what maps GOARM=7 → armhf and drops the _linux_
+    # infix; the default template would name this piperd_<ver>_linux_armv7.deb
+    # and silently break the apt pipeline's filename parsing.
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats: [deb]
+    bindir: /usr/bin
+    vendor: piperbox
+    homepage: https://github.com/piperbox/piper
+    maintainer: piperbox maintainers <noreply@piperbox.dev>
+    description: Piper agent — git push to a live HTTPS URL on your own box.
+    license: Apache-2.0
+    section: net
+    contents:
+      - src: packaging/deb/piperd.service
+        dst: /usr/lib/systemd/system/piperd.service
+      - src: packaging/systemd/piperd.env.example
+        dst: /etc/piper/piperd.env
+        type: config
+        file_info:
+          mode: 0600
+    scripts:
+      postinstall: packaging/deb/postinstall.sh
+      preremove: packaging/deb/preremove.sh
+  - id: piper
+    ids: [piper]
+    package_name: piper
+    file_name_template: "{{ .ConventionalFileName }}"
+    formats: [deb]
+    bindir: /usr/bin
+    vendor: piperbox
+    homepage: https://github.com/piperbox/piper
+    maintainer: piperbox maintainers <noreply@piperbox.dev>
+    description: Piper CLI — drive piperd locally, over the LAN, or through the relay.
+    license: Apache-2.0
+    section: net
+
 checksum:
   name_template: "checksums.txt"
   algorithm: sha256
@@ -71,4 +111,5 @@ release:
   prerelease: auto
   extra_files:
     - glob: packaging/systemd/piper-relay.service
+    - glob: packaging/systemd/piperd.service
     - glob: install.sh
