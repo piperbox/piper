@@ -125,6 +125,79 @@ cli_prefix() {
 }
 
 os="$(detect_os)"
+
+# --- platform dispatch -------------------------------------------------------
+# Hand off to the native package channel when possible, so every install lands
+# on a real upgrade channel: the apt repo on Debian-family, Homebrew on macOS.
+# --cli-only/--rc/--version always take the diet path below (apt + the tap
+# carry stable releases only). Spec: docs/superpowers/specs/2026-07-30-*.md
+
+apt_repo_url="${PIPER_APT_URL:-https://apt.piperbox.dev}"
+os_release="${PIPER_OS_RELEASE:-/etc/os-release}"
+
+deb_family() {
+	[ "$os" = linux ] || return 1
+	[ -r "$os_release" ] || return 1
+	grep -E '^(ID|ID_LIKE)=' "$os_release" | grep -Eq 'debian|ubuntu|raspbian' || return 1
+	have apt-get
+}
+
+# warn_stale_copies EXPECTED_DIR — after a package install, an older diet copy
+# earlier on PATH silently keeps running (the #375 shadow trap at install time).
+warn_stale_copies() {
+	expected="$1"
+	for name in piper piperd; do
+		found="$(command -v "$name" 2>/dev/null || true)"
+		if [ -n "$found" ] && [ "$found" != "$expected/$name" ]; then
+			echo "warning: $found shadows $expected/$name on your PATH — remove that older copy"
+		fi
+	done
+}
+
+install_apt() {
+	sudo=""
+	if [ "$(id -u)" -ne 0 ]; then
+		have sudo || die "installing via apt needs root — re-run as root, or install sudo"
+		sudo="sudo"
+	fi
+	echo "setting up the Piper apt repository ($apt_repo_url)…" >&2
+	tmp="$(mktemp -d)"
+	trap 'rm -rf "$tmp"' EXIT
+	fetch "$apt_repo_url/piperbox.gpg" "$tmp/piperbox.gpg" || die "download failed: piperbox.gpg"
+	fetch "$apt_repo_url/piperbox.sources" "$tmp/piperbox.sources" || die "download failed: piperbox.sources"
+	$sudo install -d -m 0755 /etc/apt/keyrings || die "cannot create /etc/apt/keyrings"
+	$sudo install -m 0644 "$tmp/piperbox.gpg" /etc/apt/keyrings/piperbox.gpg || die "cannot install the keyring"
+	$sudo install -m 0644 "$tmp/piperbox.sources" /etc/apt/sources.list.d/piperbox.sources || die "cannot install the sources file"
+	if ! $sudo apt-get update; then
+		# Never leave a half-configured source breaking every later apt run.
+		$sudo rm -f /etc/apt/keyrings/piperbox.gpg /etc/apt/sources.list.d/piperbox.sources
+		die "apt-get update failed — repository configuration rolled back"
+	fi
+	$sudo apt-get install -y piperd piper || die "apt-get install failed"
+	echo "installed piper + piperd via apt — the piperd service is enabled and running"
+	warn_stale_copies /usr/bin
+}
+
+install_brew() {
+	echo "installing via Homebrew…" >&2
+	brew install piperbox/tap/piper || die "brew install failed"
+	brew services start piper || die "brew services start failed"
+	echo "installed piper + piperd via Homebrew — piperd is running (and starts at every login)"
+	warn_stale_copies "$(brew --prefix)/bin"
+}
+
+if [ -z "$cli_only" ] && [ -z "$use_rc" ] && [ -z "$PIPER_VERSION" ]; then
+	if [ "$os" = darwin ] && have brew; then
+		install_brew
+		exit 0
+	fi
+	if deb_family; then
+		install_apt
+		exit 0
+	fi
+fi
+# --- diet path: verified binaries into a prefix ------------------------------
+
 arch="$(detect_arch)"
 tag="$(resolve_version)"
 prefix="$(cli_prefix)"
@@ -137,9 +210,12 @@ else
 	download_verify piper "$tag" "$os" "$arch" "$prefix"
 	echo "installed piper + piperd $tag -> $prefix"
 	if [ "$os" = linux ]; then
-		echo "next: sudo apt install piperd piper (managed service — see README) or docs/manual-setup.md"
+		echo "next — run piperd as a durable service (details: docs/manual-setup.md):"
+		[ "$prefix" = /usr/local/bin ] || echo "  sudo install -m 0755 \"$prefix/piperd\" /usr/local/bin/piperd"
+		echo "  sudo curl -fsSL $PIPER_BASE_URL/$PIPER_REPO/releases/download/$tag/piperd.service -o /etc/systemd/system/piperd.service"
+		echo "  sudo systemctl daemon-reload && sudo systemctl enable --now piperd"
 	else
-		echo "next: see docs/manual-setup.md (Run the agent on macOS)"
+		echo "next: install Homebrew, then \`brew install piperbox/tap/piper && brew services start piper\` — or run \"$prefix/piperd\" directly (foreground)"
 	fi
 fi
 case ":$PATH:" in
