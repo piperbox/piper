@@ -63,9 +63,9 @@ For a headless Mac where piperd should come up at boot, before any login, use
 the system-level variant instead: `sudo brew services start piper`. State
 lives at `~/.piper/piperd`, and apps are served at
 `http://<name>.piper.localhost`. The relay/public-URL flow works here too:
-run `piper connect`, run the `sudo` command it prints, then `brew services
-restart piper` to pick up the change. After `brew upgrade`, run `brew
-services restart piper` to pick up the new binary. See
+run `piper connect`, then `brew services restart piper` to pick up the
+enrollment. After `brew upgrade`, run `brew services restart piper` to pick
+up the new binary. See
 [`manual-setup.md`](manual-setup.md#run-the-agent-on-macos-dev-box).
 
 ### Anywhere else (diet)
