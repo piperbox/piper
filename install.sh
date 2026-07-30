@@ -170,11 +170,15 @@ install_apt() {
 	$sudo install -m 0644 "$tmp/piperbox.sources" /etc/apt/sources.list.d/piperbox.sources || die "cannot install the sources file"
 	if ! $sudo apt-get update; then
 		# Never leave a half-configured source breaking every later apt run.
-		$sudo rm -f /etc/apt/keyrings/piperbox.gpg /etc/apt/sources.list.d/piperbox.sources
+		$sudo rm -f /etc/apt/keyrings/piperbox.gpg /etc/apt/sources.list.d/piperbox.sources || true
 		die "apt-get update failed — repository configuration rolled back"
 	fi
 	$sudo apt-get install -y piperd piper || die "apt-get install failed"
-	echo "installed piper + piperd via apt — the piperd service is enabled and running"
+	if [ -d /run/systemd/system ]; then
+		echo "installed piper + piperd via apt — the piperd service is enabled and running"
+	else
+		echo "installed piper + piperd via apt — no systemd detected, so piperd was not started (start it once systemd is available, or run /usr/bin/piperd directly)"
+	fi
 	warn_stale_copies /usr/bin
 }
 

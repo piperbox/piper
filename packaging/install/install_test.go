@@ -546,6 +546,18 @@ func TestAptPathConfiguresRepoAndInstalls(t *testing.T) {
 	if !strings.Contains(out, "installed piper + piperd via apt") {
 		t.Errorf("missing success line:\n%s", out)
 	}
+	// The success line's claim about piperd running depends on whether this
+	// host actually has systemd — install.sh checks /run/systemd/system, not
+	// a fake, so the test environment decides which variant to expect.
+	if _, statErr := os.Stat("/run/systemd/system"); statErr != nil {
+		if !strings.Contains(out, "no systemd detected, so piperd was not started") {
+			t.Errorf("host has no /run/systemd/system; expected the no-systemd variant:\n%s", out)
+		}
+	} else {
+		if !strings.Contains(out, "the piperd service is enabled and running") {
+			t.Errorf("host has /run/systemd/system; expected the systemd variant:\n%s", out)
+		}
+	}
 }
 
 func TestAptPathRollsBackOnUpdateFailure(t *testing.T) {
