@@ -223,7 +223,7 @@ func pollActive(attempts int) (string, bool) {
 // printRestartHint explains a crash loop, which is the one state a user cannot
 // act on from the word alone: "restarting" without context reads like a
 // transient blip rather than a unit that will never come up. journalCmd is the
-// scope-correct journal invocation, since the rootless unit needs --user.
+// journal invocation to point at.
 func printRestartHint(stdout io.Writer, state, journalCmd string) {
 	if state != "activating" {
 		return
@@ -247,20 +247,10 @@ func unitStateWord(state string) string {
 	}
 }
 
-// userUnitPath returns the installed systemd user-unit path; a var so tests can
-// point it at a temp file.
-var userUnitPath = func() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".config", "systemd", "user", userUnitName+".service"), nil
-}
-
 // agentEUID is os.Geteuid; a var so tests can stub identity.
 var agentEUID = os.Geteuid
 
-// agent dispatches `piper agent ...` to the platform's rootless agent manager.
+// agent dispatches `piper agent ...` to the platform's agent manager.
 func agent(args []string, stdout, stderr io.Writer) int {
 	switch agentGOOS {
 	case "darwin":
@@ -377,7 +367,8 @@ func unitLoaded() bool {
 	return err == nil && strings.TrimSpace(out) == "loaded"
 }
 
-const notInstalledLinux = "piperd is not installed — `sudo apt install piperd` (see the README for other channels)"
+const notInstalledLinuxHint = "`sudo apt install piperd` (see the README for other channels)"
+const notInstalledLinux = "piperd is not installed — " + notInstalledLinuxHint
 
 func agentUpLinux(stdout, stderr io.Writer) int {
 	if !unitLoaded() {
@@ -421,7 +412,7 @@ func agentDownLinux(stdout, stderr io.Writer) int {
 
 func agentStatusLinux(stdout, stderr io.Writer) int {
 	if !unitLoaded() {
-		fmt.Fprintln(stdout, "piperd: not installed — `sudo apt install piperd` (see the README for other channels)")
+		fmt.Fprintln(stdout, "piperd: not installed — "+notInstalledLinuxHint)
 		return 0
 	}
 	if state, ok := pollActive(statusPollAttempts); !ok {
