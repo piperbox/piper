@@ -133,11 +133,37 @@ goreleaser release --snapshot --clean
 ./test/packaging/verify_brew.sh
 ```
 
-Expected: `goreleaser check` warns about the `brews` deprecation (accepted) but exits 0; both verify scripts print ok. If `goreleaser check` treats the deprecation as an error, that would be a goreleaser behavior change — stop and report BLOCKED rather than switching to casks.
+Expected: both verify scripts print ok, and the snapshot run succeeds with a deprecation *warning*. `goreleaser check`, however, exits **2** on any deprecated config (verified against v2.17.1 `cmd/check.go`) — exit 2 means "valid but deprecated", distinct from exit 1 "invalid". Locally, treat exit 2 as pass:
+
+```bash
+goreleaser check; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 2 ] || exit "$rc"
+```
 
 - [ ] **Step 5: Wire CI and the release workflow**
 
-In `.github/workflows/ci.yml`, directly after the `Verify deb contents` step:
+In `.github/workflows/ci.yml`, first replace the existing `goreleaser check` action-step with an install + tolerant shell step (the required `verify` job must not go permanently red now that the config permanently carries a deprecated-but-deliberate `brews` section):
+
+```yaml
+      - name: Install goreleaser
+        if: steps.changes.outputs.code == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          install-only: true
+
+      - name: goreleaser check
+        if: steps.changes.outputs.code == 'true'
+        # Exit 2 = valid config with deprecated options — accepted: `brews` is
+        # deliberate (casks can't declare brew services). Exit 1 = invalid,
+        # still fails.
+        run: |
+          goreleaser check && exit 0
+          rc=$?
+          [ "$rc" = 2 ] || exit "$rc"
+```
+
+The later `Build snapshot packages` step keeps using the action as-is (`release --snapshot` only warns on deprecations). Then, directly after the `Verify deb contents` step:
 
 ```yaml
       - name: Verify brew archives

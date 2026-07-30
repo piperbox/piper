@@ -65,13 +65,23 @@ jobs:
         if: steps.changes.outputs.code == 'true'
         run: make cross
 
-      - name: goreleaser check
+      - name: Install goreleaser
         if: steps.changes.outputs.code == 'true'
         uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
           version: "~> v2"
-          args: check
+          install-only: true
+
+      - name: goreleaser check
+        if: steps.changes.outputs.code == 'true'
+        # Exit 2 = valid config with deprecated options — accepted: `brews` is
+        # deliberate (casks can't declare brew services). Exit 1 = invalid,
+        # still fails.
+        run: |
+          goreleaser check && exit 0
+          rc=$?
+          [ "$rc" = 2 ] || exit "$rc"
 
       - name: Build snapshot packages
         if: steps.changes.outputs.packaging == 'true'
@@ -84,6 +94,10 @@ jobs:
       - name: Verify deb contents
         if: steps.changes.outputs.packaging == 'true'
         run: ./test/packaging/verify_deb.sh
+
+      - name: Verify brew archives
+        if: steps.changes.outputs.packaging == 'true'
+        run: ./test/packaging/verify_brew.sh
 
       - name: Set up QEMU
         if: steps.changes.outputs.docker == 'true'

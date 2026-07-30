@@ -66,13 +66,13 @@ The workflow takes ~4 minutes. goreleaser auto-marks `rc`/`beta`/`alpha` tags as
 
 ## 5. Verify what actually published
 
-**Expect 25 assets.** Three binaries (`piper`, `piperd`, `piper-relay`) × 5 platforms (linux amd64/arm64/armv7, darwin amd64/arm64) = 15, plus six `.deb` packages (`piperd`/`piper` × amd64/arm64/armhf), `piperd.service`, `install.sh`, `piper-relay.service`, and `checksums.txt`.
+**Expect 30 assets.** Three binaries (`piper`, `piperd`, `piper-relay`) × 5 platforms (linux amd64/arm64/armv7, darwin amd64/arm64) = 15, plus six `.deb` packages (`piperd`/`piper` × amd64/arm64/armhf), `piperd.service`, `install.sh`, `piper-relay.service`, `checksums.txt`, and the five `piper-bundle` tarballs (linux amd64/arm64/armv7, darwin amd64/arm64).
 
 ```sh
 gh release view <tag> --json assets --jq '.assets | length'
 ```
 
-Releases before `v0.7.0` had 22 — the four `piperd` unit/env files are no longer published because the CLI embeds them. `v0.13.0` added the debs and `piperd.service` (18 → 25). If you see 18, the nfpm/deb pipeline regressed.
+Releases before `v0.7.0` had 22 — the four `piperd` unit/env files are no longer published because the CLI embeds them. `v0.13.0` added the debs and `piperd.service` (18 → 25). `v0.14.0` added the five piper-bundle tarballs (25 → 30). If you see 18, the nfpm/deb pipeline regressed.
 
 ### Smoke-test the published installer
 
@@ -104,6 +104,15 @@ docker run --rm debian:stable sh -c 'apt-get update -qq && apt-get install -y -q
 ```
 
 Expected: both versions print the tag just cut. If it times out on DNS/cert propagation (first publish only), re-run once before debugging.
+
+### Homebrew tap (stable tags only)
+
+goreleaser pushes the updated formula to piperbox/homebrew-tap. Confirm it landed and CI passed:
+
+```sh
+gh api repos/piperbox/homebrew-tap/commits/main -q '.commit.message'   # names the new version
+gh run list -R piperbox/homebrew-tap -L 1
+```
 
 ## 6. Publish the notes
 
