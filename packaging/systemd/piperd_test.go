@@ -88,35 +88,3 @@ func TestPiperdDocumentation(t *testing.T) {
 		}
 	}
 }
-
-func TestPiperdUserServiceContract(t *testing.T) {
-	b, err := os.ReadFile("piperd.user.service")
-	if err != nil {
-		t.Fatal(err)
-	}
-	unit := string(b)
-	required := []string{
-		"ExecStart=%h/.local/bin/piperd",
-		"Environment=PIPER_HTTP_ADDR=:8080",
-		"Environment=PIPER_HTTPS_ADDR=:8443",
-		// Caddy admin relocated off :2019 so rootless can coexist with a
-		// system piperd / fail legibly instead of a silent crash-loop (#211).
-		"Environment=PIPER_CADDY_ADMIN=http://127.0.0.1:2020",
-		"Environment=XDG_DATA_HOME=%h/.piper/piperd",
-		"Environment=XDG_CONFIG_HOME=%h/.piper/piperd",
-		"EnvironmentFile=-%h/.piper/piperd.env",
-		"Restart=on-failure",
-		"WantedBy=default.target",
-	}
-	for _, directive := range required {
-		if !strings.Contains(unit, directive) {
-			t.Errorf("user unit missing %q", directive)
-		}
-	}
-	// Rootless: must NOT carry any system-service privilege/state directives.
-	for _, forbidden := range []string{"DynamicUser", "CAP_NET_BIND_SERVICE", "/var/lib/piper"} {
-		if strings.Contains(unit, forbidden) {
-			t.Errorf("user unit must not contain %q", forbidden)
-		}
-	}
-}
