@@ -676,18 +676,25 @@ func repoRoot(t *testing.T) string {
 }
 
 func TestInstallDocumentation(t *testing.T) {
-	// The README is the lean quick-start entry point (apt on Linux, brew on
-	// macOS); the curl installer and its flags live in docs/getting-started.md
-	// (see #181, #446).
+	// The README leads with the universal curl front door; the per-channel
+	// detail (apt lines, brew, diet flags, source builds) lives in
+	// docs/getting-started.md (#181, #447).
 	docs := map[string][]string{
 		"README.md": {
+			"install.sh | sh",
 			"sudo apt install piperd piper",
 			"brew install piperbox/tap/piper",
 		},
 		filepath.Join("docs", "getting-started.md"): {
+			"apt.piperbox.dev",
+			"brew services start piper",
 			"--cli-only",
 			"--rc",
 			"PIPER_ADDR",
+		},
+		filepath.Join("docs", "manual-setup.md"): {
+			"systemctl enable --now piperd",
+			"piperd.service",
 		},
 	}
 	for name, wants := range docs {

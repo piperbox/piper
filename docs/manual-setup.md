@@ -10,17 +10,39 @@ source, on a non-Debian distro, or wiring your own automation.
 On the box that runs your apps (a Pi, a VPS, a laptop), install the static
 `piperd` binary and the shipped systemd unit so the agent runs headless and comes back
 on boot (`install` is the coreutils command — copy-into-place with a mode, needing root
-to write these system paths):
+to write these system paths). If you built `piperd` locally, the unit file is
+already in your checkout:
 
 ```bash
 sudo install -m 0755 bin/piperd /usr/local/bin/piperd
 sudo install -m 0644 packaging/systemd/piperd.service \
   /etc/systemd/system/piperd.service
+```
+
+No checkout on hand — e.g. you installed with the diet curl installer instead
+of building from source? Fetch the identical unit from the release you
+installed; this is exactly what the installer's own next-steps print when it
+can't hand off to apt:
+
+```bash
+sudo curl -fsSL https://github.com/piperbox/piper/releases/download/vX.Y.Z/piperd.service \
+  -o /etc/systemd/system/piperd.service
+```
+
+Either way, seed the env file and enable the service (`piperd.env` is
+optional — the unit's `EnvironmentFile=-/etc/piper/piperd.env` tolerates a
+missing file — but seeding it from the example gives you a documented place
+to override defaults):
+
+```bash
 sudo install -d -m 0700 /etc/piper
 sudo install -m 0600 packaging/systemd/piperd.env.example /etc/piper/piperd.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now piperd
 ```
+
+(No checkout for `piperd.env.example` either? Fetch it from the repo instead:
+`sudo curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/packaging/systemd/piperd.env.example -o /etc/piper/piperd.env && sudo chmod 0600 /etc/piper/piperd.env`.)
 
 The unit runs as a `DynamicUser` in the `docker` group (so piperd can drive the host
 Docker daemon), keeps state under `PIPER_DATA_DIR=/var/lib/piper`, and binds `:80`/`:443`
