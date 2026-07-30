@@ -82,9 +82,11 @@ Two packages, arches amd64 / arm64 / armhf:
   (same hardening as today's `packaging/systemd/piperd.service`:
   DynamicUser, StateDirectory=piper, CAP_NET_BIND_SERVICE, docker group);
   `/etc/piper/piperd.env` as a **conffile** (dpkg preserves operator edits);
-  postinst = daemon-reload + `enable --now` on fresh install, restart on
-  upgrade; prerm = stop + disable. The upgrade restart permanently kills the
-  "new binary on disk, old process running" trap (#375) on apt boxes.
+  postinst = daemon-reload + `enable --now` on fresh install, restart a
+  *running* piperd on upgrade (a deliberately stopped one stays stopped —
+  Debian's try-restart convention); prerm = stop + disable. The upgrade
+  restart permanently kills the "new binary on disk, old process running"
+  trap (#375) on apt boxes.
 - **`piper`** — `/usr/bin/piper` only, so laptops can `apt install piper`.
 
 No Docker dependency — it stays a documented prerequisite (users legitimately
