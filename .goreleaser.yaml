@@ -58,6 +58,9 @@ archives:
   - id: piper-relay
     ids: [piper-relay]
     name_template: "piper-relay_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+  - id: piper-bundle
+    ids: [piper, piperd]
+    name_template: "piper-bundle_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
 
 nfpms:
   - id: piperd
@@ -98,6 +101,42 @@ nfpms:
     description: Piper CLI — drive piperd locally, over the LAN, or through the relay.
     license: Apache-2.0
     section: net
+
+# `brews` is deprecated in favor of homebrew_casks, but casks cannot declare
+# `brew services` blocks — a formula with a `service do` block is the whole
+# point, so the deprecation warning is accepted deliberately (spec 2026-07-30).
+brews:
+  - name: piper
+    ids: [piper-bundle]
+    repository:
+      owner: piperbox
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/piperbox/piper
+    description: "Git push -> live HTTPS URL on hardware you own"
+    license: Apache-2.0
+    # auto: prerelease (RC) tags never touch the tap.
+    skip_upload: auto
+    install: |
+      bin.install "piper"
+      bin.install "piperd"
+    caveats: |
+      Run the Piper agent now and at every login:
+        brew services start piper
+      Boot-durable instead (headless Macs, runs as root):
+        sudo brew services start piper
+      brew upgrade does NOT restart a running agent — after upgrading run:
+        brew services restart piper
+    service: |
+      run [opt_bin/"piperd"]
+      keep_alive true
+      log_path var/"log/piperd.log"
+      error_log_path var/"log/piperd.err.log"
+      environment_variables XDG_DATA_HOME: var/"piper", XDG_CONFIG_HOME: var/"piper"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/piper --version")
 
 checksum:
   name_template: "checksums.txt"

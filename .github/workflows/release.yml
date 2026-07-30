@@ -33,6 +33,7 @@ jobs:
           # release and its RC point at the same commit (v0.2.1 + v0.2.1-rc.2) —
           # it then rebuilt the RC and collided with its existing assets.
           GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
 
       - name: Publish to apt repo
         # Stable tags only: RCs carry a -suffix and never reach apt.
