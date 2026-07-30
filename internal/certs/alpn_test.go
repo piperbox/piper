@@ -6,7 +6,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/asn1"
+	"log"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/go-acme/lego/v4/challenge/tlsalpn01"
 )
@@ -141,4 +145,55 @@ func TestALPNSolverCleanUp(t *testing.T) {
 	if _, err := dialSolver(t, s.Addr(), domain); err == nil {
 		t.Fatal("handshake succeeded after CleanUp, want failure")
 	}
+}
+
+// syncLogBuffer is a concurrency-safe log sink: the solver's handshake
+// goroutine can still be inside log.Printf writing to it while the test polls
+// for the line, and a bare bytes.Buffer is not safe for that concurrent use.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestALPNSolverLogsHandshakeFailures pins the operator signal for failed
+// validations (#242): an unknown-SNI miss must leave a log line. With
+// per-domain renewal loops running, a validator that keeps failing would
+// otherwise be silent until someone went looking for the Obtain error. The
+// happy path stays quiet — nothing is asserted for successful handshakes
+// because nothing is logged.
+func TestALPNSolverLogsHandshakeFailures(t *testing.T) {
+	var logged syncLogBuffer
+	prevOut := log.Writer()
+	log.SetOutput(&logged)
+	t.Cleanup(func() { log.SetOutput(prevOut) })
+
+	s, err := NewALPNSolver("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("NewALPNSolver: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := dialSolver(t, s.Addr(), "unknown.example.com"); err == nil {
+		t.Fatal("handshake succeeded for an SNI with no pending challenge, want failure")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logged.String(), `no pending challenge for "unknown.example.com"`) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("failed handshake not logged; log = %q", logged.String())
 }
