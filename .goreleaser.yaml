@@ -129,12 +129,16 @@ brews:
         sudo brew services start piper
       brew upgrade does NOT restart a running agent — after upgrading run:
         brew services restart piper
+    # ENV["HOME"] is evaluated when `brew services` generates the plist, as the invoking user — so the user-level service gets ~/.piper/piperd
+    # (exactly config.DefaultDataDir(), keeping piper connect's relay.json where piperd reads it, and preserving data from pre-brew macOS installs),
+    # and sudo brew services gets /var/root/.piper/piperd (deterministic, self-consistent). The XDG pair relocates embedded-Caddy/certmagic
+    # state to the same place, matching the old LaunchAgent's behavior.
     service: |
       run [opt_bin/"piperd"]
       keep_alive true
       log_path var/"log/piperd.log"
       error_log_path var/"log/piperd.err.log"
-      environment_variables XDG_DATA_HOME: var/"piper", XDG_CONFIG_HOME: var/"piper"
+      environment_variables PIPER_DATA_DIR: "#{ENV["HOME"]}/.piper/piperd", XDG_DATA_HOME: "#{ENV["HOME"]}/.piper/piperd", XDG_CONFIG_HOME: "#{ENV["HOME"]}/.piper/piperd"
     test: |
       assert_match version.to_s, shell_output("#{bin}/piper --version")
 
