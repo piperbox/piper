@@ -118,8 +118,15 @@ type handshakeAck struct {
 // afterwards (a disabled account), which it logs itself.
 func Dial(conn net.Conn, token, baseDomain string) (*Session, error) {
 	payload, _ := json.Marshal(handshake{Token: token, BaseDomain: baseDomain})
-	if err := writeFrame(conn, payload); err != nil {
-		return nil, err
+	// Bound the write like the ack wait below: a relay that accepts the
+	// connection and then stops reading lets the send buffer and receive
+	// window fill, and an undeadlined write pins the reconnect loop the
+	// same way an undeadlined read does.
+	_ = conn.SetWriteDeadline(time.Now().Add(handshakeWriteTimeout))
+	writeErr := writeFrame(conn, payload)
+	_ = conn.SetWriteDeadline(time.Time{})
+	if writeErr != nil {
+		return nil, writeErr
 	}
 	// Bound the wait: a relay that accepts the connection and then goes quiet
 	// must not pin the agent, or the reconnect loop can never retry.
