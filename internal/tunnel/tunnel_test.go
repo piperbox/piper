@@ -240,6 +240,46 @@ func TestDialRejectionCarriesReason(t *testing.T) {
 	}
 }
 
+// A relay that accepts the connection but never reads fills the kernel send
+// buffer and the peer's receive window, after which the handshake write
+// blocks with nothing to release it — pinning the reconnect loop exactly
+// like an unbounded ack wait. net.Pipe has no buffer at all, so a peer that
+// never reads makes the write block deterministically.
+func TestDialBoundsTheHandshakeWrite(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	// Fake relay: holds its end but never reads a byte.
+
+	prev := handshakeWriteTimeout
+	handshakeWriteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeWriteTimeout = prev })
+
+	type dialRes struct {
+		sess *Session
+		err  error
+	}
+	resCh := make(chan dialRes, 1)
+	start := time.Now()
+	go func() {
+		sess, err := Dial(c, "tok", "alice.example.com")
+		resCh <- dialRes{sess, err}
+	}()
+
+	select {
+	case res := <-resCh:
+		if res.err == nil {
+			res.sess.Close()
+			t.Fatal("expected Dial to fail when the relay never reads the handshake")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Dial blocked %v on the handshake write (deadline not enforced)", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Dial hung on the handshake write (no write deadline)")
+	}
+}
+
 // A relay that accepts the connection but never acks must not pin the agent
 // forever: the reconnect loop can only retry if Dial returns.
 func TestDialBoundsTheAckWait(t *testing.T) {

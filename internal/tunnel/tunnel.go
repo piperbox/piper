@@ -25,6 +25,10 @@ var preAuthReadTimeout = 10 * time.Second
 // override it to a tiny value.
 var ackReadTimeout = 10 * time.Second
 
+// handshakeWriteTimeout bounds the agent's handshake write. Tests override it
+// to a tiny value.
+var handshakeWriteTimeout = 10 * time.Second
+
 // Auth validates a client's presented token and claimed base domain. A non-nil
 // return rejects the connection.
 type Auth func(token, baseDomain string) error
