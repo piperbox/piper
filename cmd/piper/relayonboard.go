@@ -280,7 +280,7 @@ func connect(o connectOpts, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	en, err := relayclient.New(cc.RelayAPI).Enroll(ctx, cc.AccountCredential)
+	en, err := relayclient.New(cc.RelayAPI).Enroll(ctx, cc.AccountCredential, "", "")
 	switch {
 	case errors.Is(err, relayclient.ErrBadCredential):
 		fmt.Fprintln(stderr, "error: relay rejected your account credential; run `piper login` again")

@@ -196,9 +196,15 @@ type Enrollment struct {
 // ErrQuotaExceeded is returned when an account is already at its agent cap.
 var ErrQuotaExceeded = errors.New("account agent quota exceeded")
 
-// EnrollForAccount mints an enrollment token for a new agent bound to accountID,
+// EnrollForAccount mints an enrollment token for an agent bound to accountID,
 // assigning it "<hash>-<username>.<apex>". Enforces the per-account agent cap.
-func (s *Store) EnrollForAccount(accountID string) (Enrollment, error) {
+//
+// A non-empty boxID makes the call idempotent per box: if (accountID, boxID)
+// already has an agent row, the row is kept — same name, base domain, webhook
+// secret, quota slot — and only the enrollment token rotates (the old token
+// stops authenticating). An empty boxID keeps insert-per-call semantics for
+// operator/legacy enrolls.
+func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
 	// The immediate transaction (see Open) serializes the cap check and insert
 	// so concurrent enrollments cannot overshoot the cap.
 	tx, err := s.db.Begin()
@@ -213,6 +219,32 @@ func (s *Store) EnrollForAccount(accountID string) (Enrollment, error) {
 			return Enrollment{}, ErrUnknownAccount
 		}
 		return Enrollment{}, err
+	}
+
+	if boxID != "" {
+		var base, secret string
+		err := tx.QueryRow(
+			`SELECT base_domain, webhook_secret FROM agents WHERE account_id=? AND box_id=?`,
+			accountID, boxID).Scan(&base, &secret)
+		if err == nil {
+			raw := make([]byte, 32)
+			if _, err := rand.Read(raw); err != nil {
+				return Enrollment{}, err
+			}
+			tok := hex.EncodeToString(raw)
+			if _, err := tx.Exec(
+				`UPDATE agents SET token_hash=? WHERE account_id=? AND box_id=?`,
+				hashToken(tok), accountID, boxID); err != nil {
+				return Enrollment{}, err
+			}
+			if err := tx.Commit(); err != nil {
+				return Enrollment{}, err
+			}
+			return Enrollment{Token: tok, BaseDomain: base, WebhookSecret: secret}, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Enrollment{}, err
+		}
 	}
 
 	var count int
@@ -244,9 +276,9 @@ func (s *Store) EnrollForAccount(accountID string) (Enrollment, error) {
 		secret := hex.EncodeToString(rawSecret)
 
 		_, err := tx.Exec(
-			`INSERT INTO agents(name, token_hash, base_domain, account_id, webhook_secret, created_at)
-			 VALUES(?,?,?,?,?,?)`,
-			base, hashToken(tok), base, accountID, secret, now)
+			`INSERT INTO agents(name, token_hash, base_domain, account_id, box_id, webhook_secret, created_at)
+			 VALUES(?,?,?,?,?,?,?)`,
+			base, hashToken(tok), base, accountID, nullIfEmpty(boxID), secret, now)
 		if err == nil {
 			if err := tx.Commit(); err != nil {
 				return Enrollment{}, err
@@ -259,4 +291,13 @@ func (s *Store) EnrollForAccount(accountID string) (Enrollment, error) {
 		return Enrollment{}, err
 	}
 	return Enrollment{}, errors.New("could not assign a unique base domain")
+}
+
+// nullIfEmpty stores an absent box_id as NULL, keeping the partial unique
+// index's WHERE clause and this column's "no box identity" reading aligned.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }

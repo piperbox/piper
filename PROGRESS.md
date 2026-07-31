@@ -43,6 +43,7 @@ Goal: public HTTPS from behind NAT/CGNAT — `piperd` dials an outbound yamux tu
 - ✅ `certs` — lego DNS-01 wildcard issuance + renewal — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ `caddy` — `:443` TLS listener + load-PEM — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ `piper-relay` — enrollment (per-agent tokens), SNI passthrough, tunnel server — [#10](https://github.com/piperbox/piper/issues/10)
+- ✅ idempotent enroll — re-claim by `(account, box_id)` reuses the box's slot and rotates the token — [#458](https://github.com/piperbox/piper/issues/458)
 - ✅ `piper-relay` managed systemd service + operator docs — [#38](https://github.com/piperbox/piper/issues/38)
 - ✅ `piper-relay` infra-only ops endpoints — Prometheus `/metrics` + ring-buffered `/logs`, env-toggled, bind-address isolated from the SNI dispatcher — [#396](https://github.com/piperbox/piper/issues/396)
 - ✅ `piperd` — outbound tunnel client + cert wiring (additive; LAN-only unchanged) — [#10](https://github.com/piperbox/piper/issues/10)

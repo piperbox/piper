@@ -230,7 +230,7 @@ func TestIngressRoutesOrgInstallToOrgOwnedBox(t *testing.T) {
 	if err := st.SetOrgGitHub(org.ID, "acme"); err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(org.ID)
+	en, err := st.EnrollForAccount(org.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

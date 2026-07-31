@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,7 +115,7 @@ func TestDisableAccountLeavesTheSameNamedOrgAlone(t *testing.T) {
 	alice, _ := st.UpsertAccount("gh-alice", "alice")
 	user, _ := st.UpsertAccount("gh-acme", "acme")
 	org, _ := st.CreateOrg(alice.ID, "acme")
-	orgAgent, err := st.EnrollForAccount(org.ID)
+	orgAgent, err := st.EnrollForAccount(org.ID, "")
 	if err != nil {
 		t.Fatalf("org enroll: %v", err)
 	}
@@ -154,7 +155,7 @@ func TestEnrollForAccountRejectsUnknownAccount(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 
-	if _, err := st.EnrollForAccount("no-such-account"); err != ErrUnknownAccount {
+	if _, err := st.EnrollForAccount("no-such-account", ""); err != ErrUnknownAccount {
 		t.Fatalf("unknown account err = %v, want ErrUnknownAccount", err)
 	}
 }
@@ -164,7 +165,7 @@ func TestEnrollForAccountAssignsLabelAndBindsAccount(t *testing.T) {
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "erin")
 
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatalf("EnrollForAccount: %v", err)
 	}
@@ -190,11 +191,11 @@ func TestEnrollForAccountEnforcesCap(t *testing.T) {
 	acc, _ := st.UpsertAccount("sub-1", "frank")
 
 	for i := 0; i < 2; i++ {
-		if _, err := st.EnrollForAccount(acc.ID); err != nil {
+		if _, err := st.EnrollForAccount(acc.ID, ""); err != nil {
 			t.Fatalf("enroll %d: %v", i, err)
 		}
 	}
-	if _, err := st.EnrollForAccount(acc.ID); err != ErrQuotaExceeded {
+	if _, err := st.EnrollForAccount(acc.ID, ""); err != ErrQuotaExceeded {
 		t.Fatalf("over-cap err = %v, want ErrQuotaExceeded", err)
 	}
 }
@@ -203,7 +204,7 @@ func TestAuthenticateRejectsDisabledAccountAgent(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "grace")
-	en, _ := st.EnrollForAccount(acc.ID)
+	en, _ := st.EnrollForAccount(acc.ID, "")
 
 	if err := st.DisableAccount(acc.Username, "user"); err != nil {
 		t.Fatalf("DisableAccount: %v", err)
@@ -248,5 +249,101 @@ func TestUpsertAccountStoresAndRefreshesGithubLogin(t *testing.T) {
 	}
 	if got.GithubLogin != "alice-renamed" {
 		t.Fatalf("authenticated GithubLogin = %q, want alice-renamed", got.GithubLogin)
+	}
+}
+
+func TestEnrollForAccountUpsertsByBoxID(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "erin")
+
+	first, err := st.EnrollForAccount(acc.ID, "box-aaaa")
+	if err != nil {
+		t.Fatalf("first enroll: %v", err)
+	}
+	second, err := st.EnrollForAccount(acc.ID, "box-aaaa")
+	if err != nil {
+		t.Fatalf("re-enroll: %v", err)
+	}
+	if second.BaseDomain != first.BaseDomain {
+		t.Fatalf("base domain changed on re-enroll: %q -> %q", first.BaseDomain, second.BaseDomain)
+	}
+	if second.WebhookSecret != first.WebhookSecret {
+		t.Fatalf("webhook secret changed on re-enroll")
+	}
+	if second.Token == first.Token {
+		t.Fatal("token did not rotate on re-enroll")
+	}
+	// The rotated token authenticates; the old one no longer does.
+	if _, err := st.Authenticate(second.Token); err != nil {
+		t.Fatalf("new token rejected: %v", err)
+	}
+	if _, err := st.Authenticate(first.Token); err == nil {
+		t.Fatal("old token still authenticates after rotation")
+	}
+	// One row, one quota slot.
+	var count int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id=?`, acc.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("agents rows = %d, want 1", count)
+	}
+}
+
+func TestEnrollForAccountUpsertSkipsQuotaAtCap(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 1, 10, 5) // cap of one
+	acc, _ := st.UpsertAccount("sub-1", "erin")
+
+	if _, err := st.EnrollForAccount(acc.ID, "box-aaaa"); err != nil {
+		t.Fatalf("enroll at empty cap: %v", err)
+	}
+	// Re-enrolling the same box at cap reuses the slot.
+	if _, err := st.EnrollForAccount(acc.ID, "box-aaaa"); err != nil {
+		t.Fatalf("re-enroll at cap: %v", err)
+	}
+	// A different box is over quota.
+	if _, err := st.EnrollForAccount(acc.ID, "box-bbbb"); !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("new box at cap: err = %v, want ErrQuotaExceeded", err)
+	}
+}
+
+func TestEnrollForAccountEmptyBoxIDInsertsFreshRows(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, _ := st.UpsertAccount("sub-1", "erin")
+
+	a, err := st.EnrollForAccount(acc.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := st.EnrollForAccount(acc.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.BaseDomain == b.BaseDomain {
+		t.Fatal("empty box_id must keep insert-per-call semantics")
+	}
+}
+
+func TestEnrollForAccountBoxIDScopedPerAccount(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	a1, _ := st.UpsertAccount("sub-1", "erin")
+	a2, _ := st.UpsertAccount("sub-2", "frank")
+
+	e1, err := st.EnrollForAccount(a1.ID, "box-aaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same box_id under another account is a distinct agent, not an upsert
+	// into someone else's row.
+	e2, err := st.EnrollForAccount(a2.ID, "box-aaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e1.BaseDomain == e2.BaseDomain {
+		t.Fatal("box_id collided across accounts")
 	}
 }

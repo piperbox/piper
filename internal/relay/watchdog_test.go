@@ -70,7 +70,7 @@ func TestDisabledWatchdogEvictsLiveSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestDeletedAgentWatchdogEvictsLiveSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestPostDisableRedialRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -247,7 +247,7 @@ func TestWatchdogTransientReadErrorKeepsSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,7 +21,7 @@ func newAccountAgent(t *testing.T) (*Store, string) {
 	if err != nil {
 		t.Fatalf("UpsertAccount: %v", err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatalf("EnrollForAccount: %v", err)
 	}
@@ -192,11 +192,11 @@ func TestRegisterHostnameIsPerAgent(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	boxA, err := st.EnrollForAccount(acc.ID)
+	boxA, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	boxB, err := st.EnrollForAccount(acc.ID)
+	boxB, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,8 +220,8 @@ func TestDeleteAgentReclaimsItsAppSlots(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 1, 5) // one app per account
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	boxA, _ := st.EnrollForAccount(acc.ID)
-	boxB, _ := st.EnrollForAccount(acc.ID)
+	boxA, _ := st.EnrollForAccount(acc.ID, "")
+	boxB, _ := st.EnrollForAccount(acc.ID, "")
 	if _, err := st.RegisterHostname(boxA.BaseDomain, "blog", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestReconcileHostnamesPrunesAppsTheBoxNoLongerHas(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	box, _ := st.EnrollForAccount(acc.ID)
+	box, _ := st.EnrollForAccount(acc.ID, "")
 	kept, err := st.RegisterHostname(box.BaseDomain, "blog", 0)
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +274,7 @@ func TestReconcileHostnamesRecreatesMissingRows(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	box, _ := st.EnrollForAccount(acc.ID)
+	box, _ := st.EnrollForAccount(acc.ID, "")
 
 	live, _, err := st.ReconcileHostnames(box.BaseDomain, []tunnel.AppRef{{App: "blog"}})
 	if err != nil {
@@ -291,7 +291,7 @@ func TestReconcileHostnamesIsHostnameStableAcrossAPruneCycle(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	box, _ := st.EnrollForAccount(acc.ID)
+	box, _ := st.EnrollForAccount(acc.ID, "")
 	before, _ := st.RegisterHostname(box.BaseDomain, "blog", 0)
 
 	if _, _, err := st.ReconcileHostnames(box.BaseDomain, nil); err != nil {
@@ -312,7 +312,7 @@ func TestReconcileHostnamesKeepsPreviews(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	box, _ := st.EnrollForAccount(acc.ID)
+	box, _ := st.EnrollForAccount(acc.ID, "")
 	prod, _ := st.RegisterHostname(box.BaseDomain, "blog", 0)
 	preview, _ := st.RegisterHostname(box.BaseDomain, "blog", 7)
 
@@ -331,8 +331,8 @@ func TestReconcileHostnamesLeavesOtherBoxesAlone(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	boxA, _ := st.EnrollForAccount(acc.ID)
-	boxB, _ := st.EnrollForAccount(acc.ID)
+	boxA, _ := st.EnrollForAccount(acc.ID, "")
+	boxB, _ := st.EnrollForAccount(acc.ID, "")
 	if _, err := st.RegisterHostname(boxB.BaseDomain, "blog", 0); err != nil {
 		t.Fatal(err)
 	}
@@ -353,7 +353,7 @@ func TestReconcileHostnamesSkipsASlotItCannotFit(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 1, 5) // one app per account
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	box, _ := st.EnrollForAccount(acc.ID)
+	box, _ := st.EnrollForAccount(acc.ID, "")
 
 	live, _, err := st.ReconcileHostnames(box.BaseDomain,
 		[]tunnel.AppRef{{App: "blog"}, {App: "shop"}})

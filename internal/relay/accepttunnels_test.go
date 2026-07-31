@@ -24,7 +24,7 @@ func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
