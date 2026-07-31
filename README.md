@@ -26,20 +26,17 @@ that kills most homelab hosting.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
-piper login                  # GitHub device-flow; stores your account credential
-piper connect                # enrolls this box on the public relay
-                             # (run the sudo command it prints)
-sudo systemctl restart piperd
+piper login                  # GitHub sign-in + claims this box on the public relay
 piper deploy blog --path .   # → https://<hash>-<you>.public.getpiper.dev
 ```
 
 The installer lands you on a real upgrade channel: on Debian/Ubuntu/Raspberry
 Pi OS it configures [apt.piperbox.dev](https://apt.piperbox.dev) and runs
 `sudo apt install piperd piper`; on macOS it hands off to Homebrew
-(`brew install piperbox/tap/piper`). On macOS, `connect` prints no sudo
-command to run — skip that step and run `brew services restart piper` in
-place of the `systemctl` line above. Everything else — and `--cli-only`
-laptop installs — gets verified binaries plus printed next steps.
+(`brew install piperbox/tap/piper`). Either way, `piper login` claims the box
+itself — piperd applies the enrollment and reconnects on its own, no sudo, no
+restart. Everything else — and `--cli-only` laptop installs, where `login` is
+identity-only — gets verified binaries plus printed next steps.
 
 That's a Dockerfile built, health-checked, and served on a public HTTPS URL —
 no port forwarding, no domain required. Prefer to point and click? Run bare

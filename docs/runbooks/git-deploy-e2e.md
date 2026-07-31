@@ -213,9 +213,9 @@ The unit runs as a `DynamicUser` in the `docker` group and binds `:80`/`:443` vi
 `sudo systemctl restart piperd`.
 
 To join the public relay instead of setting `PIPER_RELAY_ADDR`/`PIPER_RELAY_TOKEN`/`PIPER_BASE_DOMAIN`
-by hand, run `piper login && piper connect` — on this systemd install `connect`
-prints a ready `sudo sh -c … /etc/piper/piperd.env` command that upserts those
-three keys for you (see the README's "Join the public relay").
+by hand, just run `piper login` — it claims the box through piperd's
+enrollment socket, and piperd itself applies the enrollment and reconnects
+(see the README's "Join the public relay").
 
 **Health checks before moving on:**
 
@@ -333,7 +333,7 @@ it's the default flow in [`getting-started.md`](../getting-started.md).
 - **No `hooks.<base>` DNS record and no publicly trusted certificate are
   required.** GitHub delivers webhooks to the relay's account-API host, not your
   box, so the "cert must be publicly trusted" constraint from Part C/E above
-  doesn't apply to you at all. Join with `piper connect` (terminated mode) and
+  doesn't apply to you at all. Join with `piper login` (terminated mode) and
   skip Parts A and C entirely — no domain, no DNS, no cert of your own.
 - **No `piper github setup` step.** The App already exists on the relay; there's
   nothing to create or store on the box.
@@ -439,7 +439,7 @@ startup failure rather than a silently open ingress.
 `sudo systemctl restart piper-relay` and confirm the log line
 `relay: GitHub App <id> configured (brokered git deploys enabled)`.
 
-### Box: join with `piper login` + `piper connect`
+### Box: join with `piper login`
 
 No Part C TLS setup — the relay terminates HTTPS for you:
 
@@ -447,19 +447,19 @@ No Part C TLS setup — the relay terminates HTTPS for you:
 ./bin/piper login
 #   To log in, open: https://github.com/login/device ... enter the code: XXXX-XXXX
 #   logged in to relay as alice
+#   claiming this box… enrolled as ab12-alice.public.getpiper.dev
+#   applying… piperd connected — this box is live
 #   Install the Piper GitHub App on the repos you want to deploy:
 #     https://github.com/apps/piper-bot/installations/new
 #   Waiting…...Installed — 2 repo(s) available.
-
-./bin/piper connect
-#   box claimed: ab12-alice.public.getpiper.dev
-sudo systemctl restart piperd   # or the relay.json restart hint connect prints
 ```
 
-`piper login` prints the install URL from the login-poll response and blocks
-until the App shows up installed — open the link (another tab, or another
-device for a headless box) and it resolves on its own. `piper github repos`
-lists what the installation can reach at any point afterward.
+`piper login` claims the box through piperd's enrollment socket — piperd
+itself applies the enrollment and reconnects, no restart to run by hand —
+then prints the install URL from the login-poll response and blocks until the
+App shows up installed — open the link (another tab, or another device for a
+headless box) and it resolves on its own. `piper github repos` lists what the
+installation can reach at any point afterward.
 
 ### Push (same as Part F, on the relay-assigned hostname)
 
@@ -477,7 +477,7 @@ curl -sS https://ab12-alice.public.getpiper.dev/     # or myapp's own routed hos
 Mirroring [Appendix A](#appendix-a--local-loopback-smoke-test), start `piper-relay`
 with `PIPER_RELAY_FAKE_APPROVE=1` (`NewAutoApproveVerifier`,
 `internal/relay/verifier.go:67`) so `piper login` completes without a real GitHub
-OAuth round trip — proves the login → connect → deploy plumbing on one machine.
+OAuth round trip — proves the login → claim → deploy plumbing on one machine.
 It still can't exercise real webhook delivery (no public host for GitHub to
 reach, same limitation as Appendix A), so configure `ghApp` too only if you want
 to confirm `piper github repos`/token brokering against a stubbed or real GitHub

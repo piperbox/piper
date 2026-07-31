@@ -173,7 +173,9 @@ Keeps its shape (POSIX sh, checksum verification, `--cli-only` / `--rc` /
 ### 6. Docs
 
 - **README quick start**: the `daemonize` line dies. One curl command (or the
-  brew line) → `piper login` → `piper connect` → deploy.
+  brew line) → `piper login` → deploy. `piper login` now claims the box too —
+  see [`2026-07-31-one-command-login-design.md`](2026-07-31-one-command-login-design.md),
+  which supersedes the `piper connect` step this section originally described.
 - **docs/getting-started.md**: per-channel install section — apt manual
   lines, brew tap, non-deb diet install, source build.
 - **docs/manual-setup.md**: keeps deep manual paths; gains the non-deb
