@@ -333,7 +333,15 @@ func TestEnrollSocketPathPrecedence(t *testing.T) {
 }
 
 func TestListenEnrollSocketReplacesStaleSocket(t *testing.T) {
-	dir := t.TempDir()
+	// os.MkdirTemp, not t.TempDir(): t.TempDir() embeds the (long) test name in
+	// the path, which blows darwin's ~104-byte sockaddr_un sun_path limit under
+	// a normal $TMPDIR. MkdirTemp("", "p") drops that segment and stays well
+	// under the limit on both darwin and linux.
+	dir, err := os.MkdirTemp("", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	path := filepath.Join(dir, "piperd.sock")
 	ln1, err := listenEnrollSocket(path)
 	if err != nil {
