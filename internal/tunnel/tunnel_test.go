@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -277,6 +278,47 @@ func TestDialBoundsTheHandshakeWrite(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Dial hung on the handshake write (no write deadline)")
+	}
+}
+
+// The handshake write deadline must be cleared once the frame is out. A stale
+// deadline survives into the established session and the first yamux write
+// after it expires (the keepalive at 30s) fails with an i/o timeout, killing
+// an otherwise healthy session. The silent-relay test above can't see this:
+// it never does I/O after Dial. Complete the handshake here, let the deadline
+// window lapse, and then write on the very connection Dial returned.
+func TestDialClearsTheHandshakeWriteDeadline(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	// Fake relay: read the handshake frame, ack it, then keep draining so
+	// later writes don't block on the unbuffered pipe.
+	go func() {
+		if _, err := readFrame(s); err != nil {
+			return
+		}
+		ackPayload, _ := json.Marshal(handshakeAck{})
+		if err := writeFrame(s, ackPayload); err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, s)
+	}()
+
+	prev := handshakeWriteTimeout
+	handshakeWriteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeWriteTimeout = prev })
+
+	sess, err := Dial(c, "tok", "alice.example.com")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+
+	// Let the handshake write deadline lapse, then write on the connection
+	// Dial returned: a deadline that was never cleared fails this write.
+	time.Sleep(2 * handshakeWriteTimeout)
+	if _, err := c.Write([]byte("x")); err != nil {
+		t.Fatalf("write on the established connection failed (handshake write deadline not cleared): %v", err)
 	}
 }
 
