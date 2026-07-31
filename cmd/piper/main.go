@@ -210,7 +210,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	})
 	if remoteFlagSet {
 		switch args[0] {
-		case "version", "login", "connect", "agent":
+		case "version", "login", "agent":
 			fmt.Fprintf(stderr, "error: --remote does not apply to %q\n", args[0])
 			return 2
 		}
@@ -241,14 +241,6 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return relayLoginWeb(*relay, o, stdout, stderr)
 		}
 		return relayLogin(*relay, o, stdout, stderr)
-	case "connect":
-		fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		dataDir := fs.String("data-dir", config.DefaultDataDir(), "piperd data directory (relay.json target on a non-systemd install)")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return connect(connectOpts{dataDir: *dataDir}, stdout, stderr)
 	case "agent":
 		return agent(args[1:], stdout, stderr)
 	case "create":
@@ -734,7 +726,8 @@ func confirmPrompt(stdout io.Writer, question string) bool {
 }
 
 func usage(w io.Writer) int {
-	fmt.Fprintln(w, "usage: piper [--remote <base-domain>] [--version] <version|login|connect|create|deploy|list|status|stop|start|delete|app|env|domains|github|box|agent> [args]")
+	fmt.Fprintln(w, "usage: piper [--remote <base-domain>] [--version] <version|login|create|deploy|list|status|stop|start|delete|app|env|domains|github|box|agent> [args]")
 	fmt.Fprintln(w, "       piper                # no subcommand in a terminal: interactive TUI")
+	fmt.Fprintln(w, "connect is gone — piper login claims the box too")
 	return 2
 }
