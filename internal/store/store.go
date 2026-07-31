@@ -215,6 +215,16 @@ func (s *Store) FinalizeDeployment(id, imageID, containerID string, hostPort int
 	return err
 }
 
+// CountBuildingDeployments reports how many deployments are mid-build. The
+// enrollment apply refuses to restart piperd while one is in flight (409
+// busy), so a Docker build is never killed halfway (see #158 for why a
+// surviving "building" row is poison).
+func (s *Store) CountBuildingDeployments() (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM deployments WHERE status = 'building'`).Scan(&n)
+	return n, err
+}
+
 // FailBuildingDeployments flips every deployment still in "building" to
 // "failed", appending an abort note to each row's captured log. Called on
 // graceful shutdown: an in-flight build's goroutine cannot outlive the process,

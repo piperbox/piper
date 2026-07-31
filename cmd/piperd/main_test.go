@@ -15,7 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piperbox/piper/internal/api"
 	"github.com/piperbox/piper/internal/config"
+	"github.com/piperbox/piper/internal/enrollapi"
 	"github.com/piperbox/piper/internal/store"
 	"github.com/piperbox/piper/internal/tunnel"
 	"github.com/piperbox/piper/internal/version"
@@ -492,6 +494,32 @@ func TestDialLocalPassthroughNonACMEGoesToCaddy(t *testing.T) {
 		t.Fatal("non-acme passthrough reached the solver stand-in, want Caddy")
 	case <-time.After(2 * time.Second):
 		t.Fatal("non-acme passthrough never reached caddy")
+	}
+}
+
+// The enrollment routes must not exist on the control-API handler: that mux is
+// also served, bearer-wrapped, to the relay tunnel (startAuthAPI), and a route
+// there would let whoever holds the relay-side control bearer re-point this
+// box at another relay. Serving them only from enrollServer.mux() on the unix
+// socket is the isolation; this test pins it.
+func TestEnrollRoutesNotOnControlAPI(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "piper.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	h := api.New(st, nil, "piper.localhost", "", func() {}, nil, nil,
+		func() string { return "" }, nil)
+	for _, probe := range []struct{ method, path string }{
+		{http.MethodPost, enrollapi.PathEnroll},
+		{http.MethodGet, enrollapi.PathStatus},
+	} {
+		req := httptest.NewRequest(probe.method, probe.path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s on the control API: status %d, want 404", probe.method, probe.path, rec.Code)
+		}
 	}
 }
 

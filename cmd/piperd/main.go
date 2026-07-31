@@ -33,6 +33,7 @@ import (
 	"github.com/piperbox/piper/internal/config"
 	"github.com/piperbox/piper/internal/deploy"
 	"github.com/piperbox/piper/internal/domain"
+	"github.com/piperbox/piper/internal/relayclient"
 	"github.com/piperbox/piper/internal/runtime"
 	"github.com/piperbox/piper/internal/source"
 	"github.com/piperbox/piper/internal/source/github"
@@ -465,6 +466,7 @@ func main() {
 	}
 
 	cfg := config.Load()
+	captureBootExe()
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
@@ -557,6 +559,47 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth api listen: %v", err)
 	}
+
+	// The enrollment socket: the daemon-owned path for `piper login` to claim
+	// this box (one-command login design). Deliberately not part of apiHandler:
+	// these routes must be unreachable through the relay tunnel and the TCP
+	// listeners (pinned by TestEnrollRoutesNotOnControlAPI).
+	applyExec := make(chan struct{}, 1)
+	es := &enrollServer{
+		dataDir:     cfg.DataDir,
+		version:     version.String(),
+		envManaged:  func() bool { return os.Getenv("PIPER_RELAY_ADDR") != "" },
+		relayStatus: func() (string, string) { return cfg.RelayAddr, cfg.BaseDomain },
+		tunnelStatus: func() (string, string) {
+			if tc == nil {
+				return "off", ""
+			}
+			return tc.Status()
+		},
+		relayEnroll: func(ctx context.Context, api, cred, boxID, org string) (relayclient.Enrollment, error) {
+			return relayclient.New(api).Enroll(ctx, cred, boxID, org)
+		},
+		validate:      validateEnrollment,
+		countBuilding: st.CountBuildingDeployments,
+		apply: func() {
+			select {
+			case applyExec <- struct{}{}:
+			default: // an apply is already queued
+			}
+		},
+	}
+	sockPath := enrollSocketPath(cfg.DataDir)
+	sockLn, err := listenEnrollSocket(sockPath)
+	if err != nil {
+		log.Fatalf("enroll socket: %v", err)
+	}
+	enrollSrv := &http.Server{Handler: es.mux()}
+	go func() {
+		if err := enrollSrv.Serve(sockLn); err != nil && err != http.ErrServerClosed {
+			log.Printf("enroll socket serve: %v", err)
+		}
+	}()
+	log.Printf("enrollment socket at %s", sockPath)
 
 	// Relay mode: dial the relay and forward its streams. Terminated (free-tier)
 	// mode holds no box cert and serves apps on :80; the relay terminates TLS and
@@ -677,7 +720,14 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	reexec := false
+	select {
+	case <-ctx.Done():
+	case <-applyExec:
+		log.Println("enrollment accepted; restarting to apply")
+		reexec = true
+		stop() // wind the tunnel and stream handlers down exactly like a signal
+	}
 	log.Println("shutting down")
 	var mgrStop listenerStopper
 	if mgr != nil {
@@ -708,7 +758,10 @@ func main() {
 	if alpnSolver != nil {
 		_ = alpnSolver.Close()
 	}
-	shutdownWithContext(overallCtx, apiServers{srv, authSrv}, whLifecycle, mgrStop, st, drainTimeout)
+	shutdownWithContext(overallCtx, apiServers{srv, authSrv, enrollSrv}, whLifecycle, mgrStop, st, drainTimeout)
+	if reexec {
+		execSelf() // never returns on success; exits 1 on refusal/failure
+	}
 	os.Exit(0)
 }
 

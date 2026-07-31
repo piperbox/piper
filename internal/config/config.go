@@ -110,6 +110,21 @@ var SystemStateDir = "/var/lib/piper"
 // SystemEnvFile is piperd's EnvironmentFile within SystemEnvDir.
 func SystemEnvFile() string { return filepath.Join(SystemEnvDir, "piperd.env") }
 
+// SystemRuntimeSocket is piperd's enrollment socket under the shipped systemd
+// unit's RuntimeDirectory=piper; DarwinRootSocket is its equivalent for a root
+// (`sudo brew services`) macOS install. Vars so tests can point them at
+// scratch paths.
+var SystemRuntimeSocket = "/run/piper/piperd.sock"
+var DarwinRootSocket = "/var/run/piper/piperd.sock"
+
+// EnrollSocketCandidates lists, in probe order, where a local piperd may be
+// serving its enrollment socket: the systemd runtime dir, the darwin root
+// path, then the per-user data dir. Probing a path that does not exist on the
+// current platform is harmless — connect simply fails.
+func EnrollSocketCandidates(dataDir string) []string {
+	return []string{SystemRuntimeSocket, DarwinRootSocket, filepath.Join(dataDir, "piperd.sock")}
+}
+
 // SystemManaged reports whether piperd is installed under the shipped systemd
 // unit, detected by the presence of /etc/piper (the installer creates it). It's
 // a plain 0700 root dir, so a non-root login user can still Stat it — statting

@@ -719,6 +719,37 @@ func TestFailBuildingDeployments(t *testing.T) {
 	}
 }
 
+func TestCountBuildingDeployments(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateApp("web", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	if _, err := s.CreateDeployment("web", "", "", 0, "building", "pulling base image...\n"); err != nil {
+		t.Fatalf("CreateDeployment building: %v", err)
+	}
+	if _, err := s.CreateDeployment("web", "img", "cid", 40001, "running", "done\n"); err != nil {
+		t.Fatalf("CreateDeployment running: %v", err)
+	}
+
+	n, err := s.CountBuildingDeployments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("building = %d, want 1", n)
+	}
+	if _, err := s.FailBuildingDeployments(); err != nil {
+		t.Fatal(err)
+	}
+	n, err = s.CountBuildingDeployments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("building after fail-sweep = %d, want 0", n)
+	}
+}
+
 func TestDeleteAppUnknownIsNotFound(t *testing.T) {
 	s := openTemp(t)
 	if err := s.DeleteApp("ghost"); !errors.Is(err, ErrNotFound) {
