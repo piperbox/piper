@@ -151,6 +151,46 @@ func (g *GitHubApp) RepoToken(ctx context.Context, installationID, repo string) 
 	})
 }
 
+// InstallationTarget is the live target of an installation as GitHub reports
+// it: the user or org the App is currently installed on.
+type InstallationTarget struct {
+	Type  string
+	Login string
+}
+
+// Installation fetches an installation's live target from GitHub
+// (GET /app/installations/{id}). GitHubTokenFor calls this only when no stored
+// target_login matches the repo owner — an org rename strands the stored value
+// (#433) — so the cost is one API round-trip per miss, never on the happy path.
+func (g *GitHubApp) Installation(ctx context.Context, installationID string) (InstallationTarget, error) {
+	jwt, err := ghjwt.Sign(g.appID, g.key, time.Now())
+	if err != nil {
+		return InstallationTarget{}, err
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, g.apiBase+"/app/installations/"+installationID, nil)
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := g.http.Do(req)
+	if err != nil {
+		return InstallationTarget{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return InstallationTarget{}, fmt.Errorf("get installation: %s: %s", resp.Status, b)
+	}
+	var out struct {
+		Account struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"account"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return InstallationTarget{}, err
+	}
+	return InstallationTarget{Type: out.Account.Type, Login: out.Account.Login}, nil
+}
+
 // Repo is one installation-accessible repository, as the picker renders it:
 // full name plus the visibility badge and last-pushed timestamp. Fields are
 // passed straight through from GitHub (pushed_at is "" for a never-pushed repo).

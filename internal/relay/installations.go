@@ -11,8 +11,9 @@ import (
 var ErrNoInstallation = errors.New("no github installation")
 
 // LinkInstallation records a GitHub App installation against the account of the
-// user who installed it (the webhook's sender). Target type and login are
-// display metadata: an org-target install still links to the installing user.
+// user who installed it (the webhook's sender). An org-target install still
+// links to the installing user; target_login is not display metadata but the
+// routing key GitHubTokenFor matches the repo owner against.
 //
 // Idempotent by installation_id, because the OAuth redirect and the
 // installation webhook race and either may land first.
@@ -64,8 +65,9 @@ func (s *Store) AccountForInstallation(installationID string) (string, error) {
 }
 
 // Installation is one GitHub App installation linked to an account, carrying
-// the display identity of its target — the user or org the App is installed on
-// (github_installations.target_type / target_login).
+// the identity of its target — the user or org the App is installed on
+// (github_installations.target_type / target_login). target_login is the
+// routing key for token minting, not mere display metadata.
 type Installation struct {
 	ID          string `json:"installation_id"`
 	TargetType  string `json:"target_type"`

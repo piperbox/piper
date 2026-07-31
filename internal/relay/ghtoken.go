@@ -52,5 +52,23 @@ func (s *Store) GitHubTokenFor(ctx context.Context, app *GitHubApp, agentName, r
 			return app.RepoToken(ctx, in.ID, repo)
 		}
 	}
+	// Miss: a GitHub org/user rename strands the stored target_login, which is
+	// written once at link time and never refreshed (#433). Re-fetch each
+	// candidate installation's live target, and on a match persist the new
+	// login through the existing upsert (self-healing) and mint. This runs only
+	// on the miss path — one extra API round-trip, never on the happy path.
+	for _, in := range insts {
+		target, err := app.Installation(ctx, in.ID)
+		if err != nil {
+			continue // unreachable/deleted installation: try the next candidate
+		}
+		if !strings.EqualFold(target.Login, owner) {
+			continue
+		}
+		// Best-effort heal: the mint must not fail over a local write hiccup;
+		// the next miss retries the write.
+		_ = s.LinkInstallationForAccount(in.ID, accountID, target.Type, target.Login)
+		return app.RepoToken(ctx, in.ID, repo)
+	}
 	return "", time.Time{}, ErrNoInstallation
 }
