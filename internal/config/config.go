@@ -91,14 +91,15 @@ func defaultDataDir() string {
 }
 
 // DefaultDataDir is piperd's data-dir default (~/.piper/piperd) when
-// PIPER_DATA_DIR is unset. `piper connect` reuses it to write relay.json to the
-// same place piperd reads it.
+// PIPER_DATA_DIR is unset. piperd's enrollment socket (applying a `piper
+// login` claim) writes relay.json here, the same place it reads it back.
 func DefaultDataDir() string { return defaultDataDir() }
 
 // SystemEnvDir is where the shipped systemd install keeps piperd's
-// EnvironmentFile. `piper connect` targets it on a systemd-managed box instead
-// of writing relay.json into piperd's DynamicUser StateDirectory, which the
-// login user can't touch. A var so tests can point it at a scratch directory.
+// EnvironmentFile. Its presence marks a systemd-managed box as
+// operator-managed: piperd's enrollment socket refuses a `piper login` claim
+// instead of writing relay.json, since PIPER_RELAY_* set there overrides it
+// anyway. A var so tests can point it at a scratch directory.
 var SystemEnvDir = "/etc/piper"
 
 // SystemStateDir is piperd's DynamicUser StateDirectory under the shipped
@@ -136,7 +137,8 @@ func SystemManaged() bool {
 
 // ClientConfig is the piper CLI's saved credentials/target. Addr/Token are the
 // LAN path (bearer to piperd); RelayAPI/AccountCredential are the relay path
-// (device-flow login), written by `piper login` and read by `piper connect`.
+// (device-flow login), written by `piper login` and read by every other
+// relay-backed command (e.g. `piper github repos`, remote `piper box`).
 type ClientConfig struct {
 	Addr              string `json:"addr"`
 	Token             string `json:"token"`
@@ -317,8 +319,9 @@ func SaveClient(cc ClientConfig) error {
 	return SaveClientFile(cf)
 }
 
-// RelayFile is the persisted relay enrollment written by `piper connect` and
-// read by piperd at startup. Environment variables override these values.
+// RelayFile is the persisted relay enrollment written by piperd (applying a
+// `piper login` claim over its enrollment socket) and read by piperd at
+// startup. Environment variables override these values.
 type RelayFile struct {
 	RelayAddr  string `json:"relay_addr"`
 	RelayToken string `json:"relay_token"`

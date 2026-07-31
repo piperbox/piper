@@ -166,7 +166,7 @@ func login(addr, token string, stdout, stderr io.Writer) int {
 	}
 	// Load-mutate-save (mirroring relayLogin): a fresh ClientConfig here would
 	// drop any stored relay creds, so a LAN login after a relay login wiped
-	// RelayAPI/AccountCredential and broke the next `piper connect` (#84).
+	// RelayAPI/AccountCredential and broke the next `piper login` (#84).
 	cc.Addr = addr
 	cc.Token = token
 	if err := config.SaveClient(cc); err != nil {
