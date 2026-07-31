@@ -36,9 +36,9 @@ func onLinux(t *testing.T) {
 	t.Cleanup(func() { agentGOOS = runtime.GOOS })
 }
 
-// fastPoll zeroes waitActive's inter-poll delay so readiness-check tests don't
+// fastAgentPoll zeroes waitActive's inter-poll delay so readiness-check tests don't
 // sleep; it returns a restore func for defer.
-func fastPoll(t *testing.T) func() {
+func fastAgentPoll(t *testing.T) func() {
 	t.Helper()
 	old := activePollDelay
 	activePollDelay = 0
@@ -626,7 +626,7 @@ func stubUnitLoadedAndIsActive(t *testing.T, states ...string) {
 func TestAgentStatusLinuxDoesNotTrustOneActiveSample(t *testing.T) {
 	onLinux(t)
 	stubVersions(t, "0.8.5", nil, "0.8.5", nil)
-	defer fastPoll(t)()
+	defer fastAgentPoll(t)()
 
 	for _, c := range []struct {
 		name    string
