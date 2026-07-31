@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -196,6 +197,44 @@ func (s *enrollServer) enroll(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("enrolled as %s via %s (box %s); applying", en.BaseDomain, en.TunnelEndpoint, boxID)
 	go s.apply()
+}
+
+// enrollSocketPath decides where this piperd serves its enrollment socket:
+// the systemd RuntimeDirectory when the unit provides one (systemd exports
+// RUNTIME_DIRECTORY for RuntimeDirectory=piper), the fixed /var/run path for a
+// root macOS (`sudo brew services`) install, else the per-user data dir. The
+// CLI probes the same set via config.EnrollSocketCandidates.
+func enrollSocketPath(dataDir string) string {
+	if rd := os.Getenv("RUNTIME_DIRECTORY"); rd != "" {
+		return filepath.Join(rd, "piperd.sock")
+	}
+	if runtime.GOOS == "darwin" && os.Geteuid() == 0 {
+		return config.DarwinRootSocket
+	}
+	return filepath.Join(dataDir, "piperd.sock")
+}
+
+// listenEnrollSocket binds the unix socket, replacing a stale file left by a
+// crash. The socket itself is 0666: the DIRECTORY is what authenticates the
+// server — only piperd's user (or root) can create a socket inside the
+// RuntimeDirectory / the 0700 data dir, while any local user may talk to it,
+// the same trust stance as the tokenless loopback API. Browsers cannot speak
+// unix sockets and a port squatter cannot bind here, which is why this is a
+// socket and not a TCP port (one-command login design).
+func listenEnrollSocket(path string) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(path)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return ln, nil
 }
 
 func writeEnrollJSON(w http.ResponseWriter, code int, v any) {

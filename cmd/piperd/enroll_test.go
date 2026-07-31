@@ -319,6 +319,41 @@ func TestStatusNeverLeaksSecrets(t *testing.T) {
 	}
 }
 
+func TestEnrollSocketPathPrecedence(t *testing.T) {
+	t.Setenv("RUNTIME_DIRECTORY", "/run/piper")
+	if got := enrollSocketPath("/dd"); got != "/run/piper/piperd.sock" {
+		t.Fatalf("systemd path = %q", got)
+	}
+	t.Setenv("RUNTIME_DIRECTORY", "")
+	if got := enrollSocketPath("/dd"); got != filepath.Join("/dd", "piperd.sock") {
+		// On a non-root test run the darwin-root branch cannot fire, so the
+		// data-dir fallback is the expected answer on both platforms.
+		t.Fatalf("fallback path = %q", got)
+	}
+}
+
+func TestListenEnrollSocketReplacesStaleSocket(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "piperd.sock")
+	ln1, err := listenEnrollSocket(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln1.Close() // leaves the socket file behind, as a crash would
+	ln2, err := listenEnrollSocket(path)
+	if err != nil {
+		t.Fatalf("rebind over stale socket: %v", err)
+	}
+	defer ln2.Close()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o666 {
+		t.Fatalf("socket mode = %v, want 0666 (dir perms are the auth)", fi.Mode().Perm())
+	}
+}
+
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
 	deadline := time.After(2 * time.Second)

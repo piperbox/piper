@@ -24,6 +24,8 @@ func TestPiperdServiceContract(t *testing.T) {
 		"DynamicUser=yes",
 		"SupplementaryGroups=docker",
 		"StateDirectory=piper",
+		"RuntimeDirectory=piper",
+		"RuntimeDirectoryMode=0755",
 		"AmbientCapabilities=CAP_NET_BIND_SERVICE",
 		"CapabilityBoundingSet=CAP_NET_BIND_SERVICE",
 		"NoNewPrivileges=yes",
