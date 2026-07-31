@@ -17,7 +17,7 @@ import (
 )
 
 func TestRunRemoteFlagRejectedForLocalOnlyCommands(t *testing.T) {
-	for _, cmd := range []string{"version", "login", "connect"} {
+	for _, cmd := range []string{"version", "login", "agent"} {
 		var stdout, stderr bytes.Buffer
 		if code := run([]string{"--remote", "box.example.com", cmd}, &stdout, &stderr); code != 2 {
 			t.Errorf("%s: code = %d, want 2", cmd, code)

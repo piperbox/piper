@@ -56,6 +56,11 @@ Login needs no new API method — it verifies with the existing `ListApps` probe
 > today's `piper login`/`connect`). Phase 6 ships **LAN only**; relay login is a
 > later phase. The view is written with a **target-type seam** (§below) so relay
 > slots in as a second branch without re-architecting the view or the root.
+>
+> **Update:** `piper connect` no longer exists — the one-command login merge
+> ([`2026-07-31-one-command-login-design.md`](2026-07-31-one-command-login-design.md))
+> folds box claiming into `piper login`. The future relay branch here targets
+> that merged verb, not a separate connect step.
 
 A single leaf view pushed by the root on `L` (a global key, wired in the existing
 `!m.topCapturesText()` block like `?`/`t`, with the same already-on-top guard).

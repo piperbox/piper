@@ -166,7 +166,7 @@ func login(addr, token string, stdout, stderr io.Writer) int {
 	}
 	// Load-mutate-save (mirroring relayLogin): a fresh ClientConfig here would
 	// drop any stored relay creds, so a LAN login after a relay login wiped
-	// RelayAPI/AccountCredential and broke the next `piper connect` (#84).
+	// RelayAPI/AccountCredential and broke the next `piper login` (#84).
 	cc.Addr = addr
 	cc.Token = token
 	if err := config.SaveClient(cc); err != nil {
@@ -210,7 +210,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	})
 	if remoteFlagSet {
 		switch args[0] {
-		case "version", "login", "connect", "agent":
+		case "version", "login", "agent":
 			fmt.Fprintf(stderr, "error: --remote does not apply to %q\n", args[0])
 			return 2
 		}
@@ -226,24 +226,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 		addr := fs.String("addr", "", "piperd address (LAN login)")
 		relay := fs.String("relay", relayclient.DefaultAPI, "relay control API base URL")
 		web := fs.Bool("web", false, "one-trip browser login through the relay's GitHub App")
+		org := fs.String("org", "", "enroll this box for a GitHub org you own")
+		noEnroll := fs.Bool("no-enroll", false, "stop after identity; do not claim this box")
+		reEnroll := fs.Bool("re-enroll", false, "claim this box fresh even if already enrolled (after `piper box rm`, or switching accounts/relays)")
+		dataDir := fs.String("data-dir", config.DefaultDataDir(), "piperd data directory (enrollment-socket probe)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
+		o := enrollFlowOpts{relayAPI: *relay, dataDir: *dataDir, org: *org, noEnroll: *noEnroll, reEnroll: *reEnroll}
 		if *token != "" {
-			return login(*addr, *token, stdout, stderr)
+			return login(*addr, *token, stdout, stderr) // LAN login: identity only, unchanged
 		}
 		if *web {
-			return relayLoginWeb(*relay, stdout, stderr)
+			return relayLoginWeb(*relay, o, stdout, stderr)
 		}
-		return relayLogin(*relay, stdout, stderr)
-	case "connect":
-		fs := flag.NewFlagSet("connect", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		dataDir := fs.String("data-dir", config.DefaultDataDir(), "piperd data directory (relay.json target on a non-systemd install)")
-		if err := fs.Parse(args[1:]); err != nil {
-			return 2
-		}
-		return connect(connectOpts{dataDir: *dataDir}, stdout, stderr)
+		return relayLogin(*relay, o, stdout, stderr)
 	case "agent":
 		return agent(args[1:], stdout, stderr)
 	case "create":
@@ -729,7 +726,8 @@ func confirmPrompt(stdout io.Writer, question string) bool {
 }
 
 func usage(w io.Writer) int {
-	fmt.Fprintln(w, "usage: piper [--remote <base-domain>] [--version] <version|login|connect|create|deploy|list|status|stop|start|delete|app|env|domains|github|box|agent> [args]")
+	fmt.Fprintln(w, "usage: piper [--remote <base-domain>] [--version] <version|login|create|deploy|list|status|stop|start|delete|app|env|domains|github|box|agent> [args]")
 	fmt.Fprintln(w, "       piper                # no subcommand in a terminal: interactive TUI")
+	fmt.Fprintln(w, "connect is gone — piper login claims the box too")
 	return 2
 }

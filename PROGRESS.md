@@ -45,12 +45,13 @@ Goal: public HTTPS from behind NAT/CGNAT — `piperd` dials an outbound yamux tu
 - ✅ `piper-relay` — enrollment (per-agent tokens), SNI passthrough, tunnel server — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ idempotent enroll — re-claim by `(account, box_id)` reuses the box's slot and rotates the token — [#458](https://github.com/piperbox/piper/issues/458)
 - ✅ daemon-owned enrollment — piperd claims the box itself over a local unix socket, validates the token with a real handshake before persisting, applies by drain-then-re-exec (same PID) — [#460](https://github.com/piperbox/piper/issues/460)
+- ✅ one-command login — `piper login` absorbs the old `connect` verb: identity → claim through piperd's enrollment socket → piperd applies and reconnects itself, no printed sudo, no restart hint — [#465](https://github.com/piperbox/piper/issues/465) (built on the relay upsert [#458](https://github.com/piperbox/piper/issues/458) and daemon-owned enrollment [#460](https://github.com/piperbox/piper/issues/460) above)
 - ✅ `piper-relay` managed systemd service + operator docs — [#38](https://github.com/piperbox/piper/issues/38)
 - ✅ `piper-relay` infra-only ops endpoints — Prometheus `/metrics` + ring-buffered `/logs`, env-toggled, bind-address isolated from the SNI dispatcher — [#396](https://github.com/piperbox/piper/issues/396)
 - ✅ `piperd` — outbound tunnel client + cert wiring (additive; LAN-only unchanged) — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ e2e — loopback relay path (tunnel + SNI + on-box TLS) — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ **Public-relay onboarding slice (Plans 1–3)** — relay accounts + device-flow, `piper login`/`connect`, and relay-terminated shared domain; `login → connect → deploy → curl` e2e green — [#90](https://github.com/piperbox/piper/issues/90) (child of epic [#49](https://github.com/piperbox/piper/issues/49))
-  - ✅ `piper login` / `piper connect` self-service onboarding CLI — device-flow login + box claim, writes piperd `relay.json` — [#83](https://github.com/piperbox/piper/pull/83)
+  - ✅ `piper login` / `connect` self-service onboarding CLI — device-flow login + box claim, writes piperd `relay.json` — [#83](https://github.com/piperbox/piper/pull/83)
   - ✅ Relay-terminated shared domain — typed tunnel streams (`T`/`H`/`C`); relay assigns `<app-hash>-<username>.<apex>`, terminates wildcard TLS, forwards HTTP over the tunnel; free-tier box served on `:80` with no on-box cert — [#89](https://github.com/piperbox/piper/pull/89)
   - ✅ Relay control-stream routing — account-authz'd control plane at `api.<apex>` (SNI-dispatched, wildcard cert), forwarded over `KindControlAPI` tunnel streams with agent-push Token B provisioning — [#73](https://github.com/piperbox/piper/issues/73)
   - ✅ remote CLI target — `piper --remote <base-domain>` / `PIPER_REMOTE` drives a box through the relay control plane — [#74](https://github.com/piperbox/piper/issues/74)
@@ -119,7 +120,7 @@ Goal: turn the first-run gauntlet (fresh box → live public URL) into a clean c
 - ✅ `piper login` no longer mislabels connectivity failures as "token rejected" — [#138](https://github.com/piperbox/piper/issues/138)
 
 Remaining polish, tracked standalone:
-- ⬜ `piper connect` discoverability / fail loudly off-box — [#173](https://github.com/piperbox/piper/issues/173)
+- ⬜ `connect` discoverability / fail loudly off-box — [#173](https://github.com/piperbox/piper/issues/173)
 - ✅ Onboarding docs: box IP over `*.local`, document `PIPER_API_ADDR` — [#174](https://github.com/piperbox/piper/issues/174)
 - ⬜ Explore a `piper setup` onboarding wizard — [#175](https://github.com/piperbox/piper/issues/175)
 

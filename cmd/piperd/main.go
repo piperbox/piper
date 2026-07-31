@@ -171,9 +171,9 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 // over the tunnel, once per enrollment (agent-push Token B — see the
 // control-stream routing design). The token row itself is the marker: any row
 // labeled relay:<base>, live OR revoked, means "already provisioned" or "the
-// owner cut the relay off" — never re-mint. A new `piper connect` creates a new
-// enrollment (new base domain) and so a fresh mint. If the push fails, the
-// just-minted row is deleted so the next connect retries.
+// owner cut the relay off" — never re-mint. A fresh `piper login` claim creates
+// a new enrollment (new base domain) and so a fresh mint. If the push fails,
+// the just-minted row is deleted so the next login retries.
 //
 // mu serializes the whole list-then-mint sequence across concurrent OnConnect
 // callbacks: without it, a session that flaps before the first push completes

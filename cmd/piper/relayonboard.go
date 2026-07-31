@@ -49,7 +49,7 @@ func finishInstall(ctx context.Context, rc *relayclient.Client, acc relayclient.
 // relayLogin runs the GitHub device flow against the relay, printing the
 // verification URL + user code, polling to completion, and storing the returned
 // account credential (and relay API base) in the CLI config.
-func relayLogin(relayAPI string, stdout, stderr io.Writer) int {
+func relayLogin(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) int {
 	// Interrupt-aware: Ctrl-C during the poll loop cancels the in-flight
 	// request instead of waiting out the 30s client timeout.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -98,6 +98,9 @@ func relayLogin(relayAPI string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
+		if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
+			return code // identity is durable; re-running login resumes at the claim
+		}
 		finishInstall(ctx, rc, acc, stdout, stderr)
 		return 0
 	}
@@ -109,7 +112,7 @@ func relayLogin(relayAPI string, stdout, stderr io.Writer) int {
 // page. The box holds no loopback listener; it only polls the handle. Unlike the
 // device flow, this ends with the install already underway, so a first-timer's
 // login and install are one browser trip.
-func relayLoginWeb(relayAPI string, stdout, stderr io.Writer) int {
+func relayLoginWeb(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	rc := relayclient.New(relayAPI)
@@ -149,6 +152,9 @@ func relayLoginWeb(relayAPI string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
+		if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
+			return code // identity is durable; re-running login resumes at the claim
+		}
 		finishInstall(ctx, rc, acc, stdout, stderr)
 		return 0
 	}
@@ -241,106 +247,9 @@ func githubRepos(stdout, stderr io.Writer) int {
 	return 0
 }
 
-// connectOpts are the inputs to `piper connect`. dataDir is where relay.json is
-// written on a non-systemd (dev / per-user) install.
-type connectOpts struct {
-	dataDir string
-}
-
-// connect claims this box on the relay and installs the enrollment so piperd
-// picks it up at startup (connect never restarts piperd).
-//
-// On a dev / per-user install the login user owns the data dir, so relay.json is
-// written directly. On the shipped systemd install piperd runs as a DynamicUser
-// whose StateDirectory the login user can't write; there the enrollment belongs
-// in the root-owned EnvironmentFile /etc/piper/piperd.env, which systemd injects
-// into the service at start — so connect prints a plain-sudo upsert of the three
-// relay keys instead (the file may already hold ACME/DNS settings, so it must
-// not be clobbered).
-//
-// Run off-box — no piperd install of any flavor on the machine — connect fails
-// loudly instead of writing a relay.json nothing will read (#173).
-func connect(o connectOpts, stdout, stderr io.Writer) int {
-	cc, err := config.LoadClient()
-	if err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	if cc.RelayAPI == "" || cc.AccountCredential == "" {
-		fmt.Fprintln(stderr, "error: not logged in to a relay; run `piper login` first")
-		return 1
-	}
-	// Fail loudly off-box before enrolling: the enrollment would land in a
-	// relay.json no piperd reads here, and the claim would still burn an
-	// account quota slot (#173).
-	if !config.SystemManaged() && !agentInstalled(o.dataDir) {
-		fmt.Fprintln(stderr, "error: no piperd installation found on this machine — `piper connect` must be run on the box where piperd is installed")
-		fmt.Fprintf(stderr, "(no systemd install, resolvable piperd binary, or existing data dir %s found)\n", o.dataDir)
-		return 1
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
-	en, err := relayclient.New(cc.RelayAPI).Enroll(ctx, cc.AccountCredential, "", "")
-	switch {
-	case errors.Is(err, relayclient.ErrBadCredential):
-		fmt.Fprintln(stderr, "error: relay rejected your account credential; run `piper login` again")
-		return 1
-	case errors.Is(err, relayclient.ErrQuotaExceeded):
-		fmt.Fprintln(stderr, "error: account agent quota exceeded")
-		fmt.Fprintln(stderr, "run `piper box ls` to see your boxes, then `piper box rm <base-domain>` to free a slot")
-		return 1
-	case err != nil:
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-
-	// Systemd install: the login user can't write piperd's DynamicUser data dir,
-	// but /etc/piper/piperd.env is a root-owned EnvironmentFile systemd injects at
-	// start. Guide a plain-sudo upsert of the three relay keys (delete any prior
-	// or commented copies, then append) rather than clobbering admin edits.
-	if config.SystemManaged() {
-		fmt.Fprintf(stdout, "box claimed: %s\n", en.BaseDomain)
-		fmt.Fprintln(stdout, "\npiperd runs as a systemd DynamicUser; store the enrollment in its EnvironmentFile.")
-		fmt.Fprintln(stdout, "\nNext step:")
-		githubBrokered := 0
-		if en.GitHubApp {
-			githubBrokered = 1
-		}
-		fmt.Fprintf(stdout, "\n    sudo sh -c 'f=%s; \\\n"+
-			"      sed -i -E \"/^#?(PIPER_RELAY_ADDR|PIPER_RELAY_TOKEN|PIPER_BASE_DOMAIN|PIPER_RELAY_TERMINATED|PIPER_WEBHOOK_SECRET|PIPER_GITHUB_BROKERED)=/d\" \"$f\"; \\\n"+
-			"      { echo PIPER_RELAY_ADDR=%s; echo PIPER_RELAY_TOKEN=%s; echo PIPER_BASE_DOMAIN=%s; echo PIPER_RELAY_TERMINATED=1; echo PIPER_WEBHOOK_SECRET=%s; echo PIPER_GITHUB_BROKERED=%d; } >> \"$f\"'\n",
-			config.SystemEnvFile(), en.TunnelEndpoint, en.EnrollmentToken, en.BaseDomain, en.WebhookSecret, githubBrokered)
-		fmt.Fprintln(stdout, "\nthen: sudo systemctl restart piperd")
-		return 0
-	}
-
-	if err := config.SaveRelayFile(o.dataDir, config.RelayFile{
-		RelayAddr:      en.TunnelEndpoint,
-		RelayToken:     en.EnrollmentToken,
-		BaseDomain:     en.BaseDomain,
-		Terminated:     true,
-		WebhookSecret:  en.WebhookSecret,
-		GitHubBrokered: en.GitHubApp,
-	}); err != nil {
-		fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	fmt.Fprintf(stdout, "box claimed: %s\nrestart piperd to connect: %s\n", en.BaseDomain, restartHint())
-	return 0
-}
-
-// restartHint names the restart command for a non-system-managed install.
-// One tier per platform: brew's service on macOS, the system unit elsewhere.
-func restartHint() string {
-	if agentGOOS == "darwin" {
-		return "brew services restart piper"
-	}
-	return "sudo systemctl restart piperd"
-}
-
-// agentInstalled reports whether this box has piperd at all — connect must
-// fail loudly when pointed at a box with no agent (#173). One tier: an
-// existing data dir (an enrolled box), a system-managed install, or a
+// agentInstalled reports whether this box has piperd at all — the login probe
+// matrix must fail loudly when pointed at a box with no agent (#173). One
+// tier: an existing data dir (an enrolled box), a system-managed install, or a
 // resolvable piperd binary (deb/brew/manual) all count.
 func agentInstalled(dataDir string) bool {
 	if _, err := os.Stat(dataDir); err == nil {

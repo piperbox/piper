@@ -63,8 +63,8 @@ For a headless Mac where piperd should come up at boot, before any login, use
 the system-level variant instead: `sudo brew services start piper`. State
 lives at `~/.piper/piperd`, and apps are served at
 `http://<name>.piper.localhost`. The relay/public-URL flow works here too:
-run `piper connect`, then `brew services restart piper` to pick up the
-enrollment. After `brew upgrade`, run `brew services restart piper` to pick
+run `piper login` — piperd applies the enrollment and reconnects itself, no
+restart needed. After `brew upgrade`, run `brew services restart piper` to pick
 up the new binary. See
 [`manual-setup.md`](manual-setup.md#run-the-agent-on-macos-dev-box).
 
@@ -136,8 +136,7 @@ piper            # opens the TUI against the current box
 - **Actions** — deploy, new app, stop, delete, right from the TUI.
 - **Boxes** — `t` opens a box switcher and config editor to add/edit/remove
   targets.
-- **Wizards** — login, `piper connect`, GitHub App setup, and repo linking run
-  interactively.
+- **Wizards** — login, GitHub App setup, and repo linking run interactively.
 
 Keys: `↵` open · `esc` back · `t` boxes · `q` quit. Every screen lists its own
 keys in a dim legend along the bottom.
@@ -179,50 +178,70 @@ with `sudo piperd token list` and `sudo piperd token revoke <name>`.
 
 ## Join the public relay (self-service)
 
-On a box running `piperd`, log in and claim the box as your normal user:
+On a box running `piperd`, one command signs you in and claims the box:
 
 ```bash
-piper login          # opens a GitHub device-flow login; stores your account credential
-piper connect        # enrolls this box on the relay
+piper login
+#   To log in, open: https://github.com/login/device ... enter the code: XXXX-XXXX
+#   logged in to relay as alice
+#   claiming this box… enrolled as ab12-alice.public.getpiper.dev
+#   applying… piperd connected — this box is live
 ```
 
-Where `piper connect` installs the enrollment depends on the install:
+`piper login` is the whole flow: GitHub device-flow identity, then it hands
+the account credential to `piperd` over a local enrollment socket. `piperd`
+itself calls the relay, validates the token with a real tunnel handshake,
+persists `relay.json`, and applies it — draining and re-executing its own
+process so the enrollment is live within seconds. No sudo command to
+copy-paste, no manual restart, on any install (systemd, Homebrew, or a manual
+dev box).
 
-- **Manual / dev** (piperd reads `~/.piper/piperd`): `connect` writes
-  `relay.json` there directly, then just `sudo systemctl restart piperd`.
-- **Daemonized systemd service** (piperd runs as a `DynamicUser`, state under
-  `/var/lib/piper`): that directory isn't writable by your login user, so
-  `connect` instead prints a ready `sudo sh -c … /etc/piper/piperd.env` command
-  that stores the enrollment in piperd's root-owned EnvironmentFile (systemd
-  injects it into the service at start, so its `DynamicUser` never needs to read
-  it). Run it, then `sudo systemctl restart piperd`.
+Run `login` **on the box**: on a machine with no piperd install (no systemd
+install, launchd agent, or existing data dir) it stops after identity —
+*"identity only — no piperd on this machine; run `piper login` on a box to
+connect it."* Exit 0; that's the expected shape for a laptop that only drives
+boxes remotely (see [Drive a box remotely](#drive-a-box-remotely)), not an
+error.
 
-Run `connect` **on the box**: on a machine with no piperd install (no systemd
-install, rootless user unit, launchd agent, or existing data dir) it errors out
-instead of writing a `relay.json` nothing would read.
-
-Either way piperd picks up the enrollment at startup and dials the tunnel.
-
-`piper connect` claims the box in **terminated** mode: piperd holds no cert and
+`piper login` claims the box in **terminated** mode: piperd holds no cert and
 serves apps on `:80`; the relay assigns each app a single-label hostname
 `<app-hash>-<username>.public.getpiper.dev`, terminates its HTTPS with its
 wildcard cert, and forwards plaintext HTTP over the tunnel.
 
 ```bash
-piper login                  # GitHub device-flow; stores your account credential
-piper connect                # claims this box (terminated) and writes relay.json
-sudo systemctl restart piperd
+piper login                  # GitHub sign-in + claims this box, terminated
 piper deploy blog --path .   # → https://<hash>-<you>.public.getpiper.dev
 ```
+
+Re-running `piper login` converges instead of redoing work: a saved credential
+skips the device flow, an already-enrolled box skips the claim (`already
+enrolled as …`), and a tunnel that's merely down gets re-verified. Flags shape
+the claim:
+
+- `--org <slug>` — enroll the box for a GitHub org you own instead of your
+  personal account.
+- `--no-enroll` — stop after identity; leave this box's enrollment untouched
+  (the laptop/remote-management shape, forced).
+- `--re-enroll` — force a fresh claim on an already-enrolled box — recovery
+  after `piper box rm`, or after switching accounts or relays.
+- `--data-dir <path>` — the piperd data directory to probe for the enrollment
+  socket, when it isn't the default.
+
+An operator who pins `PIPER_RELAY_ADDR`/`PIPER_RELAY_TOKEN`/`PIPER_BASE_DOMAIN`
+in `/etc/piper/piperd.env` (or piperd's process environment) locks the
+enrollment: `piper login` prints *"this box's enrollment is operator-managed
+via /etc/piper/piperd.env — nothing to do"* and exits 0 rather than touching
+it.
 
 `piper login --relay <url>` targets a self-hosted relay instead of the default
 `https://api.public.getpiper.dev`. Environment variables (`PIPER_RELAY_ADDR`,
 `PIPER_RELAY_TOKEN`, `PIPER_BASE_DOMAIN`) still override `relay.json`.
 
 Bring-your-own-domain apps stay **end-to-end** (the box terminates TLS; the relay
-only splices SNI) — set `PIPER_BASE_DOMAIN` + cert/DNS config instead of using
-`piper connect`; see [`custom-domains.md`](custom-domains.md). Self-hosters run
-the relay passthrough-only by leaving `PIPER_RELAY_TLS_CERT`/`KEY` unset.
+only splices SNI) — set `PIPER_BASE_DOMAIN` + cert/DNS config instead of
+claiming through `piper login`; see [`custom-domains.md`](custom-domains.md).
+Self-hosters run the relay passthrough-only by leaving
+`PIPER_RELAY_TLS_CERT`/`KEY` unset.
 
 ### List and remove boxes
 
@@ -231,16 +250,17 @@ piper box ls                                          # base domain, owner, conn
 piper box rm ab12-alice.public.getpiper.dev --yes      # frees the box slot
 ```
 
-Removal frees the box slot for a fresh `piper connect`; a connected box must be
-stopped first (the relay refuses with a conflict otherwise). The box's
-relay-assigned `<hash>-<user>.<apex>` app URL stays reserved on the account,
-but any custom domains it held are released and can be re-claimed elsewhere.
+Removal frees the box slot for a fresh claim — `piper login --re-enroll` on
+the box; a connected box must be stopped first (the relay refuses with a
+conflict otherwise). The box's relay-assigned `<hash>-<user>.<apex>` app URL
+stays reserved on the account, but any custom domains it held are released and
+can be re-claimed elsewhere.
 
 ## Drive a box remotely
 
 Any control command (`create`, `deploy`, `list`, `status`, `app link`,
 `github setup`) can target one of your relay-connected boxes from anywhere, by
-the base domain `piper connect` printed:
+the base domain `piper login` printed:
 
 ```bash
 piper --remote ab12-alice.public.getpiper.dev list
@@ -253,8 +273,8 @@ Requests travel relay → tunnel → box: the CLI authenticates to the relay wit
 the account credential `piper login` saved in `~/.piper/piper/config.json`
 (mode `0600`), and the relay swaps it for the box's own token — your relay
 credential never reaches the box, and the box still enforces its own auth.
-The `--remote` flag overrides `PIPER_REMOTE`; `login` and `connect` are
-inherently local and reject `--remote`.
+The `--remote` flag overrides `PIPER_REMOTE`; `login` is inherently local and
+rejects `--remote`.
 
 ## Point your own domain at an app
 
