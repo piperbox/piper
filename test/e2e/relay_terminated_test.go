@@ -70,7 +70,16 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 
 	// Start piperd first, LAN-only (no PIPER_RELAY_* env): its enrollment
 	// socket comes up so `piper login` below can claim it (one-command login).
-	piperdData := t.TempDir()
+	//
+	// os.MkdirTemp, not t.TempDir(): t.TempDir() embeds the (long) test name in
+	// the path, which blows darwin's ~104-byte sockaddr_un sun_path limit under
+	// a normal $TMPDIR. MkdirTemp("", "p") drops that segment and stays well
+	// under the limit on both darwin and linux.
+	piperdData, err := os.MkdirTemp("", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(piperdData) })
 	pd := exec.CommandContext(ctx, filepath.Join(binDir, "piperd"))
 	pd.Env = append(os.Environ(),
 		"PIPER_DATA_DIR="+piperdData,
