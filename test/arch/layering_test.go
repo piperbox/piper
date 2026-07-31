@@ -32,6 +32,7 @@ var layer = map[string]int{
 	"caddy":       0,
 	"certs":       0,
 	"config":      0,
+	"enrollapi":   0,
 	"ghjwt":       0,
 	"relayclient": 0,
 	"runtime":     0,
