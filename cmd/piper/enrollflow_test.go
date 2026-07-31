@@ -42,7 +42,15 @@ func stubNoLocalPiperd(t *testing.T) string {
 // data dir whose candidate list finds it.
 func startFakeEnrollSocket(t *testing.T, mux http.Handler) string {
 	t.Helper()
-	dir := t.TempDir()
+	// os.MkdirTemp, not t.TempDir(): t.TempDir() embeds the (long) test name in
+	// the path, which blows darwin's ~104-byte sockaddr_un sun_path limit under
+	// a normal $TMPDIR. MkdirTemp("", "p") drops that segment and stays well
+	// under the limit on both darwin and linux.
+	dir, err := os.MkdirTemp("", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
 	ln, err := net.Listen("unix", filepath.Join(dir, "piperd.sock"))
 	if err != nil {
 		t.Fatal(err)
