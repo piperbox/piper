@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -14,7 +15,16 @@ import (
 // serveUnix runs handler on a unix socket in a temp dir and returns its path.
 func serveUnix(t *testing.T, handler http.Handler) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "piperd.sock")
+	// os.MkdirTemp, not t.TempDir(): t.TempDir() embeds the (long) test name in
+	// the path, which blows darwin's ~104-byte sockaddr_un sun_path limit under
+	// a normal $TMPDIR. MkdirTemp("", "p") drops that segment and stays well
+	// under the limit on both darwin and linux.
+	dir, err := os.MkdirTemp("", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "piperd.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
