@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,7 +91,7 @@ func TestValidateEnrollmentFailsOnSilentRelay(t *testing.T) {
 type enrollRec struct {
 	enrolled  []string // "api|cred|boxID|org" per relayEnroll call
 	validated []string // "addr|token|base" per validate call
-	applied   int
+	applied   atomic.Int32
 }
 
 func newTestEnrollServer(t *testing.T, dataDir string) (*enrollServer, *enrollRec) {
@@ -114,7 +115,7 @@ func newTestEnrollServer(t *testing.T, dataDir string) (*enrollServer, *enrollRe
 			return nil
 		},
 		countBuilding: func() (int64, error) { return 0, nil },
-		apply:         func() { rec.applied++ },
+		apply:         func() { rec.applied.Add(1) },
 	}
 	return s, rec
 }
@@ -172,7 +173,7 @@ func TestEnrollHappyPathPersistsThenApplies(t *testing.T) {
 	if len(rec.validated) != 1 || rec.validated[0] != "relay.getpiper.co:7000|enr-1|ab12-erin.public.getpiper.co" {
 		t.Fatalf("validate calls = %v", rec.validated)
 	}
-	waitFor(t, func() bool { return rec.applied == 1 }) // apply is async
+	waitFor(t, func() bool { return rec.applied.Load() == 1 }) // apply is async
 }
 
 func TestEnrollValidateFailurePersistsNothing(t *testing.T) {

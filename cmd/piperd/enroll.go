@@ -217,7 +217,7 @@ func enrollSocketPath(dataDir string) string {
 // listenEnrollSocket binds the unix socket, replacing a stale file left by a
 // crash. The socket itself is 0666: the DIRECTORY is what authenticates the
 // server — only piperd's user (or root) can create a socket inside the
-// RuntimeDirectory / the 0700 data dir, while any local user may talk to it,
+// RuntimeDirectory / the owner-writable data dir, while any local user may talk to it,
 // the same trust stance as the tokenless loopback API. Browsers cannot speak
 // unix sockets and a port squatter cannot bind here, which is why this is a
 // socket and not a TCP port (one-command login design).
