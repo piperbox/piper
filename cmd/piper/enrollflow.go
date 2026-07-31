@@ -102,7 +102,7 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 			}
 		}
 		fmt.Fprintf(stdout, "already enrolled as %s\n", st.BaseDomain)
-		return waitConnected(o.dataDir, st.BaseDomain, stdout, stderr)
+		return waitConnected(ctx, o.dataDir, st.BaseDomain, stdout, stderr)
 	}
 	fmt.Fprintln(stdout, "claiming this box…")
 	resp, err := c.EnrollRelay(enrollapi.EnrollRequest{
@@ -116,7 +116,7 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 	case errors.As(err, &already):
 		// Raced with another login; treat like the enrolled path.
 		fmt.Fprintf(stdout, "already enrolled as %s\n", already.BaseDomain)
-		return waitConnected(o.dataDir, already.BaseDomain, stdout, stderr)
+		return waitConnected(ctx, o.dataDir, already.BaseDomain, stdout, stderr)
 	case errors.Is(err, client.ErrEnrollQuota):
 		fmt.Fprintln(stderr, "error: account agent quota exceeded")
 		fmt.Fprintln(stderr, "run `piper box ls` to see your boxes, then `piper box rm <base-domain>` to free a slot")
@@ -131,10 +131,10 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 		// A transport drop here can mean the apply already tore the listener
 		// down; the status poll below settles whether the claim persisted.
 		fmt.Fprintf(stderr, "note: enrollment response lost (%v); checking whether it applied…\n", err)
-		return waitConnected(o.dataDir, "", stdout, stderr)
+		return waitConnected(ctx, o.dataDir, "", stdout, stderr)
 	}
 	fmt.Fprintf(stdout, "enrolled as %s\napplying…\n", resp.BaseDomain)
-	return waitConnected(o.dataDir, resp.BaseDomain, stdout, stderr)
+	return waitConnected(ctx, o.dataDir, resp.BaseDomain, stdout, stderr)
 }
 
 // waitConnected polls the enrollment socket (re-finding it: the re-exec
@@ -142,12 +142,15 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 // persisted the enrollment a quiet deadline is ADVISORY — exit 0 with a note,
 // the tunnel client retries in the background — while a recorded handshake
 // rejection is definitive. A socket that never comes back is a hard failure
-// with a per-platform diagnosis hint.
-func waitConnected(dataDir, baseDomain string, stdout, stderr io.Writer) int {
+// with a per-platform diagnosis hint. ctx cancellation (Ctrl-C) is a
+// cancellation point on every loop iteration (#297 precedent): once the
+// enrollment has been observed persisted it is treated the same as the quiet
+// deadline (advisory, exit 0); otherwise it is a hard interrupt (exit 1).
+func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stderr io.Writer) int {
 	deadline := time.Now().Add(enrollApplyTimeout)
 	sawStatus := false
 	enrolled := false
-	for time.Now().Before(deadline) {
+	for ctx.Err() == nil && time.Now().Before(deadline) {
 		if c, ok := findEnrollSocket(dataDir); ok {
 			if st, err := c.RelayStatus(); err == nil {
 				sawStatus = true
@@ -166,7 +169,20 @@ func waitConnected(dataDir, baseDomain string, stdout, stderr io.Writer) int {
 				}
 			}
 		}
-		pollSleep(enrollPollInterval)
+		slept := make(chan struct{})
+		go func() { pollSleep(enrollPollInterval); close(slept) }()
+		select {
+		case <-ctx.Done():
+		case <-slept:
+		}
+	}
+	if ctx.Err() != nil {
+		if enrolled {
+			fmt.Fprintf(stdout, "enrollment applied; the tunnel is still retrying in the background — check later with `piper box ls`.\n")
+			return 0
+		}
+		fmt.Fprintln(stderr, "interrupted before the enrollment was confirmed applied.")
+		return 1
 	}
 	if !sawStatus || !enrolled {
 		fmt.Fprintln(stderr, "error: piperd did not come back after applying the enrollment.")

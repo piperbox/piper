@@ -255,6 +255,53 @@ func TestEnrollFlowAdvisoryWhenTunnelPending(t *testing.T) {
 	}
 }
 
+// TestEnrollFlowInterruptStopsApplyWait pins #297's precedent onto the
+// apply-wait loop: Ctrl-C during a retrying tunnel must stop the wait
+// promptly, not sit out the full enrollApplyTimeout. enrollApplyTimeout here
+// is set much longer than the cancellation delay (and than fastPoll's usual
+// 300ms) specifically so that, pre-fix (ctx not threaded into waitConnected),
+// the call visibly hangs for the whole deadline instead of returning quickly
+// for an unrelated reason — that is what makes the elapsed-time assertion
+// genuinely RED against the old code.
+func TestEnrollFlowInterruptStopsApplyWait(t *testing.T) {
+	stubNoLocalPiperd(t)
+	oldTimeout, oldInterval, oldSleep := enrollApplyTimeout, enrollPollInterval, pollSleep
+	enrollApplyTimeout = 5 * time.Second
+	enrollPollInterval = 10 * time.Millisecond
+	pollSleep = func(d time.Duration) { time.Sleep(d) }
+	t.Cleanup(func() { enrollApplyTimeout, enrollPollInterval, pollSleep = oldTimeout, oldInterval, oldSleep })
+
+	f := &fakePiperd{}
+	f.status.Store(enrollapi.Status{Enrolled: false, Tunnel: "off"})
+	f.enroll = func(enrollapi.EnrollRequest) (int, any) {
+		// The enroll POST succeeds and persists — the tunnel just stays
+		// "retrying" forever, so the apply-wait loop keeps polling.
+		f.status.Store(enrollapi.Status{Enrolled: true, BaseDomain: "b.public.getpiper.co", Tunnel: "retrying"})
+		return http.StatusOK, enrollapi.EnrollResponse{BaseDomain: "b.public.getpiper.co", RelayAddr: "relay:7000"}
+	}
+	dataDir := startFakeEnrollSocket(t, f.mux())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	var out, errb bytes.Buffer
+	start := time.Now()
+	code := enrollAfterLogin(ctx, enrollFlowOpts{relayAPI: "a", dataDir: dataDir}, "cred", &out, &errb)
+	elapsed := time.Since(start)
+	if code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("waitConnected took %v after cancellation, want a prompt return well under the %v deadline", elapsed, enrollApplyTimeout)
+	}
+	if !strings.Contains(out.String(), "still retrying in the background") {
+		t.Fatalf("stdout = %q, want the advisory note", out.String())
+	}
+}
+
 func TestEnrollFlowRejectedTokenIsDefinitive(t *testing.T) {
 	stubNoLocalPiperd(t)
 	fastPoll(t)
