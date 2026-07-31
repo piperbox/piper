@@ -258,9 +258,12 @@ func (a *api) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Optional body: {"org":"<slug>"} enrolls the box into an org the caller
-	// owns. No/empty body is personal enrollment, unchanged.
+	// owns (no/empty body is personal enrollment); {"box_id":"..."} is the
+	// durable identity piperd minted on the box, making the enroll an upsert —
+	// see EnrollForAccount.
 	var req struct {
-		Org string `json:"org"`
+		Org   string `json:"org"`
+		BoxID string `json:"box_id"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	targetID := acc.ID
@@ -280,7 +283,7 @@ func (a *api) enroll(w http.ResponseWriter, r *http.Request) {
 		}
 		targetID = orgID
 	}
-	en, err := a.st.EnrollForAccount(targetID, "")
+	en, err := a.st.EnrollForAccount(targetID, req.BoxID)
 	if errors.Is(err, ErrQuotaExceeded) {
 		http.Error(w, "agent quota exceeded", http.StatusTooManyRequests)
 		return
