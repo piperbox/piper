@@ -280,7 +280,7 @@ func (a *api) enroll(w http.ResponseWriter, r *http.Request) {
 		}
 		targetID = orgID
 	}
-	en, err := a.st.EnrollForAccount(targetID)
+	en, err := a.st.EnrollForAccount(targetID, "")
 	if errors.Is(err, ErrQuotaExceeded) {
 		http.Error(w, "agent quota exceeded", http.StatusTooManyRequests)
 		return

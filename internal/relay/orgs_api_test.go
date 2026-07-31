@@ -389,7 +389,7 @@ func TestOrgDeleteEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.EnrollForAccount(org); err != nil {
+	if _, err := st.EnrollForAccount(org, ""); err != nil {
 		t.Fatal(err)
 	}
 	if rr := apiReq(t, api, "DELETE", "/v1/orgs/acme", aliceCred, ""); rr.Code != http.StatusConflict {

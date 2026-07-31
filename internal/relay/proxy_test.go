@@ -72,7 +72,7 @@ func proxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router, al
 		t.Fatal(err)
 	}
 	malloryCred, _ = st.MintAccountCredential(mallory.ID)
-	en, err := st.EnrollForAccount(alice.ID)
+	en, err := st.EnrollForAccount(alice.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +243,7 @@ func TestControlProxyListAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en2, err := st.EnrollForAccount(acc.ID)
+	en2, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func orgProxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router,
 		t.Fatal(err)
 	}
 	addMember(t, st, org.ID, bob.ID, "member")
-	en, err := st.EnrollForAccount(org.ID)
+	en, err := st.EnrollForAccount(org.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestControlProxyListIncludesOrgAgentsWithOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	personal, err := st.EnrollForAccount(acc.ID)
+	personal, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
