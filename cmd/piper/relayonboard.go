@@ -49,7 +49,7 @@ func finishInstall(ctx context.Context, rc *relayclient.Client, acc relayclient.
 // relayLogin runs the GitHub device flow against the relay, printing the
 // verification URL + user code, polling to completion, and storing the returned
 // account credential (and relay API base) in the CLI config.
-func relayLogin(relayAPI string, stdout, stderr io.Writer) int {
+func relayLogin(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) int {
 	// Interrupt-aware: Ctrl-C during the poll loop cancels the in-flight
 	// request instead of waiting out the 30s client timeout.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -98,6 +98,9 @@ func relayLogin(relayAPI string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
+		if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
+			return code // identity is durable; re-running login resumes at the claim
+		}
 		finishInstall(ctx, rc, acc, stdout, stderr)
 		return 0
 	}
@@ -109,7 +112,7 @@ func relayLogin(relayAPI string, stdout, stderr io.Writer) int {
 // page. The box holds no loopback listener; it only polls the handle. Unlike the
 // device flow, this ends with the install already underway, so a first-timer's
 // login and install are one browser trip.
-func relayLoginWeb(relayAPI string, stdout, stderr io.Writer) int {
+func relayLoginWeb(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	rc := relayclient.New(relayAPI)
@@ -149,6 +152,9 @@ func relayLoginWeb(relayAPI string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
+		if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
+			return code // identity is durable; re-running login resumes at the claim
+		}
 		finishInstall(ctx, rc, acc, stdout, stderr)
 		return 0
 	}
