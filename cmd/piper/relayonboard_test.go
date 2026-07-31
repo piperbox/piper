@@ -523,6 +523,15 @@ func TestRelayLoginRunsClaimStage(t *testing.T) {
 	t.Setenv("PIPER_TOKEN", "")
 	stubNoLocalPiperd(t)
 	fastPoll(t)
+	// The device-flow stub answers "interval": 0, which relayLogin defaults to
+	// 5s; cap the poll sleep so that real default doesn't turn into a real 5s
+	// sleep in this test.
+	pollSleep = func(d time.Duration) {
+		if d > 20*time.Millisecond {
+			d = 20 * time.Millisecond
+		}
+		time.Sleep(d)
+	}
 
 	// Device-flow relay stub that immediately grants the login.
 	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
