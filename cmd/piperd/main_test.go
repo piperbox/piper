@@ -509,7 +509,7 @@ func TestEnrollRoutesNotOnControlAPI(t *testing.T) {
 	}
 	defer st.Close()
 	h := api.New(st, nil, "piper.localhost", "", func() {}, nil, nil,
-		func() string { return "" }, nil)
+		func() string { return "" }, nil, api.AgentInfo{})
 	for _, probe := range []struct{ method, path string }{
 		{http.MethodPost, enrollapi.PathEnroll},
 		{http.MethodGet, enrollapi.PathStatus},

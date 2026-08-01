@@ -550,7 +550,11 @@ func main() {
 		// What `piper github reset` leaves behind: the same decision, re-run as
 		// if the row it just deleted had never been there.
 		return decideWebhookProvider(store.ErrNotFound, cfg, wh != nil && wh.ghToken != nil).name()
-	}, newRepoFetcher(st, cfg, ghTokenFn))
+	}, newRepoFetcher(st, cfg, ghTokenFn), api.AgentInfo{
+		HTTPAddr:  cfg.HTTPAddr,
+		HTTPSAddr: cfg.HTTPSAddr,
+		DataDir:   cfg.DataDir,
+	})
 
 	// The authenticated entry point. Always on, so LAN-only and relay-connected
 	// boxes run the identical listener topology; the relay tunnel below is its
