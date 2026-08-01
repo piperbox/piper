@@ -92,11 +92,6 @@ type FetchRepoFunc func(ctx context.Context, repo, ref, destDir string) error
 // source is configured at call time.
 var ErrNoGitHubApp = errors.New("no GitHub App configured — run `piper github setup` first")
 
-// onGitHubApp, if non-nil, is invoked after a GitHub App is configured via the
-// exchange endpoint, so the daemon can start serving webhooks without a restart.
-// nextGitHubProvider, if non-nil, names the webhook credential source the box
-// would pick with no App stored locally; the reset endpoint reports it so the
-// operator learns whether anything takes over. Nil answers "unknown".
 // AgentInfo is the daemon's self-report beyond its version: the listen config
 // it actually loaded. `agent status` can't always read the process env (the
 // system piperd's /proc environ is root-only), so the daemon states it (#476).
@@ -106,6 +101,11 @@ type AgentInfo struct {
 	DataDir   string
 }
 
+// onGitHubApp, if non-nil, is invoked after a GitHub App is configured via the
+// exchange endpoint, so the daemon can start serving webhooks without a restart.
+// nextGitHubProvider, if non-nil, names the webhook credential source the box
+// would pick with no App stored locally; the reset endpoint reports it so the
+// operator learns whether anything takes over. Nil answers "unknown".
 func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHubApp func(), dom DomainManager, binder RepoBinder, nextGitHubProvider func() string, fetchRepo FetchRepoFunc, self AgentInfo) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/apps", func(w http.ResponseWriter, r *http.Request) {
