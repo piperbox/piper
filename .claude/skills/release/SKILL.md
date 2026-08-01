@@ -80,7 +80,7 @@ A green workflow only proves goreleaser ran. It does not prove the installer wor
 
 ```sh
 SB=$(mktemp -d)
-curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh \
+curl -fsSL https://get.piperbox.dev/install.sh \
   | PIPER_PREFIX="$SB" PIPER_CLI_ONLY=1 sh
 "$SB/piper" --version
 ```
@@ -92,7 +92,7 @@ This matters most when anything about repo identity, hosting, or the installer i
 Full-dispatch smoke (exercises curl → apt-repo config → apt install end-to-end):
 
 ```sh
-docker run --rm debian:stable sh -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null && curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh && piper --version && piperd --version'
+docker run --rm debian:stable sh -c 'apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null && curl -fsSL https://get.piperbox.dev/install.sh | sh && piper --version && piperd --version'
 ```
 
 Expected: installer configures apt.piperbox.dev, installs both debs, both versions print the latest stable. (Runs as root in the container, so no sudo is involved.)
