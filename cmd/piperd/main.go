@@ -84,6 +84,7 @@ type relayAppStore interface {
 	ListApps() ([]store.App, error)
 	RunningPreviews() ([]store.Deployment, error)
 	SetAppHostname(name, hostname string) error
+	SetPreviewHostname(app string, pr int, hostname string) error
 }
 
 // relayAppAnnouncer is the tunnel-client slice the per-connect app re-push
@@ -155,10 +156,17 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 	// Persist what came back. The relay names the slots, and #405 moved that
 	// name onto the agent, so a hostname stored at deploy time can be stale
 	// after an upgrade — leaving `piper list` and the dashboard advertising a
-	// URL that no longer resolves. Previews are skipped: their hostname belongs
-	// to a deployment, and writing it to the app row would clobber production's.
+	// URL that no longer resolves. A preview's name goes to its deployment row,
+	// not the app row: hostnames are keyed (agent, app, pr), so writing a
+	// preview's to apps.hostname would clobber production's (#478).
 	for _, h := range hosts {
-		if h.PR != 0 || h.Hostname == "" {
+		if h.Hostname == "" {
+			continue
+		}
+		if h.PR != 0 {
+			if err := st.SetPreviewHostname(h.App, h.PR, h.Hostname); err != nil {
+				log.Printf("relay: record hostname for %s PR %d: %v", h.App, h.PR, err)
+			}
 			continue
 		}
 		if err := st.SetAppHostname(h.App, h.Hostname); err != nil {

@@ -910,6 +910,41 @@ func TestListDeploymentsEndpoint(t *testing.T) {
 	}
 }
 
+// The whole point of #478: a preview's hostname has to cross the HTTP boundary
+// under the name clients read it by, or the dashboard knows a deployment is a
+// preview but has nothing to link to. Asserted on the raw body, since the
+// serialised key is the contract — decoding into store.Deployment would pass
+// even if the field were renamed on the wire.
+func TestListDeploymentsEndpointCarriesPreviewHostname(t *testing.T) {
+	s := newTestStore(t)
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePreviewDeployment("blog", 42, "img", "pr42-c", 41000, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPreviewHostname("blog", 42, "pr42-855d1432-ozykhan.relay.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v1/apps/blog/deployments", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var raw []map[string]any
+	if err := json.NewDecoder(rr.Body).Decode(&raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("deps = %v, want 1", raw)
+	}
+	if got := raw[0]["Hostname"]; got != "pr42-855d1432-ozykhan.relay.example" {
+		t.Errorf("Hostname = %v, want the preview URL; body = %s", got, rr.Body.String())
+	}
+}
+
 func TestDeploymentLogsEndpoint(t *testing.T) {
 	s := newTestStore(t)
 	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})

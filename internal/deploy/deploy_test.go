@@ -1779,6 +1779,42 @@ func TestDeployPreviewTerminatedRoutesAssignedHostname(t *testing.T) {
 	}
 }
 
+// The URL a preview is routed at must land on the deployment row, or it never
+// crosses the HTTP API and no client can link the preview: the app row's
+// hostname is production's (#478).
+func TestDeployPreviewRecordsHostnameOnTheDeployment(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "preview-c", HostPort: 40002},
+	}
+	d := New(s, rt, newFakeCaddy(), "85b90055-alice.public.getpiper.co")
+	d.SetHostnameRegistrar(&fakeRegistrar{})
+
+	dep, err := d.DeployPreview(context.Background(), "blog", 7, t.TempDir())
+	if err != nil {
+		t.Fatalf("DeployPreview: %v", err)
+	}
+
+	const want = "pr7-hash-blog-alice.public.getpiper.co"
+	if dep.Hostname != want {
+		t.Errorf("returned deployment Hostname = %q, want %q", dep.Hostname, want)
+	}
+	deps, err := s.ListDeployments("blog")
+	if err != nil {
+		t.Fatalf("ListDeployments: %v", err)
+	}
+	var got string
+	for _, x := range deps {
+		if x.ID == dep.ID {
+			got = x.Hostname
+		}
+	}
+	if got != want {
+		t.Errorf("stored hostname = %q, want %q", got, want)
+	}
+}
+
 // TestPreviewHostWithoutRegistrar keeps LAN and BYO boxes on today's
 // construction: there baseDom is the apex, so "pr-<N>-<app>.<apex>" is a single
 // label and is exactly right.
