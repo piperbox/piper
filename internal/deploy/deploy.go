@@ -400,6 +400,14 @@ func (d *Deployer) DeployPreview(ctx context.Context, appName string, pr int, sr
 		_ = d.store.UpdateDeploymentStatus(dep.ID, "failed")
 		return store.Deployment{}, fmt.Errorf("route: %w", err)
 	}
+	// Record the URL now that it is actually served: the app row's hostname is
+	// production's, so the deployment row is the only place a preview's can
+	// reach the API (#478). Best-effort — the preview is live either way.
+	if err := d.store.SetPreviewHostname(appName, pr, host); err != nil {
+		log.Printf("preview %s PR %d: record hostname: %v", appName, pr, err)
+	} else {
+		dep.Hostname = host
+	}
 	if previous.ContainerID != "" && previous.ContainerID != run.ContainerID {
 		_ = d.runtime.Stop(ctx, previous.ContainerID)
 		_ = d.store.UpdateDeploymentStatus(previous.ID, "stopped")

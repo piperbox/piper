@@ -69,7 +69,7 @@ func TestRequireTokenStoreErrorIs500Not401(t *testing.T) {
 
 func TestDeploymentEndpointsRequireToken(t *testing.T) {
 	s := newTestStore(t)
-	h := RequireToken(s, New(s, &fakeDeployer{}, "piper.localhost", "", nil, nil, nil, nil, nil))
+	h := RequireToken(s, New(s, &fakeDeployer{}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{}))
 	for _, ep := range []struct{ method, path string }{
 		{http.MethodGet, "/v1/apps/blog/deployments"},
 		{http.MethodGet, "/v1/apps/blog/deployments/dep1/logs"},

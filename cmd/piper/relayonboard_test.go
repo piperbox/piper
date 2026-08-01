@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/piperbox/piper/internal/config"
+	"github.com/piperbox/piper/internal/enrollapi"
 	"github.com/piperbox/piper/internal/relayclient"
 )
 
@@ -31,6 +32,7 @@ func TestRelayLoginStoresCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "")
 	t.Setenv("PIPER_TOKEN", "")
+	dataDir := stubNoLocalPiperd(t)
 
 	// No real sleeps or browser during the poll loop.
 	pollSleep = func(time.Duration) {}
@@ -63,7 +65,7 @@ func TestRelayLoginStoresCredential(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	if code := run([]string{"login", "--relay", srv.URL}, &out, &errb); code != 0 {
+	if code := run([]string{"login", "--relay", srv.URL, "--data-dir", dataDir}, &out, &errb); code != 0 {
 		t.Fatalf("code = %d, err = %s", code, errb.String())
 	}
 	cc, err := config.LoadClient()
@@ -86,6 +88,7 @@ func TestRelayLoginExitsZeroWhenInstallPollTimesOut(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "")
 	t.Setenv("PIPER_TOKEN", "")
+	dataDir := stubNoLocalPiperd(t)
 
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
@@ -122,7 +125,7 @@ func TestRelayLoginExitsZeroWhenInstallPollTimesOut(t *testing.T) {
 
 	start := time.Now()
 	var out, errb bytes.Buffer
-	if code := run([]string{"login", "--relay", srv.URL}, &out, &errb); code != 0 {
+	if code := run([]string{"login", "--relay", srv.URL, "--data-dir", dataDir}, &out, &errb); code != 0 {
 		t.Fatalf("code = %d, want 0 (a successful login must not fail on a timed-out install poll); stderr = %s", code, errb.String())
 	}
 	// The deadline cut the wait short: the poll did not sit out the full
@@ -156,6 +159,7 @@ func TestRelayLoginExitsZeroWhenInstallPollInterrupted(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "")
 	t.Setenv("PIPER_TOKEN", "")
+	dataDir := stubNoLocalPiperd(t)
 
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
@@ -194,7 +198,7 @@ func TestRelayLoginExitsZeroWhenInstallPollInterrupted(t *testing.T) {
 
 	start := time.Now()
 	var out, errb bytes.Buffer
-	if code := run([]string{"login", "--relay", srv.URL}, &out, &errb); code != 0 {
+	if code := run([]string{"login", "--relay", srv.URL, "--data-dir", dataDir}, &out, &errb); code != 0 {
 		t.Fatalf("code = %d, want 0 (an interrupted advisory install poll must not fail the login); stderr = %s", code, errb.String())
 	}
 	// Without context propagation the interrupt would surface only after the
@@ -257,6 +261,7 @@ func TestRelayLoginWebStoresCredentialAndWaitsForInstall(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "")
 	t.Setenv("PIPER_TOKEN", "")
+	dataDir := stubNoLocalPiperd(t)
 
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
@@ -295,7 +300,7 @@ func TestRelayLoginWebStoresCredentialAndWaitsForInstall(t *testing.T) {
 	defer srv.Close()
 
 	var out, errb bytes.Buffer
-	if code := run([]string{"login", "--web", "--relay", srv.URL}, &out, &errb); code != 0 {
+	if code := run([]string{"login", "--web", "--relay", srv.URL, "--data-dir", dataDir}, &out, &errb); code != 0 {
 		t.Fatalf("code = %d, err = %s", code, errb.String())
 	}
 	// The browser is pointed at the relay's code-entry page, and the user code
@@ -474,200 +479,19 @@ func TestGitHubReposCommandRequiresLogin(t *testing.T) {
 	}
 }
 
-func TestConnectRequiresLogin(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PIPER_ADDR", "")
-	t.Setenv("PIPER_TOKEN", "")
+func TestConnectVerbIsGone(t *testing.T) {
 	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", t.TempDir()}, &out, &errb); code != 1 {
-		t.Fatalf("code = %d, want 1", code)
+	if code := run([]string{"connect"}, &out, &errb); code == 0 {
+		t.Fatalf("piper connect must no longer exist; out=%s", out.String())
 	}
-	if !bytes.Contains(errb.Bytes(), []byte("piper login")) {
-		t.Fatalf("stderr = %q, want a `piper login` hint", errb.String())
-	}
-}
-
-func TestConnectEnrollsAndWritesRelayFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PIPER_ADDR", "")
-	t.Setenv("PIPER_TOKEN", "")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/enroll" || r.Header.Get("Authorization") != "Bearer cred-xyz" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"enrollment_token": "enr-1", "base_domain": "ab12-alice.public.getpiper.co",
-			"tunnel_endpoint": "relay.getpiper.co:7000",
-			"webhook_secret":  "whsec-1", "github_app": true,
-		})
-	}))
-	defer srv.Close()
-
-	// Prior `piper login` state.
-	if err := config.SaveClient(config.ClientConfig{
-		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	dataDir := t.TempDir()
-	old := config.SystemEnvDir
-	config.SystemEnvDir = filepath.Join(t.TempDir(), "absent") // force the non-systemd path
-	defer func() { config.SystemEnvDir = old }()
-	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", dataDir}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, err = %s", code, errb.String())
-	}
-	rf, found, err := config.LoadRelayFile(dataDir)
-	if err != nil || !found {
-		t.Fatalf("relay file: found=%v err=%v", found, err)
-	}
-	want := config.RelayFile{RelayAddr: "relay.getpiper.co:7000", RelayToken: "enr-1", BaseDomain: "ab12-alice.public.getpiper.co", Terminated: true, WebhookSecret: "whsec-1", GitHubBrokered: true}
-	if rf != want {
-		t.Fatalf("relay file = %+v, want %+v", rf, want)
-	}
-	if !strings.Contains(out.String(), "restart piperd to connect: ") {
-		t.Fatalf("stdout = %q, want a framed restart hint", out.String())
-	}
-	if !strings.HasSuffix(out.String(), "\n") {
-		t.Fatalf("stdout = %q, want a trailing newline", out.String())
-	}
-}
-
-func TestConnectWritesTerminated(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PIPER_ADDR", "")
-	t.Setenv("PIPER_TOKEN", "")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/enroll" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"enrollment_token": "enr-1", "base_domain": "aaaa-alice.public.getpiper.co",
-			"tunnel_endpoint": "relay.getpiper.co:7000",
-			"webhook_secret":  "whsec-1", "github_app": true,
-		})
-	}))
-	defer srv.Close()
-	if err := config.SaveClient(config.ClientConfig{
-		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	dataDir := t.TempDir()
-	old := config.SystemEnvDir
-	config.SystemEnvDir = filepath.Join(t.TempDir(), "absent") // force the non-systemd path
-	defer func() { config.SystemEnvDir = old }()
-	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", dataDir}, &out, &errb); code != 0 {
-		t.Fatalf("code = %d, err = %s", code, errb.String())
-	}
-	rf, _, err := config.LoadRelayFile(dataDir)
-	if err != nil || !rf.Terminated {
-		t.Fatalf("relay file terminated = %v (err %v)", rf.Terminated, err)
-	}
-}
-
-func TestConnectQuotaExceeded(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PIPER_ADDR", "")
-	t.Setenv("PIPER_TOKEN", "")
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusTooManyRequests)
-	}))
-	defer srv.Close()
-	if err := config.SaveClient(config.ClientConfig{
-		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", t.TempDir()}, &out, &errb); code != 1 {
-		t.Fatalf("code = %d, want 1", code)
-	}
-	// The message must name only remedies that exist. It used to say "remove an
-	// existing box or upgrade" when neither was possible (#401).
-	got := errb.String()
-	for _, want := range []string{"quota", "piper box ls", "piper box rm"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("stderr = %q, want it to mention %q", got, want)
-		}
-	}
-	if strings.Contains(got, "upgrade") {
-		t.Errorf("stderr = %q, must not offer an upgrade path that does not exist", got)
-	}
-}
-
-func TestConnectOffBoxFailsLoudly(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PIPER_ADDR", "")
-	t.Setenv("PIPER_TOKEN", "")
-
-	// The enroll endpoint must NOT be hit: an off-box run fails before burning
-	// an account quota slot on an enrollment nothing would read (#173).
-	var enrolls int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		enrolls++
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"enrollment_token": "enr-1", "base_domain": "ab12-alice.public.getpiper.co",
-			"tunnel_endpoint": "relay.getpiper.co:7000",
-			"webhook_secret":  "whsec-1", "github_app": true,
-		})
-	}))
-	defer srv.Close()
-	if err := config.SaveClient(config.ClientConfig{
-		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	// No piperd install of any flavor: no /etc/piper, no resolvable piperd
-	// binary, and no existing data dir.
-	old := config.SystemEnvDir
-	config.SystemEnvDir = filepath.Join(t.TempDir(), "absent")
-	defer func() { config.SystemEnvDir = old }()
-	origPath := piperdPath
-	piperdPath = func() (string, error) { return "", errors.New("not found") }
-	defer func() { piperdPath = origPath }()
-	dataDir := filepath.Join(t.TempDir(), "absent")
-
-	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", dataDir}, &out, &errb); code != 1 {
-		t.Fatalf("code = %d, want 1 (stdout = %s)", code, out.String())
-	}
-	if !bytes.Contains(errb.Bytes(), []byte("on the box")) {
-		t.Fatalf("stderr = %q, want a must-run-on-the-box message", errb.String())
-	}
-	if enrolls != 0 {
-		t.Fatalf("enroll endpoint hit %d times off-box; want 0 (fail before burning quota)", enrolls)
-	}
-	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
-		t.Fatalf("data dir created off-box: stat err = %v", err)
-	}
-}
-
-// restartHint names the one restart command per platform: brew's service on
-// macOS, the system unit elsewhere.
-func TestRestartHintPerPlatform(t *testing.T) {
-	orig := agentGOOS
-	t.Cleanup(func() { agentGOOS = orig })
-	agentGOOS = "darwin"
-	if got := restartHint(); got != "brew services restart piper" {
-		t.Errorf("darwin hint = %q", got)
-	}
-	agentGOOS = "linux"
-	if got := restartHint(); got != "sudo systemctl restart piperd" {
-		t.Errorf("linux hint = %q", got)
+	if !strings.Contains(errb.String(), "piper login") {
+		t.Fatalf("unknown-command output should point at piper login: %q", errb.String())
 	}
 }
 
 // agentInstalled must recognize every surviving signal of an install: an
 // existing data dir (an enrolled box) or a resolvable piperd binary
-// (deb/brew/manual). The all-absent case is also pinned end-to-end by
-// TestConnectOffBoxFailsLoudly.
+// (deb/brew/manual).
 func TestAgentInstalledProbesBinaryAndState(t *testing.T) {
 	dir := t.TempDir()
 	origPath := piperdPath
@@ -688,58 +512,63 @@ func TestAgentInstalledProbesBinaryAndState(t *testing.T) {
 	}
 }
 
-func TestConnectSystemManagedGuidesEnvInstall(t *testing.T) {
+// After identity is saved, `piper login` runs the claim stage against the
+// enrollment socket — logging in and claiming this box happen in one command
+// (the merged-login design). The relay stub grants the login immediately; the
+// fake piperd behind the enrollment socket then sees the claim, and the CLI's
+// stdout narrates login → claim in order.
+func TestRelayLoginRunsClaimStage(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "")
 	t.Setenv("PIPER_TOKEN", "")
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/enroll" || r.Header.Get("Authorization") != "Bearer cred-xyz" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	// The device-flow stub answers "interval": 0, which relayLogin defaults to
+	// 5s; cap the poll sleep so that real default doesn't turn into a real 5s
+	// sleep in this test.
+	pollSleep = func(d time.Duration) {
+		if d > 20*time.Millisecond {
+			d = 20 * time.Millisecond
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"enrollment_token": "enr-1", "base_domain": "ab12-alice.public.getpiper.co",
-			"tunnel_endpoint": "relay.getpiper.co:7000",
-			"webhook_secret":  "whsec-1", "github_app": true,
-		})
-	}))
-	defer srv.Close()
-
-	if err := config.SaveClient(config.ClientConfig{
-		Addr: "http://127.0.0.1:8088", RelayAPI: srv.URL, AccountCredential: "cred-xyz",
-	}); err != nil {
-		t.Fatal(err)
+		time.Sleep(d)
 	}
 
-	// A present /etc/piper marks a systemd-managed box.
-	dataDir := t.TempDir()
-	old := config.SystemEnvDir
-	config.SystemEnvDir = t.TempDir()
-	defer func() { config.SystemEnvDir = old }()
+	// Device-flow relay stub that immediately grants the login.
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/login/device":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"verification_uri": "https://github.com/login/device", "user_code": "ABCD-1234",
+				"device_code": "dev-1", "interval": 0, "expires_in": 300})
+		case "/v1/login/poll":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"account_credential": "cred-xyz", "username": "erin"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer relay.Close()
+
+	f := &fakePiperd{}
+	f.status.Store(enrollapi.Status{Enrolled: false, Tunnel: "off"})
+	f.enroll = func(req enrollapi.EnrollRequest) (int, any) {
+		f.status.Store(enrollapi.Status{Enrolled: true, BaseDomain: "ab12-erin.public.getpiper.co", Tunnel: "connected"})
+		return http.StatusOK, enrollapi.EnrollResponse{BaseDomain: "ab12-erin.public.getpiper.co", RelayAddr: "relay:7000"}
+	}
+	dataDir := startFakeEnrollSocket(t, f.mux())
 
 	var out, errb bytes.Buffer
-	if code := run([]string{"connect", "--data-dir", dataDir}, &out, &errb); code != 0 {
+	code := run([]string{"login", "--relay", relay.URL, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
 		t.Fatalf("code = %d, err = %s", code, errb.String())
 	}
-	// It must guide the env-file install, not write relay.json.
-	if _, found, _ := config.LoadRelayFile(dataDir); found {
-		t.Fatalf("relay.json written on a systemd-managed box; expected a guided env-file install")
+	got := f.got.Load().(enrollapi.EnrollRequest)
+	if got.RelayAPI != relay.URL || got.AccountCredential != "cred-xyz" {
+		t.Fatalf("claim did not carry the fresh credential: %+v", got)
 	}
-	for _, want := range []string{
-		// The sudo upsert must be framed unmistakably as the action to take (#173).
-		"Next step:",
-		"sudo sh -c",
-		"piperd.env",
-		"PIPER_RELAY_ADDR=relay.getpiper.co:7000",
-		"PIPER_RELAY_TOKEN=enr-1",
-		"PIPER_BASE_DOMAIN=ab12-alice.public.getpiper.co",
-		"PIPER_RELAY_TERMINATED=1",
-		"PIPER_WEBHOOK_SECRET=whsec-1",
-		"PIPER_GITHUB_BROKERED=1",
-	} {
-		if !bytes.Contains(out.Bytes(), []byte(want)) {
-			t.Fatalf("stdout missing %q; got:\n%s", want, out.String())
+	for _, want := range []string{"logged in to relay as erin", "claiming this box", "ab12-erin.public.getpiper.co"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("stdout missing %q:\n%s", want, out.String())
 		}
 	}
 }

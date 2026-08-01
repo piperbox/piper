@@ -3,6 +3,11 @@ CREATE TABLE IF NOT EXISTS agents (
     token_hash     TEXT NOT NULL UNIQUE,
     base_domain    TEXT NOT NULL,
     account_id     TEXT,
+    -- box_id is the durable identity piperd mints on first enroll
+    -- (<dataDir>/box-id). Non-empty box_id makes enroll an upsert keyed on
+    -- (account_id, box_id): token rotates, base domain and quota slot are
+    -- reused. Empty box_id is an operator/legacy enroll: fresh row per call.
+    box_id         TEXT,
     control_token  TEXT,
     webhook_secret TEXT,
     created_at     TEXT NOT NULL
@@ -10,6 +15,10 @@ CREATE TABLE IF NOT EXISTS agents (
 
 CREATE UNIQUE INDEX IF NOT EXISTS agents_base_domain_unique
     ON agents(base_domain);
+
+CREATE UNIQUE INDEX IF NOT EXISTS agents_account_box_unique
+    ON agents(account_id, box_id)
+    WHERE box_id IS NOT NULL AND box_id != '';
 
 -- username is unique per type, not globally: users and orgs hold separate
 -- namespaces, so an org can never take a GitHub login out from under the user

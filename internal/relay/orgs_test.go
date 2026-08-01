@@ -91,11 +91,11 @@ func TestSameNamedUserAndOrgGetDistinctHostnames(t *testing.T) {
 		t.Fatalf("org slug %q != user slug %q; this test needs them equal", org.Slug, acme.Username)
 	}
 
-	userAgent, err := st.EnrollForAccount(acme.ID)
+	userAgent, err := st.EnrollForAccount(acme.ID, "")
 	if err != nil {
 		t.Fatalf("user enroll: %v", err)
 	}
-	orgAgent, err := st.EnrollForAccount(org.ID)
+	orgAgent, err := st.EnrollForAccount(org.ID, "")
 	if err != nil {
 		t.Fatalf("org enroll: %v", err)
 	}
@@ -163,15 +163,15 @@ func TestOrgAgentQuotaIsIndependent(t *testing.T) {
 
 	// Alice fills her personal cap.
 	for i := 0; i < 2; i++ {
-		if _, err := st.EnrollForAccount(alice.ID); err != nil {
+		if _, err := st.EnrollForAccount(alice.ID, ""); err != nil {
 			t.Fatalf("personal enroll %d: %v", i, err)
 		}
 	}
-	if _, err := st.EnrollForAccount(alice.ID); err != ErrQuotaExceeded {
+	if _, err := st.EnrollForAccount(alice.ID, ""); err != ErrQuotaExceeded {
 		t.Fatalf("over personal cap err = %v, want ErrQuotaExceeded", err)
 	}
 	// The org's cap is its own; its base domain carries the org slug.
-	en, err := st.EnrollForAccount(org.ID)
+	en, err := st.EnrollForAccount(org.ID, "")
 	if err != nil {
 		t.Fatalf("org enroll: %v", err)
 	}
@@ -390,9 +390,9 @@ func TestAgentsVisibleToMergesPersonalAndOrg(t *testing.T) {
 	org, _ := st.CreateOrg(alice.ID, "acme")
 	addMember(t, st, org.ID, bob.ID, "member")
 
-	personal, _ := st.EnrollForAccount(bob.ID)
-	orgEn, _ := st.EnrollForAccount(org.ID)
-	st.EnrollForAccount(alice.ID) // alice's personal box: invisible to bob
+	personal, _ := st.EnrollForAccount(bob.ID, "")
+	orgEn, _ := st.EnrollForAccount(org.ID, "")
+	st.EnrollForAccount(alice.ID, "") // alice's personal box: invisible to bob
 
 	got, err := st.AgentsVisibleTo(bob.ID)
 	if err != nil {
@@ -420,7 +420,7 @@ func TestDeleteOrgRefusedWhileAgentsExist(t *testing.T) {
 	org, _ := st.CreateOrg(alice.ID, "acme")
 	st.CreateInvite(org.ID, "someone", alice.ID)
 
-	if _, err := st.EnrollForAccount(org.ID); err != nil {
+	if _, err := st.EnrollForAccount(org.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteOrg(org.ID); !errors.Is(err, ErrOrgHasAgents) {

@@ -287,6 +287,80 @@ func TestRunningPreviewsReturnsOnlyTheNewestPerPR(t *testing.T) {
 	}
 }
 
+// A preview's URL is a per-deployment fact — apps.hostname is keyed (agent,
+// app, pr=0), so it is production's alone — which is why previews had no
+// hostname anywhere in the HTTP API and no client could link one (#478). It
+// rides on the deployment row and out through ListDeployments.
+func TestSetPreviewHostnameFlowsThroughListDeployments(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateDeployment("blog", "img1", "main-c", 40001, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePreviewDeployment("blog", 7, "img2", "pr7-c", 41000, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	const want = "pr7-855d1432-ozykhan.relay.example"
+	if err := s.SetPreviewHostname("blog", 7, want); err != nil {
+		t.Fatalf("SetPreviewHostname: %v", err)
+	}
+
+	deps, err := s.ListDeployments("blog")
+	if err != nil {
+		t.Fatalf("ListDeployments: %v", err)
+	}
+	byContainer := map[string]Deployment{}
+	for _, d := range deps {
+		byContainer[d.ContainerID] = d
+	}
+	if got := byContainer["pr7-c"].Hostname; got != want {
+		t.Errorf("preview hostname = %q, want %q", got, want)
+	}
+	if got := byContainer["main-c"].Hostname; got != "" {
+		t.Errorf("production row hostname = %q, want empty (it lives on the app row)", got)
+	}
+}
+
+// The relay can rename a slot (#405 did exactly that), so a reconnect
+// re-records the hostname. Only the live row may move: a superseded preview
+// keeps the URL it actually served.
+func TestSetPreviewHostnameUpdatesOnlyTheNewestRunningRow(t *testing.T) {
+	s := openTemp(t)
+	old, err := s.CreatePreviewDeployment("blog", 7, "img", "pr7-old", 41000, "running", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPreviewHostname("blog", 7, "pr7-old.relay.example"); err != nil {
+		t.Fatalf("SetPreviewHostname(old): %v", err)
+	}
+	if _, err := s.CreatePreviewDeployment("blog", 7, "img", "pr7-new", 41002, "running", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPreviewHostname("blog", 7, "pr7-new.relay.example"); err != nil {
+		t.Fatalf("SetPreviewHostname(new): %v", err)
+	}
+
+	deps, err := s.ListDeployments("blog")
+	if err != nil {
+		t.Fatalf("ListDeployments: %v", err)
+	}
+	byID := map[string]Deployment{}
+	for _, d := range deps {
+		byID[d.ID] = d
+	}
+	if got := byID[old.ID].Hostname; got != "pr7-old.relay.example" {
+		t.Errorf("superseded row hostname = %q, want the URL it served", got)
+	}
+	for _, d := range deps {
+		if d.ContainerID == "pr7-new" && d.Hostname != "pr7-new.relay.example" {
+			t.Errorf("live row hostname = %q, want pr7-new.relay.example", d.Hostname)
+		}
+	}
+}
+
 func TestTokenCreateAuthenticateRevoke(t *testing.T) {
 	s := openTemp(t)
 	tok, err := s.CreateToken("laptop", "admin")
@@ -716,6 +790,37 @@ func TestFailBuildingDeployments(t *testing.T) {
 	logs, _ := s.DeploymentLogs("web", building.ID)
 	if !strings.Contains(logs, "pulling base image...") || !strings.Contains(logs, "aborted") {
 		t.Fatalf("failed building logs = %q, want streamed log kept + abort note", logs)
+	}
+}
+
+func TestCountBuildingDeployments(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateApp("web", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	if _, err := s.CreateDeployment("web", "", "", 0, "building", "pulling base image...\n"); err != nil {
+		t.Fatalf("CreateDeployment building: %v", err)
+	}
+	if _, err := s.CreateDeployment("web", "img", "cid", 40001, "running", "done\n"); err != nil {
+		t.Fatalf("CreateDeployment running: %v", err)
+	}
+
+	n, err := s.CountBuildingDeployments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("building = %d, want 1", n)
+	}
+	if _, err := s.FailBuildingDeployments(); err != nil {
+		t.Fatal(err)
+	}
+	n, err = s.CountBuildingDeployments()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("building after fail-sweep = %d, want 0", n)
 	}
 }
 

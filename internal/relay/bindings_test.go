@@ -10,7 +10,7 @@ func enrolledAgent(t *testing.T, st *Store, githubID, login string) (string, str
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

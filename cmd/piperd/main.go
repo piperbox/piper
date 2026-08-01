@@ -33,6 +33,7 @@ import (
 	"github.com/piperbox/piper/internal/config"
 	"github.com/piperbox/piper/internal/deploy"
 	"github.com/piperbox/piper/internal/domain"
+	"github.com/piperbox/piper/internal/relayclient"
 	"github.com/piperbox/piper/internal/runtime"
 	"github.com/piperbox/piper/internal/source"
 	"github.com/piperbox/piper/internal/source/github"
@@ -83,6 +84,7 @@ type relayAppStore interface {
 	ListApps() ([]store.App, error)
 	RunningPreviews() ([]store.Deployment, error)
 	SetAppHostname(name, hostname string) error
+	SetPreviewHostname(app string, pr int, hostname string) error
 }
 
 // relayAppAnnouncer is the tunnel-client slice the per-connect app re-push
@@ -154,10 +156,17 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 	// Persist what came back. The relay names the slots, and #405 moved that
 	// name onto the agent, so a hostname stored at deploy time can be stale
 	// after an upgrade — leaving `piper list` and the dashboard advertising a
-	// URL that no longer resolves. Previews are skipped: their hostname belongs
-	// to a deployment, and writing it to the app row would clobber production's.
+	// URL that no longer resolves. A preview's name goes to its deployment row,
+	// not the app row: hostnames are keyed (agent, app, pr), so writing a
+	// preview's to apps.hostname would clobber production's (#478).
 	for _, h := range hosts {
-		if h.PR != 0 || h.Hostname == "" {
+		if h.Hostname == "" {
+			continue
+		}
+		if h.PR != 0 {
+			if err := st.SetPreviewHostname(h.App, h.PR, h.Hostname); err != nil {
+				log.Printf("relay: record hostname for %s PR %d: %v", h.App, h.PR, err)
+			}
 			continue
 		}
 		if err := st.SetAppHostname(h.App, h.Hostname); err != nil {
@@ -170,9 +179,9 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 // over the tunnel, once per enrollment (agent-push Token B — see the
 // control-stream routing design). The token row itself is the marker: any row
 // labeled relay:<base>, live OR revoked, means "already provisioned" or "the
-// owner cut the relay off" — never re-mint. A new `piper connect` creates a new
-// enrollment (new base domain) and so a fresh mint. If the push fails, the
-// just-minted row is deleted so the next connect retries.
+// owner cut the relay off" — never re-mint. A fresh `piper login` claim creates
+// a new enrollment (new base domain) and so a fresh mint. If the push fails,
+// the just-minted row is deleted so the next login retries.
 //
 // mu serializes the whole list-then-mint sequence across concurrent OnConnect
 // callbacks: without it, a session that flaps before the first push completes
@@ -465,6 +474,7 @@ func main() {
 	}
 
 	cfg := config.Load()
+	captureBootExe()
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
@@ -548,7 +558,11 @@ func main() {
 		// What `piper github reset` leaves behind: the same decision, re-run as
 		// if the row it just deleted had never been there.
 		return decideWebhookProvider(store.ErrNotFound, cfg, wh != nil && wh.ghToken != nil).name()
-	}, newRepoFetcher(st, cfg, ghTokenFn))
+	}, newRepoFetcher(st, cfg, ghTokenFn), api.AgentInfo{
+		HTTPAddr:  cfg.HTTPAddr,
+		HTTPSAddr: cfg.HTTPSAddr,
+		DataDir:   cfg.DataDir,
+	})
 
 	// The authenticated entry point. Always on, so LAN-only and relay-connected
 	// boxes run the identical listener topology; the relay tunnel below is its
@@ -557,6 +571,47 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth api listen: %v", err)
 	}
+
+	// The enrollment socket: the daemon-owned path for `piper login` to claim
+	// this box (one-command login design). Deliberately not part of apiHandler:
+	// these routes must be unreachable through the relay tunnel and the TCP
+	// listeners (pinned by TestEnrollRoutesNotOnControlAPI).
+	applyExec := make(chan struct{}, 1)
+	es := &enrollServer{
+		dataDir:     cfg.DataDir,
+		version:     version.String(),
+		envManaged:  func() bool { return os.Getenv("PIPER_RELAY_ADDR") != "" },
+		relayStatus: func() (string, string) { return cfg.RelayAddr, cfg.BaseDomain },
+		tunnelStatus: func() (string, string) {
+			if tc == nil {
+				return "off", ""
+			}
+			return tc.Status()
+		},
+		relayEnroll: func(ctx context.Context, api, cred, boxID, org string) (relayclient.Enrollment, error) {
+			return relayclient.New(api).Enroll(ctx, cred, boxID, org)
+		},
+		validate:      validateEnrollment,
+		countBuilding: st.CountBuildingDeployments,
+		apply: func() {
+			select {
+			case applyExec <- struct{}{}:
+			default: // an apply is already queued
+			}
+		},
+	}
+	sockPath := enrollSocketPath(cfg.DataDir)
+	sockLn, err := listenEnrollSocket(sockPath)
+	if err != nil {
+		log.Fatalf("enroll socket: %v", err)
+	}
+	enrollSrv := &http.Server{Handler: es.mux()}
+	go func() {
+		if err := enrollSrv.Serve(sockLn); err != nil && err != http.ErrServerClosed {
+			log.Printf("enroll socket serve: %v", err)
+		}
+	}()
+	log.Printf("enrollment socket at %s", sockPath)
 
 	// Relay mode: dial the relay and forward its streams. Terminated (free-tier)
 	// mode holds no box cert and serves apps on :80; the relay terminates TLS and
@@ -677,7 +732,14 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	reexec := false
+	select {
+	case <-ctx.Done():
+	case <-applyExec:
+		log.Println("enrollment accepted; restarting to apply")
+		reexec = true
+		stop() // wind the tunnel and stream handlers down exactly like a signal
+	}
 	log.Println("shutting down")
 	var mgrStop listenerStopper
 	if mgr != nil {
@@ -708,7 +770,10 @@ func main() {
 	if alpnSolver != nil {
 		_ = alpnSolver.Close()
 	}
-	shutdownWithContext(overallCtx, apiServers{srv, authSrv}, whLifecycle, mgrStop, st, drainTimeout)
+	shutdownWithContext(overallCtx, apiServers{srv, authSrv, enrollSrv}, whLifecycle, mgrStop, st, drainTimeout)
+	if reexec {
+		execSelf() // never returns on success; exits 1 on refusal/failure
+	}
 	os.Exit(0)
 }
 

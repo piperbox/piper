@@ -128,7 +128,7 @@ func TestEnroll(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	en, err := New(srv.URL).Enroll(context.Background(), "cred-xyz")
+	en, err := New(srv.URL).Enroll(context.Background(), "cred-xyz", "", "")
 	if err != nil {
 		t.Fatalf("Enroll: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestEnrollErrorMapping(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(tc.code)
 		}))
-		_, err := New(srv.URL).Enroll(context.Background(), "whatever")
+		_, err := New(srv.URL).Enroll(context.Background(), "whatever", "", "")
 		srv.Close()
 		if err != tc.want {
 			t.Fatalf("code %d err = %v, want %v", tc.code, err, tc.want)

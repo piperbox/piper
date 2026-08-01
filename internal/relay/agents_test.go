@@ -40,7 +40,7 @@ func TestDeleteAgentClearsAgentAndItsChildRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,11 +80,11 @@ func TestDeleteAgentLeavesTheAccountsOtherAgentAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doomed, err := st.EnrollForAccount(acc.ID)
+	doomed, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := st.EnrollForAccount(acc.ID)
+	keeper, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestDeleteAgentReclaimsItsHostnames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	en, err := st.EnrollForAccount(acc.ID)
+	en, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,11 +151,11 @@ func TestDeleteAgentClearsItsCustomDomains(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doomed, err := st.EnrollForAccount(acc.ID)
+	doomed, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	keeper, err := st.EnrollForAccount(acc.ID)
+	keeper, err := st.EnrollForAccount(acc.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}

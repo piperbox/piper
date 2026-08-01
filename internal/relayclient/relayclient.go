@@ -175,9 +175,12 @@ func (c *Client) CLILoginPoll(ctx context.Context, handle string) (Account, erro
 }
 
 // Enroll claims a box for the account behind accountCredential, returning the
-// enrollment token, assigned base domain, and tunnel endpoint.
-func (c *Client) Enroll(ctx context.Context, accountCredential string) (Enrollment, error) {
-	resp, err := c.post(ctx, "/v1/enroll", nil, accountCredential)
+// enrollment token, assigned base domain, and tunnel endpoint. A non-empty
+// boxID makes the claim idempotent per box (the relay upserts on it); a
+// non-empty org claims the box for that org (caller must hold the owner role).
+func (c *Client) Enroll(ctx context.Context, accountCredential, boxID, org string) (Enrollment, error) {
+	body := map[string]string{"box_id": boxID, "org": org}
+	resp, err := c.post(ctx, "/v1/enroll", body, accountCredential)
 	if err != nil {
 		return Enrollment{}, err
 	}

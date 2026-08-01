@@ -27,7 +27,7 @@ func startTestRelay(t *testing.T, tlsCfg *tls.Config, ctrl http.Handler) (*tunne
 	t.Cleanup(func() { st.Close() })
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
-	en, _ := st.EnrollForAccount(acc.ID)
+	en, _ := st.EnrollForAccount(acc.ID, "")
 
 	tlsLn, _ := net.Listen("tcp", "127.0.0.1:0")
 	httpLn, _ := net.Listen("tcp", "127.0.0.1:0")
