@@ -221,9 +221,9 @@ func TestAgentStatusLinuxRunning(t *testing.T) {
 		}
 		return "", nil
 	})
-	origVer := runningAgentVersion
-	runningAgentVersion = func(string) (string, error) { return "9.9.9", nil }
-	t.Cleanup(func() { runningAgentVersion = origVer })
+	origVer := runningAgentInfo
+	runningAgentInfo = func(string) (client.AgentInfo, error) { return client.AgentInfo{Version: "9.9.9"}, nil }
+	t.Cleanup(func() { runningAgentInfo = origVer })
 	origDisk := installedPiperdVersion
 	installedPiperdVersion = func() (string, error) { return "9.9.9", nil }
 	t.Cleanup(func() { installedPiperdVersion = origDisk })
@@ -254,10 +254,10 @@ func TestAgentRejectsDaemonize(t *testing.T) {
 // stubVersions makes a running/on-disk pair, restoring both afterwards.
 func stubVersions(t *testing.T, running string, rerr error, disk string, derr error) {
 	t.Helper()
-	oldRunning, oldDisk := runningAgentVersion, installedPiperdVersion
-	runningAgentVersion = func(string) (string, error) { return running, rerr }
+	oldRunning, oldDisk := runningAgentInfo, installedPiperdVersion
+	runningAgentInfo = func(string) (client.AgentInfo, error) { return client.AgentInfo{Version: running}, rerr }
 	installedPiperdVersion = func() (string, error) { return disk, derr }
-	t.Cleanup(func() { runningAgentVersion, installedPiperdVersion = oldRunning, oldDisk })
+	t.Cleanup(func() { runningAgentInfo, installedPiperdVersion = oldRunning, oldDisk })
 }
 
 // statusOutput runs `piper agent status` against a unit systemctl reports as
@@ -278,6 +278,44 @@ func statusOutput(t *testing.T) string {
 		t.Fatalf("code = %d, stderr = %s", code, errb.String())
 	}
 	return out.String()
+}
+
+// The system piperd's /proc environ is root-only, so a non-root status can't
+// see env-file overrides and used to print the built-in defaults (:80/:443)
+// as fact (#476). The daemon's self-report is the truth about the running
+// process and must win.
+func TestAgentStatusPrintsDaemonReportedAddrs(t *testing.T) {
+	onLinux(t)
+	oldInfo, oldDisk := runningAgentInfo, installedPiperdVersion
+	runningAgentInfo = func(string) (client.AgentInfo, error) {
+		return client.AgentInfo{Version: "0.16.1", HTTPAddr: "127.0.0.1:8081", HTTPSAddr: "127.0.0.1:8444", DataDir: "/data/piper"}, nil
+	}
+	installedPiperdVersion = func() (string, error) { return "0.16.1", nil }
+	t.Cleanup(func() { runningAgentInfo, installedPiperdVersion = oldInfo, oldDisk })
+
+	got := statusOutput(t)
+	for _, want := range []string{"127.0.0.1:8081 / 127.0.0.1:8444", "/data/piper"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing daemon-reported %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "assumed") {
+		t.Errorf("daemon-reported values must not be marked assumed:\n%s", got)
+	}
+}
+
+// When nothing can answer — daemon unreachable and environ unreadable — the
+// defaults may be printed, but as a guess, not as fact (#476).
+func TestAgentStatusMarksUnverifiedDefaults(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "", errors.New("dial tcp 127.0.0.1:8088: connection refused"), "", errors.New("no piperd on disk"))
+
+	got := statusOutput(t)
+	for _, want := range []string{":80 / :443 (assumed", "/var/lib/piper (assumed"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
 }
 
 // The whole point of #375: a binary replaced on disk without a service
@@ -359,12 +397,12 @@ func TestRunningAgentVersionUsesSavedTokenForThisBox(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := runningAgentVersion(hostPort(t, srv.URL))
+	got, err := runningAgentInfo(hostPort(t, srv.URL))
 	if err != nil {
-		t.Fatalf("runningAgentVersion: %v (auth sent: %q)", err, gotAuth)
+		t.Fatalf("runningAgentInfo: %v (auth sent: %q)", err, gotAuth)
 	}
-	if got != "0.8.7" {
-		t.Errorf("version = %q, want 0.8.7", got)
+	if got.Version != "0.8.7" {
+		t.Errorf("version = %q, want 0.8.7", got.Version)
 	}
 }
 
@@ -386,8 +424,8 @@ func TestRunningAgentVersionWithholdsAnotherBoxToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := runningAgentVersion(hostPort(t, srv.URL)); err != nil {
-		t.Fatalf("runningAgentVersion: %v", err)
+	if _, err := runningAgentInfo(hostPort(t, srv.URL)); err != nil {
+		t.Fatalf("runningAgentInfo: %v", err)
 	}
 	if gotAuth != "" {
 		t.Errorf("sent %q to a different box's daemon, want no Authorization header", gotAuth)
@@ -516,9 +554,9 @@ func TestAgentDarwinStatusRunning(t *testing.T) {
 	stubBrew(t, true, func(args []string) (string, error) {
 		return `[{"name":"piper","running":true,"status":"started"}]`, nil
 	})
-	origVer := runningAgentVersion
-	runningAgentVersion = func(string) (string, error) { return "9.9.9", nil }
-	t.Cleanup(func() { runningAgentVersion = origVer })
+	origVer := runningAgentInfo
+	runningAgentInfo = func(string) (client.AgentInfo, error) { return client.AgentInfo{Version: "9.9.9"}, nil }
+	t.Cleanup(func() { runningAgentInfo = origVer })
 	origDisk := installedPiperdVersion
 	installedPiperdVersion = func() (string, error) { return "9.9.9", nil }
 	t.Cleanup(func() { installedPiperdVersion = origDisk })

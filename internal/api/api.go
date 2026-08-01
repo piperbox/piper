@@ -92,12 +92,21 @@ type FetchRepoFunc func(ctx context.Context, repo, ref, destDir string) error
 // source is configured at call time.
 var ErrNoGitHubApp = errors.New("no GitHub App configured — run `piper github setup` first")
 
+// AgentInfo is the daemon's self-report beyond its version: the listen config
+// it actually loaded. `agent status` can't always read the process env (the
+// system piperd's /proc environ is root-only), so the daemon states it (#476).
+type AgentInfo struct {
+	HTTPAddr  string
+	HTTPSAddr string
+	DataDir   string
+}
+
 // onGitHubApp, if non-nil, is invoked after a GitHub App is configured via the
 // exchange endpoint, so the daemon can start serving webhooks without a restart.
 // nextGitHubProvider, if non-nil, names the webhook credential source the box
 // would pick with no App stored locally; the reset endpoint reports it so the
 // operator learns whether anything takes over. Nil answers "unknown".
-func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHubApp func(), dom DomainManager, binder RepoBinder, nextGitHubProvider func() string, fetchRepo FetchRepoFunc) http.Handler {
+func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHubApp func(), dom DomainManager, binder RepoBinder, nextGitHubProvider func() string, fetchRepo FetchRepoFunc, self AgentInfo) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -137,9 +146,15 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 	// binary on disk may already have been replaced by an upgrade that has not
 	// been restarted into, and the piper asking is a separate build on a
 	// separate machine. Without it a half-applied upgrade is indistinguishable
-	// from a fix that did not work (#375).
+	// from a fix that did not work (#375). The same holds for the listen
+	// config it loaded — see AgentInfo (#476).
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"version": version.String()})
+		writeJSON(w, http.StatusOK, map[string]string{
+			"version":    version.String(),
+			"http_addr":  self.HTTPAddr,
+			"https_addr": self.HTTPSAddr,
+			"data_dir":   self.DataDir,
+		})
 	})
 	mux.HandleFunc("GET /v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		apps, err := s.ListApps()
