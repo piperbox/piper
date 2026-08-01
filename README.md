@@ -25,7 +25,7 @@ that kills most homelab hosting.
 ## 60-second quick start
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
+curl -fsSL https://get.piperbox.dev/install.sh | sh
 piper login                  # GitHub sign-in + claims this box on the public relay
 piper deploy blog --path .   # → https://<hash>-<you>.public.getpiper.dev
 ```

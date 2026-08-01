@@ -10,7 +10,7 @@ a LAN-only box never needs the relay sections.
 The universal front door is one command, on any platform:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
+curl -fsSL https://get.piperbox.dev/install.sh | sh
 ```
 
 It detects your platform and hands off to the native package channel where
@@ -75,7 +75,7 @@ drive a box from your laptop)? The same curl command falls back to placing
 verified binaries only, no service management:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/piperbox/piper/main/install.sh | sh
+curl -fsSL https://get.piperbox.dev/install.sh | sh
 ```
 
 It detects your OS/arch, downloads the matching release binaries, verifies
