@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,6 +217,92 @@ func TestIngressLinksAndUnlinksInstallation(t *testing.T) {
 	}
 	if _, err := st.AccountForInstallation("55"); err == nil {
 		t.Fatal("installation survived deletion")
+	}
+}
+
+// TestIngressInstallationEventLinkingAndLogging covers #471: the linking
+// triggers the relay honours, and the two silent paths a failing install-link
+// used to take. installation_repositories is the event GitHub fires when a
+// user re-saves the repository selection of an installation that already
+// exists — the only linking action its UI offers at that point — so it must
+// link like installation.created. Anything the handler chooses not to act on,
+// and any link that fails, has to say so in the log: a relay that drops these
+// in silence is what made #471 expensive to diagnose.
+func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
+	const alice = `"installation":{"id":55,"account":{"type":"User","login":"alice"}},` +
+		`"sender":{"id":1001,"login":"alice"}}`
+
+	for _, tc := range []struct {
+		name       string
+		account    bool // create the piper account for github id 1001
+		event      string
+		body       string
+		wantLinked bool
+		wantLogged []string
+	}{
+		{
+			name:       "repositories added links",
+			account:    true,
+			event:      "installation_repositories",
+			body:       `{"action":"added",` + alice,
+			wantLinked: true,
+		},
+		{
+			name:       "repositories removed links",
+			account:    true,
+			event:      "installation_repositories",
+			body:       `{"action":"removed",` + alice,
+			wantLinked: true,
+		},
+		{
+			name:       "unhandled action is logged",
+			account:    true,
+			event:      "installation",
+			body:       `{"action":"edited",` + alice,
+			wantLinked: false,
+			wantLogged: []string{"installation", "edited", "55"},
+		},
+		{
+			name:       "failed link names the installer",
+			account:    false, // nobody has run piper login as alice
+			event:      "installation",
+			body:       `{"action":"created",` + alice,
+			wantLinked: false,
+			wantLogged: []string{"55", "alice", "1001"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t)
+			if tc.account {
+				if _, err := st.UpsertAccount("1001", "alice"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			h := newTestIngress(t, st, &capturingDeliverer{done: make(chan struct{}, 8)})
+
+			var logged syncLogBuffer
+			prevOut, prevFlags := log.Writer(), log.Flags()
+			log.SetOutput(&logged)
+			log.SetFlags(0)
+			t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+			if rec := postEvent(t, h, tc.event, signed("s3cret", []byte(tc.body)), tc.body); rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202", rec.Code)
+			}
+
+			_, err := st.AccountForInstallation("55")
+			if tc.wantLinked && err != nil {
+				t.Fatalf("%s/%s did not link the installation: %v", tc.event, tc.body, err)
+			}
+			if !tc.wantLinked && err == nil {
+				t.Fatalf("%s/%s linked the installation, want no link", tc.event, tc.body)
+			}
+			for _, want := range tc.wantLogged {
+				if !strings.Contains(logged.String(), want) {
+					t.Fatalf("log = %q, want it to mention %q", logged.String(), want)
+				}
+			}
+		})
 	}
 }
 

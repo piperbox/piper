@@ -80,8 +80,8 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 		}
 		installationID := strconv.FormatInt(env.Installation.ID, 10)
 
-		if event == "installation" {
-			handleInstallationEvent(st, env, installationID)
+		if event == "installation" || event == "installation_repositories" {
+			handleInstallationEvent(st, env, installationID, event)
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
@@ -148,9 +148,16 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 
 // handleInstallationEvent keeps github_installations in step with GitHub. It is
 // written to be order-independent: the OAuth redirect and this webhook race.
-func handleInstallationEvent(st *Store, env ghEnvelope, installationID string) {
-	switch env.Action {
-	case "created", "new_permissions_accepted", "unsuspend":
+//
+// It takes both installation and installation_repositories. The latter fires
+// when a user re-saves the repository selection of an installation that already
+// exists — the only linking action GitHub's UI offers once the App is installed
+// — and carries the same installation and sender as installation.created, so
+// every one of its actions (added/removed) links the same way.
+func handleInstallationEvent(st *Store, env ghEnvelope, installationID, event string) {
+	switch {
+	case event == "installation_repositories",
+		env.Action == "created", env.Action == "new_permissions_accepted", env.Action == "unsuspend":
 		senderID := strconv.FormatInt(env.Sender.ID, 10)
 		login := env.Installation.Account.Login
 		if env.Installation.Account.Type == "Organization" {
@@ -175,11 +182,21 @@ func handleInstallationEvent(st *Store, env ghEnvelope, installationID string) {
 			typ = "org"
 		}
 		if err := st.LinkInstallation(installationID, senderID, typ, login); err != nil {
-			log.Printf("relay: link installation %s: %v", installationID, err)
+			if errors.Is(err, ErrUnknownAccount) {
+				// The commonest install failure, and the one a bare "unknown
+				// account" leaves unactionable: name the installer so the log
+				// says whose piper account is missing.
+				log.Printf("relay: link installation %s: no piper account for installer %s (github id %s)",
+					installationID, env.Sender.Login, senderID)
+			} else {
+				log.Printf("relay: link installation %s: %v", installationID, err)
+			}
 		}
-	case "deleted", "suspend":
+	case env.Action == "deleted", env.Action == "suspend":
 		if err := st.UnlinkInstallation(installationID); err != nil {
 			log.Printf("relay: unlink installation %s: %v", installationID, err)
 		}
+	default:
+		log.Printf("relay: ignoring %s event with action %q for installation %s", event, env.Action, installationID)
 	}
 }
