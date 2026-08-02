@@ -1,0 +1,20 @@
+{
+  "ref": "refs/heads/main",
+  "after": "abc123def456",
+  "repository": { "full_name": "alice/blog" },
+  "installation": { "id": 99 },
+  "commits": [
+    {
+      "id": "abc123def455",
+      "added": ["apps/web/index.html"],
+      "removed": [],
+      "modified": ["README.md"]
+    },
+    {
+      "id": "abc123def456",
+      "added": [],
+      "removed": ["apps/web/old.css"],
+      "modified": ["apps/api/main.go"]
+    }
+  ]
+}

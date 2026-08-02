@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/piperbox/piper/internal/source"
@@ -144,6 +145,25 @@ func (h *Handler) process(ctx context.Context, ev source.Event) {
 	}
 }
 
+// touchesRootDir reports whether a push carrying paths should rebuild an app
+// that builds from rootDir. An empty rootDir builds the whole checkout, so
+// every push touches it. Nil paths mean the host reported no complete file
+// list, and a rebuild we didn't need beats silently swallowing a real push, so
+// they rebuild too (#319). rootDir is stored path.Clean'd, so the subpath test
+// is a plain "<rootDir>/" prefix — which also keeps a sibling like
+// "apps/website" from matching "apps/web".
+func touchesRootDir(rootDir string, paths []string) bool {
+	if rootDir == "" || len(paths) == 0 {
+		return true
+	}
+	for _, p := range paths {
+		if strings.HasPrefix(p, rootDir+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Handler) processPush(ctx context.Context, ev source.Event) {
 	app, err := h.store.AppByRepo(ev.Repo)
 	if errors.Is(err, store.ErrNotFound) {
@@ -156,6 +176,10 @@ func (h *Handler) processPush(ctx context.Context, ev source.Event) {
 	}
 	if ev.Ref != "refs/heads/"+app.Branch {
 		log.Printf("webhook: %s ref %s != tracked %s", ev.Repo, ev.Ref, app.Branch)
+		return
+	}
+	if !touchesRootDir(app.RootDir, ev.Paths) {
+		log.Printf("webhook: %s push touched nothing under %s, skipping", app.Name, app.RootDir)
 		return
 	}
 
