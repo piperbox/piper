@@ -36,6 +36,7 @@ func (p *Provider) Parse(headers http.Header, body []byte) (source.Event, error)
 		After   string `json:"after"`
 		Action  string `json:"action"`
 		Number  int    `json:"number"`
+		Forced  bool   `json:"forced"`
 		Commits []struct {
 			Added    []string `json:"added"`
 			Removed  []string `json:"removed"`
@@ -68,7 +69,12 @@ func (p *Provider) Parse(headers http.Header, body []byte) (source.Event, error)
 		ev.Kind = source.KindPush
 		ev.Ref = payload.Ref
 		ev.SHA = payload.After
-		if len(payload.Commits) < maxPayloadCommits {
+		// A force push's commits say what it added, not how the branch moved:
+		// rewriting history can drop commits whose files the new ones never
+		// mention, and those files changed on the branch all the same. Leave
+		// Paths nil there, as for a truncated array, so callers fall back to
+		// treating the whole checkout as changed.
+		if !payload.Forced && len(payload.Commits) < maxPayloadCommits {
 			for _, c := range payload.Commits {
 				ev.Paths = append(ev.Paths, c.Added...)
 				ev.Paths = append(ev.Paths, c.Removed...)

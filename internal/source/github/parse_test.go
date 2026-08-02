@@ -66,6 +66,26 @@ func TestParsePushCollectsChangedPaths(t *testing.T) {
 	}
 }
 
+// A force push's commits describe what it added, not how the branch differs
+// from where it was: rewriting history can drop commits whose files the new
+// ones never mention. Those files changed on the branch all the same, so Parse
+// reports no paths rather than a list that omits them.
+func TestParseForcedPushReportsNoPaths(t *testing.T) {
+	body, _ := os.ReadFile("testdata/push_forced.json")
+	p := newTestProvider(t, "s3cr3t")
+	h := http.Header{}
+	h.Set("X-GitHub-Event", "push")
+	h.Set("X-Hub-Signature-256", sign("s3cr3t", string(body)))
+
+	ev, err := p.Parse(h, body)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if ev.Paths != nil {
+		t.Fatalf("paths = %v want nil for a force push", ev.Paths)
+	}
+}
+
 // A push carrying more commits than the payload holds has a truncated commits
 // array, so the collected paths would be an incomplete picture of the change.
 // Parse reports no paths at all rather than a partial list a caller would
