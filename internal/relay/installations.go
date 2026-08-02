@@ -46,6 +46,44 @@ func (s *Store) LinkInstallationForAccount(installationID, accountID, targetType
 	return err
 }
 
+// LinkInstallationIfAbsent is LinkInstallation with insert-if-absent
+// semantics: it reports whether the link was actually inserted. An existing
+// row — whatever account it names — is left untouched. This is the recovery
+// path for installation_repositories events, whose sender is not necessarily
+// the installation's owner: a read-then-upsert can miss a legitimate link
+// committing concurrently and would then replace its owner.
+func (s *Store) LinkInstallationIfAbsent(installationID, senderGithubID, targetType, targetLogin string) (bool, error) {
+	var accountID string
+	err := s.db.QueryRow(`SELECT id FROM accounts WHERE github_id=?`, senderGithubID).Scan(&accountID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrUnknownAccount
+	}
+	if err != nil {
+		return false, err
+	}
+	return s.LinkInstallationForAccountIfAbsent(installationID, accountID, targetType, targetLogin)
+}
+
+// LinkInstallationForAccountIfAbsent is LinkInstallationForAccount with
+// insert-if-absent semantics, for callers that resolved the account
+// themselves (the org-routing path through OrgForGitHubInstall). The bool
+// reports whether the row was inserted; ON CONFLICT DO NOTHING makes the
+// check-and-insert a single statement, so a concurrent legitimate link
+// always wins over a recovery attempt.
+func (s *Store) LinkInstallationForAccountIfAbsent(installationID, accountID, targetType, targetLogin string) (bool, error) {
+	res, err := s.db.Exec(
+		`INSERT INTO github_installations(installation_id, account_id, target_type, target_login, created_at)
+		 VALUES(?,?,?,?,?)
+		 ON CONFLICT(installation_id) DO NOTHING`,
+		installationID, accountID, targetType, targetLogin,
+		time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // UnlinkInstallation drops an installation, e.g. on installation.deleted.
 func (s *Store) UnlinkInstallation(installationID string) error {
 	_, err := s.db.Exec(`DELETE FROM github_installations WHERE installation_id=?`, installationID)

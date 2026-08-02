@@ -155,24 +155,65 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 // — and carries the same installation and sender as installation.created, so
 // every one of its actions (added/removed) links the same way. Its sender is
 // whoever re-saved the selection, though, not necessarily the owner, so it only
-// ever recovers an unlinked installation — never reassigns a linked one.
+// ever recovers an unlinked installation — never reassigns a linked one — and
+// it does so with an atomic insert-if-absent: a read-then-upsert can miss a
+// legitimate link committing concurrently and would then replace its owner.
 func handleInstallationEvent(st *Store, env ghEnvelope, installationID, event string) {
 	switch {
-	case event == "installation_repositories",
-		env.Action == "created", env.Action == "new_permissions_accepted", env.Action == "unsuspend":
-		if event == "installation_repositories" {
-			// The sender here is whoever re-saved the repository selection,
-			// not necessarily the installation's owner, and the link below
-			// upserts account_id. So this is only a recovery link for an
-			// unlinked installation: an already-linked one keeps its owner.
-			if _, err := st.AccountForInstallation(installationID); err == nil {
-				log.Printf("relay: %s for already-linked installation %s; preserving owner", event, installationID)
+	case event == "installation_repositories":
+		// The sender here is whoever re-saved the repository selection, not
+		// necessarily the installation's owner, so this is only a recovery
+		// link for an unlinked installation: an already-linked one keeps its
+		// owner. The guard and the link are a single atomic statement
+		// (INSERT ... ON CONFLICT DO NOTHING), and whether the row was
+		// inserted — not a prior read — decides which case we were in.
+		senderID := strconv.FormatInt(env.Sender.ID, 10)
+		login := env.Installation.Account.Login
+		typ := "user"
+		orgFallback := false
+		if env.Installation.Account.Type == "Organization" {
+			typ = "org"
+			// Route to the Piper org account this GitHub org is linked to,
+			// verified through the installing sender's membership.
+			orgGitHubID := strconv.FormatInt(env.Installation.Account.ID, 10)
+			if orgID, err := st.OrgForGitHubInstall(orgGitHubID, login, senderID); err == nil {
+				inserted, err := st.LinkInstallationForAccountIfAbsent(installationID, orgID, "org", login)
+				if err != nil {
+					log.Printf("relay: link org installation %s: %v", installationID, err)
+				} else if !inserted {
+					log.Printf("relay: %s for already-linked installation %s; preserving owner", event, installationID)
+				}
 				return
-			} else if !errors.Is(err, ErrNoInstallation) {
-				log.Printf("relay: resolve account for installation %s: %v", installationID, err)
-				return
+			} else if !errors.Is(err, ErrNoOrg) {
+				log.Printf("relay: resolve org for installation %s: %v", installationID, err)
+			} else {
+				orgFallback = true
 			}
 		}
+		inserted, err := st.LinkInstallationIfAbsent(installationID, senderID, typ, login)
+		if err == nil && !inserted {
+			log.Printf("relay: %s for already-linked installation %s; preserving owner", event, installationID)
+			return
+		}
+		if orgFallback {
+			// No linked Piper org: fall back to the installing user, so the
+			// install still serves their personal boxes (unchanged behavior).
+			// Logged only once the link actually happens (or fails), so an
+			// already-linked installation logs exactly the preserving line.
+			log.Printf("relay: org-target installation %s has no linked piper org; linking installer %s", installationID, env.Sender.Login)
+		}
+		if err != nil {
+			if errors.Is(err, ErrUnknownAccount) {
+				// The commonest install failure, and the one a bare "unknown
+				// account" leaves unactionable: name the installer so the log
+				// says whose piper account is missing.
+				log.Printf("relay: link installation %s: no piper account for installer %s (github id %s)",
+					installationID, env.Sender.Login, senderID)
+			} else {
+				log.Printf("relay: link installation %s: %v", installationID, err)
+			}
+		}
+	case env.Action == "created", env.Action == "new_permissions_accepted", env.Action == "unsuspend":
 		senderID := strconv.FormatInt(env.Sender.ID, 10)
 		login := env.Installation.Account.Login
 		if env.Installation.Account.Type == "Organization" {
