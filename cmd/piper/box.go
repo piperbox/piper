@@ -64,7 +64,7 @@ func cmdBox(args []string, stdout, stderr io.Writer) int {
 // "offline" here is exactly what makes a box removable.
 func renderBoxes(rows []boxRow) string {
 	if len(rows) == 0 {
-		return "no boxes on this account — run `piper connect` on a box to claim one\n"
+		return "no boxes on this account — run `piper login` on a box to claim one\n"
 	}
 	var b strings.Builder
 	for _, r := range rows {
@@ -118,15 +118,15 @@ func boxList(stdout, stderr io.Writer) int {
 
 // boxRemove retires a box, freeing its agent slot. The confirmation comes
 // before the relay is dialed: removal cannot be undone — the enrollment token
-// is gone and the box must run `piper connect` again — so a declined prompt
-// must not have sent anything.
+// is gone and the box must run `piper login --re-enroll` again — so a
+// declined prompt must not have sent anything.
 //
 // Removing a box does not free its app-cap slots. The relay's hostnames table
 // keys on the account, not the agent, so it cannot tell which URLs were this
 // box's; saying so here is better than a user inferring it from a still-full
 // app quota.
 func boxRemove(baseDomain string, yes bool, stdout, stderr io.Writer) int {
-	if !yes && !confirmPrompt(stdout, "remove "+baseDomain+"? it must run `piper connect` again to come back") {
+	if !yes && !confirmPrompt(stdout, "remove "+baseDomain+"? it must run `piper login --re-enroll` again to come back") {
 		fmt.Fprintln(stdout, "aborted")
 		return 0
 	}

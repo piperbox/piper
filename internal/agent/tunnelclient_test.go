@@ -626,3 +626,40 @@ func TestTunnelClientRepoOps(t *testing.T) {
 		t.Fatalf("UnbindRepo sent %+v", req)
 	}
 }
+
+func TestStatusReportsRetryingWithLastError(t *testing.T) {
+	c := &TunnelClient{}
+	if state, _ := c.Status(); state != "off" {
+		t.Fatalf("state before Run = %q, want off", state)
+	}
+
+	// Dial a port that refuses immediately; cancel once an error is recorded.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := ln.Addr().String()
+	ln.Close() // now nothing listens there
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); c.Run(ctx, addr, "tok", "base.example", nil) }()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		state, lastErr := c.Status()
+		if state == "retrying" && lastErr != "" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("never saw retrying+error; state=%q err=%q", state, lastErr)
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	cancel()
+	<-done
+	if state, _ := c.Status(); state != "off" {
+		t.Fatalf("state after Run returns = %q, want off", state)
+	}
+}

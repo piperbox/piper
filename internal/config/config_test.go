@@ -647,3 +647,16 @@ func TestGitHubAPIBaseFromEnv(t *testing.T) {
 		t.Fatalf("GitHubAPIBase = %q, want the env override", cfg.GitHubAPIBase)
 	}
 }
+
+func TestEnrollSocketCandidatesOrder(t *testing.T) {
+	got := EnrollSocketCandidates("/tmp/dd")
+	want := []string{SystemRuntimeSocket, DarwinRootSocket, filepath.Join("/tmp/dd", "piperd.sock")}
+	if len(got) != len(want) {
+		t.Fatalf("candidates = %v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("candidates[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}

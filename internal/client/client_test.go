@@ -980,6 +980,45 @@ func TestAgentVersionOldAgentReportsUnsupported(t *testing.T) {
 	}
 }
 
+// The daemon self-reports the listen config it loaded alongside its version,
+// so `agent status` can print the truth without reading the process env
+// (root-only for a system piperd, #476). Absent fields — an older daemon —
+// decode as empty strings, which the caller treats as "did not report".
+func TestAgentInfoReportsEffectiveConfig(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/version" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		writeJSONTest(w, map[string]string{
+			"version":    "0.16.1",
+			"http_addr":  "127.0.0.1:8081",
+			"https_addr": "127.0.0.1:8444",
+			"data_dir":   "/var/lib/piper",
+		})
+	}))
+	defer srv.Close()
+
+	got, err := New(srv.URL, "").AgentInfo()
+	if err != nil {
+		t.Fatalf("AgentInfo: %v", err)
+	}
+	want := AgentInfo{Version: "0.16.1", HTTPAddr: "127.0.0.1:8081", HTTPSAddr: "127.0.0.1:8444", DataDir: "/var/lib/piper"}
+	if got != want {
+		t.Errorf("info = %+v, want %+v", got, want)
+	}
+}
+
+func TestAgentInfoOldAgentReportsUnsupported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "404 page not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	if _, err := New(srv.URL, "").AgentInfo(); !errors.Is(err, ErrVersionUnsupported) {
+		t.Fatalf("err = %v, want ErrVersionUnsupported", err)
+	}
+}
+
 // TestReadsKeepTheShortPollTimeout guards the reason the timeout exists: a
 // blackholed box must still surface as unreachable rather than hanging the
 // TUI's poll loop.

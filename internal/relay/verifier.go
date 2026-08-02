@@ -61,9 +61,10 @@ func NewFakeVerifier() *FakeVerifier {
 
 // NewAutoApproveVerifier is a FakeVerifier whose device-flow poll completes
 // immediately with a canned identity. It exists so the loopback e2e can drive
-// `piper login`/`connect` end-to-end without a real GitHub IdP. NEVER selected
-// in production: main.go uses it only under PIPER_RELAY_FAKE_APPROVE=1 and only
-// when no real GitHub client ID is configured.
+// `piper login` (login + claim) end-to-end without a real GitHub IdP. NEVER
+// selected in production: main.go uses it only under
+// PIPER_RELAY_FAKE_APPROVE=1 and only when no real GitHub client ID is
+// configured.
 func NewAutoApproveVerifier(sub, login string) *FakeVerifier {
 	f := NewFakeVerifier()
 	f.auto = &Identity{Subject: sub, Login: login}

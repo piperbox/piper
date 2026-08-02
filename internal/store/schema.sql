@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS deployments (
     status       TEXT NOT NULL,
     logs         TEXT NOT NULL DEFAULT '',
     pr           INTEGER NOT NULL DEFAULT 0,
+    hostname     TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_deployments_app ON deployments(app, created_at);

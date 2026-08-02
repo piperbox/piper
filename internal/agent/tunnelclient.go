@@ -22,8 +22,10 @@ var ErrNotConnected = errors.New("relay tunnel not connected")
 // registration over it. The current session is published under a mutex so the
 // deploy path can open control streams on whatever session is live.
 type TunnelClient struct {
-	mu   sync.Mutex
-	sess *tunnel.Session
+	mu      sync.Mutex
+	sess    *tunnel.Session
+	running bool
+	lastErr string
 
 	// OnConnect, if set before Run, is invoked in its own goroutine each time a
 	// relay session is established — piperd uses it to provision the relay's
@@ -31,9 +33,36 @@ type TunnelClient struct {
 	OnConnect func()
 }
 
+// Status reports the tunnel's state for the enrollment socket's status
+// surface: "connected" with a live session, "retrying" while Run is looping
+// without one (lastErr is the most recent dial/handshake failure — the only
+// place a rejected enrollment token becomes visible outside the log), "off"
+// when Run is not running.
+func (c *TunnelClient) Status() (state, lastErr string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case c.sess != nil:
+		return "connected", ""
+	case c.running:
+		return "retrying", c.lastErr
+	default:
+		return "off", c.lastErr
+	}
+}
+
+func (c *TunnelClient) setErr(err error) {
+	c.mu.Lock()
+	c.lastErr = err.Error()
+	c.mu.Unlock()
+}
+
 func (c *TunnelClient) setSession(s *tunnel.Session) {
 	c.mu.Lock()
 	c.sess = s
+	if s != nil {
+		c.lastErr = ""
+	}
 	c.mu.Unlock()
 }
 
@@ -57,6 +86,14 @@ const relayDialTimeout = 10 * time.Second
 // it consumed into the returned conn. It reconnects with backoff until ctx is
 // cancelled. Blocks.
 func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error)) {
+	c.mu.Lock()
+	c.running = true
+	c.mu.Unlock()
+	defer func() {
+		c.mu.Lock()
+		c.running = false
+		c.mu.Unlock()
+	}()
 	backoff := time.Second
 	for ctx.Err() == nil {
 		conn, err := (&net.Dialer{Timeout: relayDialTimeout}).DialContext(ctx, "tcp", relayAddr)
@@ -64,6 +101,7 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 			if ctx.Err() != nil {
 				return // shutdown interrupted the dial; not a relay problem
 			}
+			c.setErr(err)
 			log.Printf("tunnel: dial relay: %v (retry in %s)", err, backoff)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
@@ -71,6 +109,7 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 		}
 		sess, err := tunnel.Dial(conn, token, baseDomain)
 		if err != nil {
+			c.setErr(err)
 			log.Printf("tunnel: handshake: %v (retry in %s)", err, backoff)
 			conn.Close()
 			sleep(ctx, backoff)
