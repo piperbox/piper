@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -275,6 +276,17 @@ func TestDialBoundsTheHandshakeWrite(t *testing.T) {
 		}
 		if elapsed := time.Since(start); elapsed > time.Second {
 			t.Fatalf("Dial blocked %v on the handshake write (deadline not enforced)", elapsed)
+		}
+		// The reconnect loop logs this error, so it must say which half of
+		// the handshake died — a bare i/o timeout reads the same whether the
+		// write or the ack wait expired.
+		if !strings.Contains(res.err.Error(), "writing handshake") {
+			t.Fatalf("Dial error = %q, want it to name the handshake write", res.err)
+		}
+		// Wrapped with %w, not %v: callers must still be able to see the
+		// timeout underneath the label.
+		if !errors.Is(res.err, os.ErrDeadlineExceeded) {
+			t.Fatalf("Dial error = %q, want it to unwrap to os.ErrDeadlineExceeded", res.err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Dial hung on the handshake write (no write deadline)")

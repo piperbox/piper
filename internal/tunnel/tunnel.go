@@ -126,7 +126,7 @@ func Dial(conn net.Conn, token, baseDomain string) (*Session, error) {
 	writeErr := writeFrame(conn, payload)
 	_ = conn.SetWriteDeadline(time.Time{})
 	if writeErr != nil {
-		return nil, writeErr
+		return nil, fmt.Errorf("writing handshake: %w", writeErr)
 	}
 	// Bound the wait: a relay that accepts the connection and then goes quiet
 	// must not pin the agent, or the reconnect loop can never retry.
