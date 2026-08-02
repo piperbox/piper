@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1
+
+# Built by goreleaser (dockers_v2: piper-relay), whose build context holds the
+# prebuilt, version-stamped binaries at <os>/<arch>/piper-relay — there is no
+# compile stage here, so a bare `docker build -f Dockerfile.relay .` from a
+# checkout will not work. Use `goreleaser release --snapshot` instead.
+
+FROM gcr.io/distroless/static-debian12
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/piper-relay /usr/local/bin/piper-relay
+ENV PIPER_RELAY_DATA_DIR=/var/lib/piper-relay
+VOLUME /var/lib/piper-relay
+EXPOSE 443 80 7000 8080
+ENTRYPOINT ["/usr/local/bin/piper-relay"]
