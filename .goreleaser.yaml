@@ -102,6 +102,31 @@ nfpms:
     license: Apache-2.0
     section: net
 
+# The relay deliberately ships as a container image, not a deb/brew package:
+# its deployment targets are container platforms (#483). One multi-arch image;
+# version tags publish on every tag including RCs (so an RC can be smoke-tested
+# from the registry before promotion), while :latest moves only on finals —
+# the empty tag an RC renders is skipped.
+dockers_v2:
+  - id: piper-relay
+    ids: [piper-relay]
+    dockerfile: Dockerfile.relay
+    images:
+      - ghcr.io/piperbox/piper-relay
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: piper-relay
+      org.opencontainers.image.description: Piper relay — SNI passthrough and tunnel server
+      org.opencontainers.image.source: https://github.com/piperbox/piper
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
 # `brews` is deprecated in favor of homebrew_casks, but casks cannot declare
 # `brew services` blocks — a formula with a `service do` block is the whole
 # point, so the deprecation warning is accepted deliberately (spec 2026-07-30).
