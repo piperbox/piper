@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -83,6 +84,62 @@ func TestValidateEnrollmentFailsOnSilentRelay(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "handshake") {
 		t.Fatalf("err = %v, want a handshake failure", err)
+	}
+}
+
+// validateEnrollment runs while the enroll handler holds s.mu, so a client that
+// walks away must release it promptly rather than pin it for tunnel.Dial's full
+// ack deadline (#481).
+func TestValidateEnrollmentAbortsOnContextCancel(t *testing.T) {
+	// A relay that accepts and reads the handshake frame but never acks.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	handshaking := make(chan struct{})
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var b [1]byte
+		if _, err := io.ReadFull(conn, b[:]); err != nil {
+			return
+		}
+		close(handshaking)
+		io.Copy(io.Discard, conn)
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	res := make(chan error, 1)
+	go func() { res <- validateEnrollment(ctx, ln.Addr().String(), "tok", "base.example") }()
+	select {
+	case <-handshaking:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay never saw the enrollment handshake")
+	}
+	cancel()
+
+	var got error
+	select {
+	case got = <-res:
+	case <-time.After(2 * time.Second):
+		t.Fatal("validateEnrollment did not return after cancel; it sat out tunnel.Dial's ack deadline")
+	}
+	if got == nil {
+		t.Fatal("validateEnrollment = nil, want a cancellation error")
+	}
+	// Both halves matter: the text must still name the stage that failed, and
+	// the error must still unwrap — a text-only check passes a %w -> %v
+	// downgrade that silently costs callers errors.Is.
+	if !strings.Contains(got.Error(), "relay handshake") {
+		t.Fatalf("err = %q, want it to name the relay handshake stage", got)
+	}
+	if !errors.Is(got, context.Canceled) {
+		t.Fatalf("err = %q, want it to unwrap to context.Canceled", got)
 	}
 }
 

@@ -261,6 +261,58 @@ func TestTunnelClientRunExitsPromptlyOnCancel(t *testing.T) {
 			t.Fatal("Run did not return after cancel during reconnect backoff")
 		}
 	})
+	t.Run("mid-handshake", func(t *testing.T) {
+		// A relay that accepts and reads the handshake frame but never acks —
+		// slow, not dead. tunnel.Dial only answers to deadlines, so without a
+		// ctx-interruptible handshake Run sits out the full ack deadline (10s,
+		// on top of the write's own) while piperd's 20s shutdown budget drains
+		// in the tunnelDone join (#481).
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { ln.Close() })
+		handshaking := make(chan struct{})
+		go func() {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			var b [1]byte
+			if _, err := io.ReadFull(conn, b[:]); err != nil {
+				return
+			}
+			close(handshaking) // the agent's handshake is on the wire
+			io.Copy(io.Discard, conn)
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var c TunnelClient
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			c.Run(ctx, ln.Addr().String(), "tok", "base.example.com", dialLocal)
+		}()
+		select {
+		case <-handshaking:
+		case <-time.After(2 * time.Second):
+			t.Fatal("relay never saw the agent's handshake")
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run did not return after cancel during the relay handshake")
+		}
+		// The conn we closed under Dial is our own doing, not a relay fault, so
+		// it must not surface as the tunnel's last error the way a genuine
+		// rejected token does.
+		if state, lastErr := c.Status(); lastErr != "" {
+			t.Fatalf("Status() = %q, %q, want no lastErr from a cancelled handshake", state, lastErr)
+		}
+	})
 }
 
 // TestTunnelClientRunJoinsInFlightHandlers pins the second half of #242: Run

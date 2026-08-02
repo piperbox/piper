@@ -68,9 +68,21 @@ func validateEnrollment(ctx context.Context, relayAddr, token, baseDomain string
 	if err != nil {
 		return fmt.Errorf("dial relay: %w", err)
 	}
+	// tunnel.Dial answers only to deadlines, and this runs while the enroll
+	// handler holds its mutex — so a client that walks away mid-handshake must
+	// release it now, not after the ack deadline expires (#481). stop() runs
+	// the instant Dial returns so the AfterFunc can never close conn out from
+	// under the yamux session below.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	sess, err := tunnel.Dial(conn, token, baseDomain)
+	stop()
 	if err != nil {
 		conn.Close() // tunnel.Dial does not close conn on failure
+		if ctx.Err() != nil {
+			// We closed conn; report the cancellation rather than the
+			// "use of closed network connection" it surfaces as.
+			err = ctx.Err()
+		}
 		return fmt.Errorf("relay handshake: %w", err)
 	}
 	return sess.Close()
