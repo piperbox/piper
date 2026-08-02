@@ -196,6 +196,10 @@ process so the enrollment is live within seconds. No sudo command to
 copy-paste, no manual restart, on any install (systemd, Homebrew, or a manual
 dev box).
 
+`login` opens the verification page in a browser as a convenience; the URL and
+code are always printed too. Set `PIPER_NO_BROWSER=1` to skip the launch — for
+a headless box, an SSH session, or a test harness driving the CLI.
+
 Run `login` **on the box**: on a machine with no piperd install (no systemd
 install, launchd agent, or existing data dir) it stops after identity —
 *"identity only — no piperd on this machine; run `piper login` on a box to

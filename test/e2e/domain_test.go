@@ -94,7 +94,7 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	// piperd's enrollment socket) → writes ~/.piper/piper and piperd's
 	// relay.json (terminated); piperd re-execs itself to apply it.
 	home := t.TempDir()
-	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=")
+	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=", "PIPER_NO_BROWSER=1")
 	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080", "--data-dir", piperdData)
 	login.Env = piperEnv
 	if out, err := login.CombinedOutput(); err != nil {
@@ -299,7 +299,7 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	// piperd's enrollment socket) → writes ~/.piper/piper and piperd's
 	// relay.json (terminated); piperd re-execs itself to apply it.
 	home := t.TempDir()
-	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=")
+	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=", "PIPER_NO_BROWSER=1")
 	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080", "--data-dir", piperdData)
 	login.Env = piperEnv
 	if out, err := login.CombinedOutput(); err != nil {

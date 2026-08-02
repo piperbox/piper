@@ -80,6 +80,13 @@ func ClientAddr() string {
 	return env("PIPER_ADDR", "http://127.0.0.1:8088")
 }
 
+// NoBrowser reports whether PIPER_NO_BROWSER=1 asks the CLI and TUI to keep the
+// browser shut — headless boxes, SSH sessions, and test harnesses driving the
+// real binary. Only "1" disables the launch.
+func NoBrowser() bool {
+	return os.Getenv("PIPER_NO_BROWSER") == "1"
+}
+
 // defaultDataDir is piperd's SQLite home when PIPER_DATA_DIR is unset:
 // ~/.piper/piperd. Falls back to ./data if the home dir can't be resolved.
 func defaultDataDir() string {

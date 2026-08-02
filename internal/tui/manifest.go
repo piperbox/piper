@@ -15,6 +15,8 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/piperbox/piper/internal/config"
 )
 
 // manifestView runs the GitHub App manifest flow: enter an org (blank = personal
@@ -125,17 +127,30 @@ func manifestActionURL(org string) string {
 	return fmt.Sprintf("https://github.com/organizations/%s/settings/apps/new", url.PathEscape(org))
 }
 
-// openBrowser opens rawURL in the OS browser. Duplicated from cmd/piper (that
-// copy is unexported in package main); a package var so tests can stub it.
-var openBrowser = func(rawURL string) error {
+// browserCmd builds the OS command that opens rawURL, or nil when
+// PIPER_NO_BROWSER=1 asks for the browser to stay shut. Duplicated from
+// cmd/piper (that copy is unexported in package main).
+func browserCmd(rawURL string) *exec.Cmd {
+	if config.NoBrowser() {
+		return nil
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", rawURL).Start()
+		return exec.Command("open", rawURL)
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL).Start()
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
 	default:
-		return exec.Command("xdg-open", rawURL).Start()
+		return exec.Command("xdg-open", rawURL)
 	}
+}
+
+// openBrowser opens rawURL in the OS browser. A package var so tests can stub it.
+var openBrowser = func(rawURL string) error {
+	cmd := browserCmd(rawURL)
+	if cmd == nil {
+		return nil
+	}
+	return cmd.Start()
 }
 
 // beginManifestFlow starts the two-server manifest dance and returns once the
