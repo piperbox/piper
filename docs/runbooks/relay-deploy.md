@@ -8,7 +8,8 @@ too.
 Building from source instead? [manual-setup.md](../manual-setup.md#run-the-relay-as-a-service)
 covers the from-checkout install; [git-deploy-e2e.md Part B](git-deploy-e2e.md)
 covers full end-to-end verification with a box and DNS. This runbook assumes a
-Linux host with a public IP and systemd.
+Linux host with a public IP and systemd; for container platforms see
+[Run as a container](#run-as-a-container).
 
 ---
 
@@ -175,3 +176,40 @@ more.
 - Optional ops listener on `127.0.0.1:9090` (`PIPER_RELAY_OPS_ADDR`);
   `PIPER_RELAY_METRICS=1` / `PIPER_RELAY_LOGS=1` to enable metrics/log
   endpoints
+
+---
+
+## Run as a container
+
+Every release also publishes a multi-arch (amd64/arm64) image to
+`ghcr.io/piperbox/piper-relay` — version tags for every release including RCs,
+`:latest` for finals only. It is the same binary on a distroless base; all the
+env vars above apply unchanged.
+
+```bash
+docker run -d --name piper-relay --restart unless-stopped \
+  -v piper-relay-data:/var/lib/piper-relay \
+  --env-file piper-relay.env \
+  -p 443:443 -p 80:80 -p 7000:7000 -p 8080:8080 \
+  ghcr.io/piperbox/piper-relay:<version>
+```
+
+- **State** is the single SQLite file at `/var/lib/piper-relay/relay.db` — keep
+  it on a volume (a PVC / EBS volume on K8s/ECS).
+- **Certs and the GitHub App key** are file mounts; mount them into the data
+  dir (or anywhere, with the env vars pointing at them). The App key must not
+  be world-readable — the relay refuses it (mount `0600`).
+- **Admin/enroll** run in the same container against the same DB:
+  `docker exec piper-relay piper-relay admin …` (distroless has no shell; the
+  binary is invoked directly).
+- **Upgrade** = pull the new tag, recreate the container, same volume. The
+  schema-change caveats above apply identically — a schema-change release
+  still means moving `relay.db` aside and re-enrolling boxes.
+- **Exactly one replica.** All state is one SQLite file and the tunnel router
+  lives in process memory; two relay instances behind one address split-brain
+  agents and routes. Scale up, never out.
+- **Fronting:** custom-domain :443 is SNI passthrough (certs live on the
+  boxes) and :7000 is a raw TCP protocol — only an L4/TCP ingress can sit in
+  front, never an HTTP(S)-terminating one. Behind any L4 proxy the relay sees
+  the proxy's IP ([#485](https://github.com/piperbox/piper/issues/485)); with
+  a direct public IP (host networking) nothing is lost.
