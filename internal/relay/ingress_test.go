@@ -233,8 +233,12 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 		`"sender":{"id":1001,"login":"alice"}}`
 
 	for _, tc := range []struct {
-		name       string
-		account    bool // create the piper account for github id 1001
+		name    string
+		account bool // create the piper account for github id 1001
+		// prelink links installation 55 to github id 1001 before the event,
+		// and also creates the sender's account (github id 2002) so a
+		// sender-resolving relink would actually succeed.
+		prelink    bool
 		event      string
 		body       string
 		wantLinked bool
@@ -246,6 +250,17 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 			event:      "installation_repositories",
 			body:       `{"action":"added",` + alice,
 			wantLinked: true,
+		},
+		{
+			name:    "repositories event preserves the current owner",
+			account: true,
+			prelink: true,
+			event:   "installation_repositories",
+			body: `{"action":"added","installation":{"id":55,` +
+				`"account":{"type":"User","login":"alice"}},` +
+				`"sender":{"id":2002,"login":"mallory"}}`,
+			wantLinked: true,
+			wantLogged: []string{"already-linked", "55"},
 		},
 		{
 			name:       "repositories removed links",
@@ -278,6 +293,20 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			prelinked := ""
+			if tc.prelink {
+				if _, err := st.UpsertAccount("2002", "mallory"); err != nil {
+					t.Fatal(err)
+				}
+				if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
+					t.Fatal(err)
+				}
+				owner, err := st.AccountForInstallation("55")
+				if err != nil {
+					t.Fatal(err)
+				}
+				prelinked = owner
+			}
 			h := newTestIngress(t, st, &capturingDeliverer{done: make(chan struct{}, 8)})
 
 			var logged syncLogBuffer
@@ -290,12 +319,16 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 				t.Fatalf("status = %d, want 202", rec.Code)
 			}
 
-			_, err := st.AccountForInstallation("55")
+			acct, err := st.AccountForInstallation("55")
 			if tc.wantLinked && err != nil {
 				t.Fatalf("%s/%s did not link the installation: %v", tc.event, tc.body, err)
 			}
 			if !tc.wantLinked && err == nil {
 				t.Fatalf("%s/%s linked the installation, want no link", tc.event, tc.body)
+			}
+			if tc.prelink && acct != prelinked {
+				t.Fatalf("%s/%s reassigned the installation owner: was %q, now %q",
+					tc.event, tc.body, prelinked, acct)
 			}
 			for _, want := range tc.wantLogged {
 				if !strings.Contains(logged.String(), want) {

@@ -153,11 +153,26 @@ func NewGitHubIngress(st *Store, app *GitHubApp, d Deliverer) http.Handler {
 // when a user re-saves the repository selection of an installation that already
 // exists — the only linking action GitHub's UI offers once the App is installed
 // — and carries the same installation and sender as installation.created, so
-// every one of its actions (added/removed) links the same way.
+// every one of its actions (added/removed) links the same way. Its sender is
+// whoever re-saved the selection, though, not necessarily the owner, so it only
+// ever recovers an unlinked installation — never reassigns a linked one.
 func handleInstallationEvent(st *Store, env ghEnvelope, installationID, event string) {
 	switch {
 	case event == "installation_repositories",
 		env.Action == "created", env.Action == "new_permissions_accepted", env.Action == "unsuspend":
+		if event == "installation_repositories" {
+			// The sender here is whoever re-saved the repository selection,
+			// not necessarily the installation's owner, and the link below
+			// upserts account_id. So this is only a recovery link for an
+			// unlinked installation: an already-linked one keeps its owner.
+			if _, err := st.AccountForInstallation(installationID); err == nil {
+				log.Printf("relay: %s for already-linked installation %s; preserving owner", event, installationID)
+				return
+			} else if !errors.Is(err, ErrNoInstallation) {
+				log.Printf("relay: resolve account for installation %s: %v", installationID, err)
+				return
+			}
+		}
 		senderID := strconv.FormatInt(env.Sender.ID, 10)
 		login := env.Installation.Account.Login
 		if env.Installation.Account.Type == "Organization" {
