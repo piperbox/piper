@@ -54,6 +54,13 @@ type Event struct {
 	Kind           Kind
 	PR             int
 	InstallationID int64
+	// Paths are the repo-relative files the push changed, unordered and
+	// possibly repeated across commits. Nil means the host didn't report a
+	// complete list — too many commits to fit the payload, or a force push,
+	// whose commits describe what it added rather than how the branch moved —
+	// and callers must read it as "assume everything changed" rather than
+	// "nothing changed".
+	Paths []string
 }
 
 // Provider drives a deploy from a git host.
