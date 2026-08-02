@@ -359,3 +359,98 @@ func TestDialBoundsTheAckWait(t *testing.T) {
 		t.Fatalf("Dial blocked %v waiting for an ack (deadline not enforced)", elapsed)
 	}
 }
+
+// The relay-side twin of TestDialBoundsTheHandshakeWrite (#455): Serve's
+// rejection ack has always been deadlined, but the success ack was not, so an
+// agent that completes the handshake and then stops reading pinned the write
+// once the send buffer and receive window filled. That blocks before
+// yamux.Server, so the accept never completes and one unresponsive agent holds
+// a relay goroutine + fd. net.Pipe has no buffer at all, so a peer that never
+// reads makes the write block deterministically.
+func TestServeBoundsTheSuccessAckWrite(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	prev := handshakeWriteTimeout
+	handshakeWriteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeWriteTimeout = prev })
+
+	// Fake agent: sends a valid handshake, then never reads the ack.
+	go func() {
+		payload, _ := json.Marshal(handshake{Token: "tok", BaseDomain: "alice.example.com"})
+		_ = writeFrame(c, payload)
+	}()
+
+	type serveRes struct {
+		sess *Session
+		err  error
+	}
+	resCh := make(chan serveRes, 1)
+	start := time.Now()
+	go func() {
+		sess, err := Serve(s, func(token, base string) error { return nil })
+		resCh <- serveRes{sess, err}
+	}()
+
+	select {
+	case res := <-resCh:
+		if res.err == nil {
+			res.sess.Close()
+			t.Fatal("expected Serve to fail when the agent never reads the success ack")
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("Serve blocked %v on the success-ack write (deadline not enforced)", elapsed)
+		}
+		// The relay logs this error per rejected accept, so it must say which
+		// write died rather than a bare i/o timeout.
+		if !strings.Contains(res.err.Error(), "writing handshake ack") {
+			t.Fatalf("Serve error = %q, want it to name the ack write", res.err)
+		}
+		// Wrapped with %w, not %v: callers must still be able to see the
+		// timeout underneath the label.
+		if !errors.Is(res.err, os.ErrDeadlineExceeded) {
+			t.Fatalf("Serve error = %q, want it to unwrap to os.ErrDeadlineExceeded", res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve hung on the success-ack write (no write deadline)")
+	}
+}
+
+// The success-ack write deadline must be cleared once the frame is out, for
+// the same reason Dial clears its own: a stale deadline survives into the
+// established session and kills an otherwise healthy connection on the first
+// write after it expires.
+func TestServeClearsTheSuccessAckWriteDeadline(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+
+	prev := handshakeWriteTimeout
+	handshakeWriteTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { handshakeWriteTimeout = prev })
+
+	// Fake agent: handshake, read the ack, then keep draining so later writes
+	// don't block on the unbuffered pipe.
+	go func() {
+		payload, _ := json.Marshal(handshake{Token: "tok", BaseDomain: "alice.example.com"})
+		if err := writeFrame(c, payload); err != nil {
+			return
+		}
+		if _, err := readFrame(c); err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, c)
+	}()
+
+	sess, err := Serve(s, func(token, base string) error { return nil })
+	if err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	t.Cleanup(func() { sess.Close() })
+
+	// Let the ack write deadline lapse, then write on the connection Serve
+	// kept: a deadline that was never cleared fails this write.
+	time.Sleep(2 * handshakeWriteTimeout)
+	if _, err := s.Write([]byte("x")); err != nil {
+		t.Fatalf("write on the established connection failed (ack write deadline not cleared): %v", err)
+	}
+}
