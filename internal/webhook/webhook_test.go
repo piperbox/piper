@@ -182,6 +182,42 @@ func TestPushDeploysAndReports(t *testing.T) {
 	}
 }
 
+func TestPushScopedToRootDir(t *testing.T) {
+	cases := []struct {
+		name       string
+		rootDir    string
+		paths      []string
+		wantDeploy int
+	}{
+		{"changes under the root dir rebuild", "apps/web", []string{"apps/api/main.go", "apps/web/index.html"}, 1},
+		{"changes outside the root dir do not", "apps/web", []string{"apps/api/main.go", "README.md"}, 0},
+		{"a sibling sharing the prefix does not", "apps/web", []string{"apps/website/index.html"}, 0},
+		{"an app without a root dir rebuilds", "", []string{"docs/README.md"}, 1},
+		{"an unreported file list rebuilds", "apps/web", nil, 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newStore(t)
+			s.CreateApp("blog", 8080)
+			s.UpdateAppRepo("blog", "alice/blog", "main", c.rootDir)
+			p := &fakeProvider{ev: source.Event{
+				Kind: source.KindPush, Repo: "alice/blog", Ref: "refs/heads/main",
+				SHA: "s1", Paths: c.paths,
+			}}
+			d := &fakeDeployer{}
+			h := webhook.New(p, s, d, "piper.localhost")
+			post(h)
+			h.Wait()
+			if d.count() != c.wantDeploy {
+				t.Fatalf("deploy calls = %d, want %d", d.count(), c.wantDeploy)
+			}
+			if c.wantDeploy == 0 && len(p.statuses()) != 0 {
+				t.Fatalf("statuses = %v, want none for a skipped push", p.statuses())
+			}
+		})
+	}
+}
+
 func TestWrongBranchNoOp(t *testing.T) {
 	s := newStore(t)
 	s.CreateApp("blog", 8080)
