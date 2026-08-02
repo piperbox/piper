@@ -65,9 +65,15 @@ func (s *Store) GitHubTokenFor(ctx context.Context, app *GitHubApp, agentName, r
 		if !strings.EqualFold(target.Login, owner) {
 			continue
 		}
+		// Heal the login only: in.TargetType is the normalized "org"/"user" the
+		// webhook path writes, while GitHub reports a raw account.type
+		// ("Organization"), and persisting that would leak a value the storage
+		// and /v1/github/status contract doesn't use. A rename doesn't change
+		// the target's kind, so this path has no business writing that field.
+		//
 		// Best-effort heal: the mint must not fail over a local write hiccup;
 		// the next miss retries the write.
-		_ = s.LinkInstallationForAccount(in.ID, accountID, target.Type, target.Login)
+		_ = s.LinkInstallationForAccount(in.ID, accountID, in.TargetType, target.Login)
 		return app.RepoToken(ctx, in.ID, repo)
 	}
 	return "", time.Time{}, ErrNoInstallation

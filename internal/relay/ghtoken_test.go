@@ -192,6 +192,13 @@ func TestGitHubTokenForSelfHealsRenamedOrgTarget(t *testing.T) {
 	if len(insts) != 1 || insts[0].TargetLogin != "piperbox" {
 		t.Fatalf("stored installations = %+v, want target_login healed to piperbox", insts)
 	}
+	// Healing the login must not rewrite target_type. Storage and
+	// /v1/github/status carry the normalized "org"/"user" that the webhook
+	// path writes, not GitHub's raw account.type ("Organization") — which the
+	// installation picker would render verbatim.
+	if insts[0].TargetType != "org" {
+		t.Fatalf("target_type = %q, want it left at %q by a login-only heal", insts[0].TargetType, "org")
+	}
 }
 
 // TestGitHubTokenForHappyPathDoesNotRefetchInstallation pins the "one extra
