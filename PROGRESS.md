@@ -48,6 +48,7 @@ Goal: public HTTPS from behind NAT/CGNAT — `piperd` dials an outbound yamux tu
 - ✅ one-command login — `piper login` absorbs the old `connect` verb: identity → claim through piperd's enrollment socket → piperd applies and reconnects itself, no printed sudo, no restart hint — [#465](https://github.com/piperbox/piper/issues/465) (built on the relay upsert [#458](https://github.com/piperbox/piper/issues/458) and daemon-owned enrollment [#460](https://github.com/piperbox/piper/issues/460) above)
 - ✅ `piper-relay` managed systemd service + operator docs — [#38](https://github.com/piperbox/piper/issues/38)
 - ✅ `piper-relay` infra-only ops endpoints — Prometheus `/metrics` + ring-buffered `/logs`, env-toggled, bind-address isolated from the SNI dispatcher — [#396](https://github.com/piperbox/piper/issues/396)
+- ✅ `piper-relay` container image — multi-arch `ghcr.io/piperbox/piper-relay` published per release via goreleaser `dockers_v2` — [#483](https://github.com/piperbox/piper/issues/483)
 - ✅ `piperd` — outbound tunnel client + cert wiring (additive; LAN-only unchanged) — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ e2e — loopback relay path (tunnel + SNI + on-box TLS) — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ **Public-relay onboarding slice (Plans 1–3)** — relay accounts + device-flow, `piper login`/`connect`, and relay-terminated shared domain; `login → connect → deploy → curl` e2e green — [#90](https://github.com/piperbox/piper/issues/90) (child of epic [#49](https://github.com/piperbox/piper/issues/49))
