@@ -52,16 +52,41 @@ func (s *Store) LinkInstallationForAccount(installationID, accountID, targetType
 // path for installation_repositories events, whose sender is not necessarily
 // the installation's owner: a read-then-upsert can miss a legitimate link
 // committing concurrently and would then replace its owner.
+//
+// The sender's account is resolved inside the INSERT ... SELECT itself, so
+// the statement stays a single atomic operation and never consults the
+// sender before honouring an existing row: an already-linked installation
+// reports not-inserted (owner preserved) even when the sender has no piper
+// account. Only when zero rows were written AND no installation row exists
+// is the zero-row result an unknown sender, reported as ErrUnknownAccount.
 func (s *Store) LinkInstallationIfAbsent(installationID, senderGithubID, targetType, targetLogin string) (bool, error) {
-	var accountID string
-	err := s.db.QueryRow(`SELECT id FROM accounts WHERE github_id=?`, senderGithubID).Scan(&accountID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, ErrUnknownAccount
-	}
+	res, err := s.db.Exec(
+		`INSERT INTO github_installations(installation_id, account_id, target_type, target_login, created_at)
+		 SELECT ?, id, ?, ?, ? FROM accounts WHERE github_id=?
+		 ON CONFLICT(installation_id) DO NOTHING`,
+		installationID, targetType, targetLogin,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		senderGithubID)
 	if err != nil {
 		return false, err
 	}
-	return s.LinkInstallationForAccountIfAbsent(installationID, accountID, targetType, targetLogin)
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return true, nil
+	}
+	// Zero rows is ambiguous: the conflict fired (installation already
+	// linked — owner preserved, no error) or the SELECT matched no account
+	// (unknown sender). Distinguish by the row that decides recovery: an
+	// existing installation needs no link, whoever the sender is.
+	if _, err := s.AccountForInstallation(installationID); err == nil {
+		return false, nil
+	} else if !errors.Is(err, ErrNoInstallation) {
+		return false, err
+	}
+	return false, ErrUnknownAccount
 }
 
 // LinkInstallationForAccountIfAbsent is LinkInstallationForAccount with

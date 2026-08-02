@@ -237,12 +237,16 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 		account bool // create the piper account for github id 1001
 		// prelink links installation 55 to github id 1001 before the event,
 		// and also creates the sender's account (github id 2002) so a
-		// sender-resolving relink would actually succeed.
-		prelink    bool
-		event      string
-		body       string
-		wantLinked bool
-		wantLogged []string
+		// sender-resolving relink would actually succeed — unless
+		// unknownSender skips that account, leaving the sender with no
+		// piper account at all.
+		prelink       bool
+		unknownSender bool
+		event         string
+		body          string
+		wantLinked    bool
+		wantLogged    []string
+		notLogged     []string
 	}{
 		{
 			name:       "repositories added links",
@@ -261,6 +265,23 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 				`"sender":{"id":2002,"login":"mallory"}}`,
 			wantLinked: true,
 			wantLogged: []string{"already-linked", "55"},
+		},
+		{
+			// #489: an already-linked installation must log the
+			// preserving-owner diagnostic even when the admin re-saving the
+			// repository selection has no piper account — no recovery link
+			// was needed, so there is nothing to fail.
+			name:          "repositories event preserves the owner for an unknown sender",
+			account:       true,
+			prelink:       true,
+			unknownSender: true,
+			event:         "installation_repositories",
+			body: `{"action":"added","installation":{"id":55,` +
+				`"account":{"type":"User","login":"alice"}},` +
+				`"sender":{"id":2002,"login":"mallory"}}`,
+			wantLinked: true,
+			wantLogged: []string{"already-linked", "55"},
+			notLogged:  []string{"no piper account"},
 		},
 		{
 			name:       "repositories removed links",
@@ -295,8 +316,10 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 			}
 			prelinked := ""
 			if tc.prelink {
-				if _, err := st.UpsertAccount("2002", "mallory"); err != nil {
-					t.Fatal(err)
+				if !tc.unknownSender {
+					if _, err := st.UpsertAccount("2002", "mallory"); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
 					t.Fatal(err)
@@ -333,6 +356,11 @@ func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
 			for _, want := range tc.wantLogged {
 				if !strings.Contains(logged.String(), want) {
 					t.Fatalf("log = %q, want it to mention %q", logged.String(), want)
+				}
+			}
+			for _, unwanted := range tc.notLogged {
+				if strings.Contains(logged.String(), unwanted) {
+					t.Fatalf("log = %q, want it not to mention %q", logged.String(), unwanted)
 				}
 			}
 		})
