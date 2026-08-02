@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/piperbox/piper/internal/source"
@@ -42,8 +44,51 @@ func TestParsePush(t *testing.T) {
 		Repo: "alice/blog", Ref: "refs/heads/main", SHA: "abc123def456",
 		Kind: source.KindPush, InstallationID: 99,
 	}
-	if ev != want {
+	if !reflect.DeepEqual(ev, want) {
 		t.Fatalf("got %+v want %+v", ev, want)
+	}
+}
+
+func TestParsePushCollectsChangedPaths(t *testing.T) {
+	body, _ := os.ReadFile("testdata/push_paths.json")
+	p := newTestProvider(t, "s3cr3t")
+	h := http.Header{}
+	h.Set("X-GitHub-Event", "push")
+	h.Set("X-Hub-Signature-256", sign("s3cr3t", string(body)))
+
+	ev, err := p.Parse(h, body)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	want := []string{"apps/web/index.html", "README.md", "apps/web/old.css", "apps/api/main.go"}
+	if !reflect.DeepEqual(ev.Paths, want) {
+		t.Fatalf("paths = %v want %v", ev.Paths, want)
+	}
+}
+
+// A push carrying more commits than the payload holds has a truncated commits
+// array, so the collected paths would be an incomplete picture of the change.
+// Parse reports no paths at all rather than a partial list a caller would
+// mistake for the whole push.
+func TestParsePushTruncatedCommitsReportsNoPaths(t *testing.T) {
+	commits := make([]string, maxPayloadCommits)
+	for i := range commits {
+		commits[i] = `{"added":["apps/web/f.txt"],"removed":[],"modified":[]}`
+	}
+	body := `{"ref":"refs/heads/main","after":"abc123def456",` +
+		`"repository":{"full_name":"alice/blog"},"installation":{"id":99},` +
+		`"commits":[` + strings.Join(commits, ",") + `]}`
+	p := newTestProvider(t, "s3cr3t")
+	h := http.Header{}
+	h.Set("X-GitHub-Event", "push")
+	h.Set("X-Hub-Signature-256", sign("s3cr3t", body))
+
+	ev, err := p.Parse(h, []byte(body))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if ev.Paths != nil {
+		t.Fatalf("paths = %v want nil for a truncated commits array", ev.Paths)
 	}
 }
 
@@ -99,7 +144,7 @@ func TestParsePullRequest(t *testing.T) {
 			Repo: "alice/blog", Ref: "feature-x", SHA: c.wantSHA,
 			Kind: c.wantKind, PR: 42, InstallationID: 99,
 		}
-		if ev != want {
+		if !reflect.DeepEqual(ev, want) {
 			t.Fatalf("%s: got %+v want %+v", c.file, ev, want)
 		}
 	}

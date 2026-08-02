@@ -11,6 +11,11 @@ import (
 	"github.com/piperbox/piper/internal/source"
 )
 
+// maxPayloadCommits is the cap GitHub documents on a push payload's commits
+// array. At the cap the array may be truncated, so the changed files it lists
+// are only part of the push and Parse leaves Event.Paths nil instead.
+const maxPayloadCommits = 2048
+
 func (p *Provider) verify(headers http.Header, body []byte) error {
 	sig := headers.Get("X-Hub-Signature-256")
 	m := hmac.New(sha256.New, []byte(p.secret))
@@ -27,10 +32,15 @@ func (p *Provider) Parse(headers http.Header, body []byte) (source.Event, error)
 		return source.Event{}, err
 	}
 	var payload struct {
-		Ref         string `json:"ref"`
-		After       string `json:"after"`
-		Action      string `json:"action"`
-		Number      int    `json:"number"`
+		Ref     string `json:"ref"`
+		After   string `json:"after"`
+		Action  string `json:"action"`
+		Number  int    `json:"number"`
+		Commits []struct {
+			Added    []string `json:"added"`
+			Removed  []string `json:"removed"`
+			Modified []string `json:"modified"`
+		} `json:"commits"`
 		PullRequest struct {
 			Head struct {
 				Ref string `json:"ref"`
@@ -58,6 +68,13 @@ func (p *Provider) Parse(headers http.Header, body []byte) (source.Event, error)
 		ev.Kind = source.KindPush
 		ev.Ref = payload.Ref
 		ev.SHA = payload.After
+		if len(payload.Commits) < maxPayloadCommits {
+			for _, c := range payload.Commits {
+				ev.Paths = append(ev.Paths, c.Added...)
+				ev.Paths = append(ev.Paths, c.Removed...)
+				ev.Paths = append(ev.Paths, c.Modified...)
+			}
+		}
 	case "pull_request":
 		ev.PR = payload.Number
 		ev.Ref = payload.PullRequest.Head.Ref
