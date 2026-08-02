@@ -107,11 +107,23 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 			backoff = nextBackoff(backoff)
 			continue
 		}
+		// tunnel.Dial takes a bare net.Conn and answers only to deadlines, so a
+		// relay that is slow but not dead can hold it for the write bound plus
+		// a fresh ack bound — piperd's whole 20s shutdown budget. Closing conn
+		// on cancel unblocks whichever half is in flight (#481). stop() runs
+		// the instant Dial returns: an armed AfterFunc would later close conn
+		// out from under yamux through a side door instead of the normal
+		// serveStreams teardown.
+		stop := context.AfterFunc(ctx, func() { conn.Close() })
 		sess, err := tunnel.Dial(conn, token, baseDomain)
+		stop()
 		if err != nil {
+			conn.Close()
+			if ctx.Err() != nil {
+				return // shutdown interrupted the handshake; not a relay problem
+			}
 			c.setErr(err)
 			log.Printf("tunnel: handshake: %v (retry in %s)", err, backoff)
-			conn.Close()
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
