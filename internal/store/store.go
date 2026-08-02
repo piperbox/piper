@@ -39,7 +39,10 @@ type Deployment struct {
 	ContainerID string
 	HostPort    int
 	Status      string
-	CreatedAt   time.Time
+	// Hostname is a preview's URL. Production's lives on the app row: hostnames
+	// are keyed (agent, app, pr), so one apps column cannot hold both (#478).
+	Hostname  string
+	CreatedAt time.Time
 }
 
 type Store struct{ db *sql.DB }
@@ -381,6 +384,18 @@ func (s *Store) RunningPreviews() ([]Deployment, error) {
 	return deps, rows.Err()
 }
 
+// SetPreviewHostname records the URL app's PR pr is served at, on the live
+// preview row — the same row RunningPreviews announces. Older rows for that PR
+// keep the hostname they served, so a torn-down preview's history survives a
+// relay rename.
+func (s *Store) SetPreviewHostname(app string, pr int, hostname string) error {
+	_, err := s.db.Exec(
+		`UPDATE deployments SET hostname=? WHERE rowid=(
+		   SELECT MAX(rowid) FROM deployments
+		   WHERE app=? AND pr=? AND status='running')`, hostname, app, pr)
+	return err
+}
+
 func (s *Store) pruneDeploymentLogs(app string) error {
 	_, err := s.db.Exec(
 		`UPDATE deployments SET logs='' WHERE app=? AND logs != '' AND id NOT IN (
@@ -393,7 +408,7 @@ func (s *Store) pruneDeploymentLogs(app string) error {
 // newest first.
 func (s *Store) ListDeployments(app string) ([]Deployment, error) {
 	rows, err := s.db.Query(
-		`SELECT id, app, pr, image_id, container_id, host_port, status, created_at
+		`SELECT id, app, pr, image_id, container_id, host_port, status, hostname, created_at
 		 FROM deployments WHERE app=? ORDER BY rowid DESC`, app)
 	if err != nil {
 		return nil, err
@@ -403,7 +418,7 @@ func (s *Store) ListDeployments(app string) ([]Deployment, error) {
 	for rows.Next() {
 		var d Deployment
 		var ts string
-		if err := rows.Scan(&d.ID, &d.App, &d.PR, &d.ImageID, &d.ContainerID, &d.HostPort, &d.Status, &ts); err != nil {
+		if err := rows.Scan(&d.ID, &d.App, &d.PR, &d.ImageID, &d.ContainerID, &d.HostPort, &d.Status, &d.Hostname, &ts); err != nil {
 			return nil, err
 		}
 		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, ts)

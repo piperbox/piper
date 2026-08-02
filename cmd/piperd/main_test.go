@@ -509,7 +509,7 @@ func TestEnrollRoutesNotOnControlAPI(t *testing.T) {
 	}
 	defer st.Close()
 	h := api.New(st, nil, "piper.localhost", "", func() {}, nil, nil,
-		func() string { return "" }, nil)
+		func() string { return "" }, nil, api.AgentInfo{})
 	for _, probe := range []struct{ method, path string }{
 		{http.MethodPost, enrollapi.PathEnroll},
 		{http.MethodGet, enrollapi.PathStatus},
@@ -610,11 +610,20 @@ func TestProvisionRelayControlConcurrentSingleMint(t *testing.T) {
 
 // repushStore is the store slice repushRelayApps needs.
 type repushStore struct {
-	apps         []store.App
-	previews     []store.Deployment
-	err          error
-	previewsErr  error
-	hostnamesSet map[string]string
+	apps             []store.App
+	previews         []store.Deployment
+	err              error
+	previewsErr      error
+	hostnamesSet     map[string]string
+	previewHostnames map[string]string // app@pr -> hostname
+}
+
+func (s *repushStore) SetPreviewHostname(app string, pr int, hostname string) error {
+	if s.previewHostnames == nil {
+		s.previewHostnames = map[string]string{}
+	}
+	s.previewHostnames[fmt.Sprintf("%s@%d", app, pr)] = hostname
+	return nil
 }
 
 func (s *repushStore) SetAppHostname(name, hostname string) error {
@@ -967,5 +976,50 @@ func TestRepushRelayAppsDoesNotPersistPreviewHostnames(t *testing.T) {
 
 	if got := st.hostnamesSet["test1"]; got != "fresh-a.relay.example" {
 		t.Fatalf("test1 hostname = %q, want the production one", got)
+	}
+}
+
+// The preview half of #405's staleness bug: the relay renames preview slots on
+// the same upgrade, so a hostname stored at deploy time goes stale and the API
+// advertises a preview URL that no longer resolves. It belongs on the
+// deployment row, which is where the preview's URL reaches clients (#478).
+func TestRepushRelayAppsPersistsPreviewHostnamesOnDeployments(t *testing.T) {
+	st := &repushStore{
+		apps: []store.App{{Name: "test1", Hostname: "stale-a.relay.example"}},
+		previews: []store.Deployment{
+			{App: "test1", PR: 7, Status: "running"},
+			{App: "test1", PR: 9, Status: "running"},
+		},
+	}
+	a := &repushAnnouncer{returned: []tunnel.AppHost{
+		{App: "test1", Hostname: "fresh-a.relay.example"},
+		{App: "test1", PR: 7, Hostname: "pr7-fresh-a.relay.example"},
+		{App: "test1", PR: 9, Hostname: "pr9-fresh-a.relay.example"},
+	}}
+
+	repushRelayApps(st, a, true)
+
+	want := map[string]string{
+		"test1@7": "pr7-fresh-a.relay.example",
+		"test1@9": "pr9-fresh-a.relay.example",
+	}
+	if !reflect.DeepEqual(st.previewHostnames, want) {
+		t.Fatalf("persisted preview hostnames %v, want %v", st.previewHostnames, want)
+	}
+}
+
+// A slot the relay could not name comes back empty; writing that would erase a
+// working preview URL from the API.
+func TestRepushRelayAppsSkipsEmptyPreviewHostnames(t *testing.T) {
+	st := &repushStore{
+		apps:     []store.App{{Name: "test1", Hostname: "a.relay.example"}},
+		previews: []store.Deployment{{App: "test1", PR: 7, Status: "running"}},
+	}
+	a := &repushAnnouncer{returned: []tunnel.AppHost{{App: "test1", PR: 7}}}
+
+	repushRelayApps(st, a, true)
+
+	if len(st.previewHostnames) != 0 {
+		t.Fatalf("persisted %v, want nothing written for an unnamed slot", st.previewHostnames)
 	}
 }

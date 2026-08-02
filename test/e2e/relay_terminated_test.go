@@ -22,9 +22,10 @@ import (
 )
 
 // TestRelayTerminatedSelfService proves the full free-tier loop:
-// piper login (device flow, auto-approved) → piper connect (account-bound enroll,
-// terminated) → piper deploy → curl the relay-assigned hostname, which the relay
-// terminates with its wildcard cert and forwards as HTTP to the box's :80.
+// piper login (device flow, auto-approved, then claims this box through
+// piperd's enrollment socket — one command) → piper deploy → curl the
+// relay-assigned hostname, which the relay terminates with its wildcard cert
+// and forwards as HTTP to the box's :80.
 func TestRelayTerminatedSelfService(t *testing.T) {
 	if os.Getenv("RUN_E2E") != "1" {
 		t.Skip("set RUN_E2E=1 to run (needs Docker; Caddy is embedded)")
@@ -67,32 +68,18 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	waitPort(t, "127.0.0.1:7000", 10*time.Second)
 	waitPort(t, "127.0.0.1:8080", 10*time.Second)
 
-	// piper login (device flow auto-approves) → writes ~/.piper/piper.
-	home := t.TempDir()
-	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=")
-	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080")
-	login.Env = piperEnv
-	if out, err := login.CombinedOutput(); err != nil {
-		t.Fatalf("piper login: %v\n%s", err, out)
-	}
-
-	// piper connect --data-dir <piperd data> → account-bound enroll + relay.json (terminated).
-	piperdData := t.TempDir()
-	connect := exec.Command(filepath.Join(binDir, "piper"), "connect", "--data-dir", piperdData)
-	connect.Env = piperEnv
-	if out, err := connect.CombinedOutput(); err != nil {
-		t.Fatalf("piper connect: %v\n%s", err, out)
-	}
-
-	// Mint a control-API token, then start piperd in terminated mode (reads relay.json).
-	tokenCmd := exec.Command(filepath.Join(binDir, "piperd"), "token", "create", "--name", "e2e")
-	tokenCmd.Env = append(os.Environ(), "PIPER_DATA_DIR="+piperdData)
-	tokenOut, err := tokenCmd.Output()
+	// Start piperd first, LAN-only (no PIPER_RELAY_* env): its enrollment
+	// socket comes up so `piper login` below can claim it (one-command login).
+	//
+	// os.MkdirTemp, not t.TempDir(): t.TempDir() embeds the (long) test name in
+	// the path, which blows darwin's ~104-byte sockaddr_un sun_path limit under
+	// a normal $TMPDIR. MkdirTemp("", "p") drops that segment and stays well
+	// under the limit on both darwin and linux.
+	piperdData, err := os.MkdirTemp("", "p")
 	if err != nil {
-		t.Fatalf("token create: %v", err)
+		t.Fatal(err)
 	}
-	apiToken := strings.TrimSpace(string(tokenOut))
-
+	t.Cleanup(func() { os.RemoveAll(piperdData) })
 	pd := exec.CommandContext(ctx, filepath.Join(binDir, "piperd"))
 	pd.Env = append(os.Environ(),
 		"PIPER_DATA_DIR="+piperdData,
@@ -104,6 +91,28 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	}
 	killOnCleanup(t, pd)
 	waitPort(t, "127.0.0.1:8088", 15*time.Second)
+
+	// piper login (device flow auto-approves, then claims this box through
+	// piperd's enrollment socket) → writes ~/.piper/piper and piperd's
+	// relay.json (terminated); piperd re-execs itself to apply it.
+	home := t.TempDir()
+	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=")
+	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080", "--data-dir", piperdData)
+	login.Env = piperEnv
+	if out, err := login.CombinedOutput(); err != nil {
+		t.Fatalf("piper login: %v\n%s", err, out)
+	}
+	waitPort(t, "127.0.0.1:8088", 15*time.Second) // piperd re-exec'd to apply the enrollment
+
+	// Mint a control-API token now that piperd is enrolled and running (safe
+	// alongside the live daemon: store.Open uses WAL + busy_timeout).
+	tokenCmd := exec.Command(filepath.Join(binDir, "piperd"), "token", "create", "--name", "e2e")
+	tokenCmd.Env = append(os.Environ(), "PIPER_DATA_DIR="+piperdData)
+	tokenOut, err := tokenCmd.Output()
+	if err != nil {
+		t.Fatalf("token create: %v", err)
+	}
+	apiToken := strings.TrimSpace(string(tokenOut))
 
 	// Create the app, then deploy. Terminated deploy registers the hostname over
 	// the tunnel, so retry until piperd's tunnel client has connected to the relay.

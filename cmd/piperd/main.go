@@ -84,6 +84,7 @@ type relayAppStore interface {
 	ListApps() ([]store.App, error)
 	RunningPreviews() ([]store.Deployment, error)
 	SetAppHostname(name, hostname string) error
+	SetPreviewHostname(app string, pr int, hostname string) error
 }
 
 // relayAppAnnouncer is the tunnel-client slice the per-connect app re-push
@@ -155,10 +156,17 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 	// Persist what came back. The relay names the slots, and #405 moved that
 	// name onto the agent, so a hostname stored at deploy time can be stale
 	// after an upgrade — leaving `piper list` and the dashboard advertising a
-	// URL that no longer resolves. Previews are skipped: their hostname belongs
-	// to a deployment, and writing it to the app row would clobber production's.
+	// URL that no longer resolves. A preview's name goes to its deployment row,
+	// not the app row: hostnames are keyed (agent, app, pr), so writing a
+	// preview's to apps.hostname would clobber production's (#478).
 	for _, h := range hosts {
-		if h.PR != 0 || h.Hostname == "" {
+		if h.Hostname == "" {
+			continue
+		}
+		if h.PR != 0 {
+			if err := st.SetPreviewHostname(h.App, h.PR, h.Hostname); err != nil {
+				log.Printf("relay: record hostname for %s PR %d: %v", h.App, h.PR, err)
+			}
 			continue
 		}
 		if err := st.SetAppHostname(h.App, h.Hostname); err != nil {
@@ -171,9 +179,9 @@ func repushRelayApps(st relayAppStore, tc relayAppAnnouncer, terminated bool) {
 // over the tunnel, once per enrollment (agent-push Token B — see the
 // control-stream routing design). The token row itself is the marker: any row
 // labeled relay:<base>, live OR revoked, means "already provisioned" or "the
-// owner cut the relay off" — never re-mint. A new `piper connect` creates a new
-// enrollment (new base domain) and so a fresh mint. If the push fails, the
-// just-minted row is deleted so the next connect retries.
+// owner cut the relay off" — never re-mint. A fresh `piper login` claim creates
+// a new enrollment (new base domain) and so a fresh mint. If the push fails,
+// the just-minted row is deleted so the next login retries.
 //
 // mu serializes the whole list-then-mint sequence across concurrent OnConnect
 // callbacks: without it, a session that flaps before the first push completes
@@ -550,7 +558,11 @@ func main() {
 		// What `piper github reset` leaves behind: the same decision, re-run as
 		// if the row it just deleted had never been there.
 		return decideWebhookProvider(store.ErrNotFound, cfg, wh != nil && wh.ghToken != nil).name()
-	}, newRepoFetcher(st, cfg, ghTokenFn))
+	}, newRepoFetcher(st, cfg, ghTokenFn), api.AgentInfo{
+		HTTPAddr:  cfg.HTTPAddr,
+		HTTPSAddr: cfg.HTTPSAddr,
+		DataDir:   cfg.DataDir,
+	})
 
 	// The authenticated entry point. Always on, so LAN-only and relay-connected
 	// boxes run the identical listener topology; the relay tunnel below is its

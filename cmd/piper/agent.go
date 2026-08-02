@@ -35,7 +35,8 @@ var piperdPath = func() (string, error) {
 	return exec.LookPath("piperd")
 }
 
-// runningAgentVersion asks the control API which build is actually serving.
+// runningAgentInfo asks the control API which build is actually serving, and
+// for the listen config it loaded (#476).
 // Short timeout: status is a glance, and a wedged daemon must not hang it.
 //
 // The bearer is not optional in practice. piperd serves its local listener
@@ -47,13 +48,13 @@ var piperdPath = func() (string, error) {
 // CLI points at a Pi must not hand the Pi's credential to the laptop's daemon.
 //
 // A var so tests can stub it.
-var runningAgentVersion = func(apiAddr string) (string, error) {
+var runningAgentInfo = func(apiAddr string) (client.AgentInfo, error) {
 	target := dialableAddr(apiAddr)
 	token := ""
 	if cc, err := config.LoadClient(); err == nil && sameBox(cc.Addr, target) {
 		token = cc.Token
 	}
-	return client.New("http://"+target, token).WithTimeout(2 * time.Second).AgentVersion()
+	return client.New("http://"+target, token).WithTimeout(2 * time.Second).AgentInfo()
 }
 
 // sameBox reports whether a configured client address (a URL) points at the
@@ -145,9 +146,12 @@ func dialableAddr(addr string) string {
 
 // printAgentVersions reports the running build, and flags a piperd on disk that
 // differs — the state a restart-less upgrade leaves behind, which otherwise
-// reads as "the fix didn't work".
-func printAgentVersions(stdout io.Writer, apiAddr string) {
-	running, rerr := runningAgentVersion(apiAddr)
+// reads as "the fix didn't work". It returns the daemon's full self-report so
+// status can print the listen config the daemon actually loaded; zero when
+// the daemon could not answer (#476).
+func printAgentVersions(stdout io.Writer, apiAddr string) client.AgentInfo {
+	info, rerr := runningAgentInfo(apiAddr)
+	running := info.Version
 	disk, derr := installedPiperdVersion()
 
 	var se *client.StatusError
@@ -164,13 +168,14 @@ func printAgentVersions(stdout io.Writer, apiAddr string) {
 		running = fmt.Sprintf("unknown (control API error: %v)", rerr)
 	default:
 		fmt.Fprintf(stdout, "  version      unknown (control API unreachable at %s)\n", apiAddr)
-		return
+		return client.AgentInfo{}
 	}
 	if derr == nil && disk != running {
 		fmt.Fprintf(stdout, "  version      %s  ⚠ %s is installed on disk — restart piperd to apply\n", running, disk)
-		return
+		return info
 	}
 	fmt.Fprintf(stdout, "  version      %s\n", running)
+	return info
 }
 
 const userUnitName = "piperd"
@@ -428,14 +433,27 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 		return 0
 	}
 	fmt.Fprintln(stdout, "piperd: running")
-	// The system piperd's /proc environ is root-only, so env is usually nil
-	// here and the unit's known defaults apply.
 	env := agentEnviron()
 	apiAddr := envOr(env, "PIPER_API_ADDR", "127.0.0.1:8088")
-	printAgentVersions(stdout, apiAddr)
+	info := printAgentVersions(stdout, apiAddr)
 	fmt.Fprintf(stdout, "  control API  http://%s\n", apiAddr)
-	fmt.Fprintf(stdout, "  http/https   %s / %s\n", envOr(env, "PIPER_HTTP_ADDR", ":80"), envOr(env, "PIPER_HTTPS_ADDR", ":443"))
-	fmt.Fprintf(stdout, "  data dir     %s\n", envOr(env, "PIPER_DATA_DIR", "/var/lib/piper"))
+	if info.HTTPAddr != "" {
+		// The daemon's self-report: the config it actually loaded.
+		fmt.Fprintf(stdout, "  http/https   %s / %s\n", info.HTTPAddr, info.HTTPSAddr)
+		fmt.Fprintf(stdout, "  data dir     %s\n", info.DataDir)
+		return 0
+	}
+	// No self-report (daemon unreachable, token-locked, or too old). The
+	// process env is still truth when readable, but the system piperd's
+	// /proc environ is root-only, so for a non-root caller env is nil and
+	// the built-in defaults below are a guess — say so rather than state
+	// them as fact (#476).
+	assumed := ""
+	if env == nil {
+		assumed = " (assumed — the agent did not report)"
+	}
+	fmt.Fprintf(stdout, "  http/https   %s / %s%s\n", envOr(env, "PIPER_HTTP_ADDR", ":80"), envOr(env, "PIPER_HTTPS_ADDR", ":443"), assumed)
+	fmt.Fprintf(stdout, "  data dir     %s%s\n", envOr(env, "PIPER_DATA_DIR", "/var/lib/piper"), assumed)
 	return 0
 }
 

@@ -6,6 +6,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +118,26 @@ func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
 	sess2.Close()
 }
 
+// syncLogBuffer is a concurrency-safe log sink: the accept goroutine can still
+// be inside log.Printf writing to it while the test polls for the line, and a
+// bare bytes.Buffer is not safe for that concurrent use.
+type syncLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // A rejected handshake must leave a trace on the relay. serveTunnel used to
 // close the connection silently, so a box with a stale enrollment was invisible
 // on both ends at once: the agent logged "connected" (#400) and the relay
@@ -130,7 +151,7 @@ func TestServeTunnelLogsRejectedHandshake(t *testing.T) {
 	defer st.Close()
 	st.Configure("public.getpiper.co", 3, 10, 5)
 
-	var logged bytes.Buffer
+	var logged syncLogBuffer
 	prevOut, prevFlags := log.Writer(), log.Flags()
 	log.SetOutput(&logged)
 	log.SetFlags(0)
