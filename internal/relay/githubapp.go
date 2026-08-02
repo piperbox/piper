@@ -154,7 +154,6 @@ func (g *GitHubApp) RepoToken(ctx context.Context, installationID, repo string) 
 // InstallationTarget is the live target of an installation as GitHub reports
 // it: the user or org the App is currently installed on.
 type InstallationTarget struct {
-	Type  string
 	Login string
 }
 
@@ -182,13 +181,12 @@ func (g *GitHubApp) Installation(ctx context.Context, installationID string) (In
 	var out struct {
 		Account struct {
 			Login string `json:"login"`
-			Type  string `json:"type"`
 		} `json:"account"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return InstallationTarget{}, err
 	}
-	return InstallationTarget{Type: out.Account.Type, Login: out.Account.Login}, nil
+	return InstallationTarget{Login: out.Account.Login}, nil
 }
 
 // Repo is one installation-accessible repository, as the picker renders it:
