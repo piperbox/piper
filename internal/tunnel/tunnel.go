@@ -25,8 +25,9 @@ var preAuthReadTimeout = 10 * time.Second
 // override it to a tiny value.
 var ackReadTimeout = 10 * time.Second
 
-// handshakeWriteTimeout bounds the agent's handshake write. Tests override it
-// to a tiny value.
+// handshakeWriteTimeout bounds a handshake-frame write: the agent's handshake
+// in Dial and the relay's success ack in Serve. Tests override it to a tiny
+// value.
 var handshakeWriteTimeout = 10 * time.Second
 
 // Auth validates a client's presented token and claimed base domain. A non-nil
@@ -270,9 +271,17 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 		_ = conn.SetWriteDeadline(time.Time{})
 		return nil, err
 	}
+	// Bound the ack write the way the rejection path above already is: an agent
+	// that completes the handshake and then stops reading lets the send buffer
+	// and receive window fill, and an undeadlined write pins this accept before
+	// yamux.Server is ever reached. Cleared once the frame is out, or it would
+	// later expire mid-session and kill a healthy connection.
+	_ = conn.SetWriteDeadline(time.Now().Add(handshakeWriteTimeout))
 	ackPayload, _ := json.Marshal(handshakeAck{})
-	if err := writeFrame(conn, ackPayload); err != nil {
-		return nil, err
+	writeErr := writeFrame(conn, ackPayload)
+	_ = conn.SetWriteDeadline(time.Time{})
+	if writeErr != nil {
+		return nil, fmt.Errorf("writing handshake ack: %w", writeErr)
 	}
 	mux, err := yamux.Server(conn, nil)
 	if err != nil {
