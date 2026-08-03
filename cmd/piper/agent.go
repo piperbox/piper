@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -130,13 +131,32 @@ func installedDiskVersion() diskVersion {
 	return diskVersion{version: v, known: true}
 }
 
+// developmentVersion matches what `git describe --tags --always --dirty` (the
+// Makefile's VERSION) appends to a tag: `-<commits since tag>-g<hash>`, and/or
+// a trailing `-dirty`.
+var developmentVersion = regexp.MustCompile(`-\d+-g[0-9a-f]+$|-dirty$`)
+
 // compareVersions orders two version strings the way semver does, reporting
-// ok=false when either side won't parse. Prereleases have to order properly:
-// a hand-rolled X.Y.Z parser dropped the suffix, which made 0.16.0 and
-// 0.16.0-rc.1 compare equal and let status recommend a downgrade (#472).
+// ok=false when either side won't parse or isn't safely orderable.
+//
+// Prereleases have to order properly: a hand-rolled X.Y.Z parser dropped the
+// suffix, which made 0.16.0 and 0.16.0-rc.1 compare equal and let status
+// recommend a downgrade (#472).
+//
+// Development builds must not be ordered at all. semver parses `git describe`
+// output as a prerelease and then applies rules that have nothing to do with
+// git history: `-10-g…` sorts below `-9-g…` because the identifiers compare
+// lexically, a post-tag build sorts below the very tag it is ahead of, two
+// branches at equal distance differ only by hash, and a dirty tree has no
+// defined relationship to its base tag. Commit count and hash are not a total
+// order, so refuse instead of inventing one.
 func compareVersions(a, b string) (int, bool) {
-	av, aerr := semver.NewVersion(strings.TrimSpace(a))
-	bv, berr := semver.NewVersion(strings.TrimSpace(b))
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if developmentVersion.MatchString(a) || developmentVersion.MatchString(b) {
+		return 0, false
+	}
+	av, aerr := semver.NewVersion(a)
+	bv, berr := semver.NewVersion(b)
 	if aerr != nil || berr != nil {
 		return 0, false
 	}
@@ -170,14 +190,18 @@ func printAgentVersions(stdout io.Writer, apiAddr string, disk diskVersion) clie
 	running := info.Version
 
 	var se *client.StatusError
-	// An agent that predates the version endpoint predates every build on
-	// disk, so the direction is known even though the string cannot be ordered.
-	diskNewer := false
+	diskDefinitelyNewer := false
 	switch {
 	case rerr == nil:
 	case errors.Is(rerr, client.ErrVersionUnsupported):
 		running = "unknown (agent too old to report it)"
-		diskNewer = true
+		// A 404 bounds the running daemon from above — it is older than
+		// versionEndpointRelease — and says nothing whatever about the file on
+		// disk. Only a disk build at or after that boundary is provably the
+		// newer one; an older one there would make "restart" a downgrade.
+		if c, ok := compareVersions(disk.version, versionEndpointRelease); ok && c >= 0 {
+			diskDefinitelyNewer = true
+		}
 	case errors.As(rerr, &se) && se.Code == http.StatusUnauthorized:
 		// A daemon that answered, not one that could not be reached. Conflating
 		// the two sent a live investigation looking at systemd and sockets while
@@ -190,12 +214,18 @@ func printAgentVersions(stdout io.Writer, apiAddr string, disk diskVersion) clie
 		return client.AgentInfo{}
 	}
 	if disk.known && disk.version != running {
-		fmt.Fprintf(stdout, "  version      %s  ⚠ %s\n", running, skewNote(running, disk.version, diskNewer))
+		fmt.Fprintf(stdout, "  version      %s  ⚠ %s\n", running, skewNote(running, disk.version, diskDefinitelyNewer))
 		return info
 	}
 	fmt.Fprintf(stdout, "  version      %s\n", running)
 	return info
 }
+
+// versionEndpointRelease is the first release whose control API answers
+// GET /v1/version. The route landed in #388 (commit a9aa8a3) and first shipped
+// in this tag — verified absent at v0.8.5 and present at v0.8.6 — so a daemon
+// that 404s it is provably older than this, and nothing more than that.
+const versionEndpointRelease = "0.8.6"
 
 // skewNote words a running-vs-disk mismatch by direction. The old wording
 // assumed disk ≥ running and always said "restart to apply"; when the running
@@ -203,14 +233,14 @@ func printAgentVersions(stdout io.Writer, apiAddr string, disk diskVersion) clie
 // downgrade presented as an upgrade if it did take (#472).
 //
 // "restart piperd to apply" asserts the disk build is the newer one, so it is
-// only said when that is known — either from the ordering, or from diskNewer,
-// which callers set for an agent so old it cannot report a version at all and
-// therefore predates anything on disk. Otherwise the mismatch is reported
-// without a direction rather than sold as an upgrade.
-func skewNote(running, disk string, diskNewer bool) string {
+// only said with positive evidence: either the ordering says so, or the caller
+// passes diskDefinitelyNewer because it established the direction some other
+// way. Otherwise the mismatch is reported without a direction rather than sold
+// as an upgrade.
+func skewNote(running, disk string, diskDefinitelyNewer bool) string {
 	c, ok := compareVersions(disk, running)
 	switch {
-	case diskNewer || (ok && c > 0):
+	case diskDefinitelyNewer || (ok && c > 0):
 		return fmt.Sprintf("%s is installed on disk — restart piperd to apply", disk)
 	case ok && c < 0:
 		return fmt.Sprintf("the binary on disk is %s — the running build is newer", disk)

@@ -541,7 +541,9 @@ func TestAgentStatusQuietWhenVersionsMatch(t *testing.T) {
 }
 
 // An agent predating the endpoint still reports usefully — and this is exactly
-// when the on-disk hint matters most, since anything that old is behind.
+// when the on-disk hint matters most. GET /v1/version landed in #388 and first
+// shipped in v0.8.6 (absent at v0.8.5), so a 404 from the daemon proves it is
+// older than 0.8.6 — which makes a 0.8.6 on disk definitely the newer build.
 func TestAgentStatusOldAgentStillFlagsDisk(t *testing.T) {
 	onLinux(t)
 	stubVersions(t, "", client.ErrVersionUnsupported, "0.8.6", nil)
@@ -551,6 +553,37 @@ func TestAgentStatusOldAgentStillFlagsDisk(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("status missing %q:\n%s", want, got)
 		}
+	}
+}
+
+// A 404 from the version endpoint proves the daemon is older than 0.8.6. It
+// proves nothing about the file on disk. A 0.8.4 binary there is *older* than
+// the running process, so restarting into it is a downgrade — and the endpoint
+// being absent is no evidence at all when the disk build cannot be placed
+// relative to 0.8.6.
+func TestAgentStatusOldAgentWithUnprovableDiskStaysNeutral(t *testing.T) {
+	for name, disk := range map[string]string{
+		"disk predates the version endpoint": "0.8.4",
+		"disk is a git describe build":       "v0.17.0-3-gabc123",
+		"disk version is unparseable":        "devel",
+	} {
+		t.Run(name, func(t *testing.T) {
+			onLinux(t)
+			stubVersions(t, "", client.ErrVersionUnsupported, disk, nil)
+
+			got := statusOutput(t)
+			if strings.Contains(got, "restart piperd to apply") {
+				t.Errorf("advised restarting into %s without evidence it is newer:\n%s", disk, got)
+			}
+			if strings.Contains(got, "the running build is newer") {
+				t.Errorf("claimed a direction for a daemon that cannot report its version:\n%s", got)
+			}
+			for _, want := range []string{"too old to report", disk} {
+				if !strings.Contains(got, want) {
+					t.Errorf("status missing %q:\n%s", want, got)
+				}
+			}
+		})
 	}
 }
 
@@ -844,6 +877,36 @@ func TestSkewNoteWithoutOrderingGivesNoRestartAdvice(t *testing.T) {
 	}
 }
 
+// The Makefile stamps builds with `git describe --tags --always --dirty`, and
+// semver happily parses what that produces as a prerelease — then orders it by
+// rules that have nothing to do with git history: `-10-g…` sorts *below*
+// `-9-g…` lexically, a post-tag build sorts below the tag it is ahead of, and
+// two branches at equal distance cannot be ordered at all. Commit count and
+// hash are not a total order, so refuse rather than invent one.
+func TestSkewNoteRefusesGitDescribeBuilds(t *testing.T) {
+	for _, c := range []struct{ name, running, disk string }{
+		{"more commits sorts lexically lower", "v0.17.0-10-gbbbb", "v0.17.0-9-gaaaa"},
+		{"fewer commits, reversed", "v0.17.0-9-gaaaa", "v0.17.0-10-gbbbb"},
+		{"post-tag build against its own tag", "v0.17.0-1-gbbbb", "0.17.0"},
+		{"dirty tree against the clean tag", "v0.17.0-dirty", "0.17.0"},
+		{"dirty post-tag build", "v0.17.0-1-gabcdef-dirty", "0.17.0"},
+		{"describe from an RC tag", "v0.17.0-rc.1-2-gabcdef", "0.17.0-rc.1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := skewNote(c.running, c.disk, false)
+			if strings.Contains(got, "restart piperd to apply") {
+				t.Errorf("advised a restart it cannot justify: %q", got)
+			}
+			if strings.Contains(got, "the running build is newer") {
+				t.Errorf("claimed a direction git describe cannot establish: %q", got)
+			}
+			if !strings.Contains(got, c.disk) {
+				t.Errorf("note should still name the binary on disk: %q", got)
+			}
+		})
+	}
+}
+
 func TestCompareVersions(t *testing.T) {
 	for _, c := range []struct {
 		a, b   string
@@ -863,6 +926,13 @@ func TestCompareVersions(t *testing.T) {
 		{"garbage", "0.8.7", 0, false},
 		{"0.8.7", "garbage", 0, false},
 		{"devel", "devel", 0, false},
+		// `git describe` output: parseable by semver, not orderable by it.
+		{"v0.17.0-9-gaaaa", "v0.17.0-10-gbbbb", 0, false},
+		{"v0.17.0-1-gabcdef", "0.17.0", 0, false},
+		{"0.17.0", "v0.17.0-1-gabcdef", 0, false},
+		{"v0.17.0-dirty", "0.17.0", 0, false},
+		{"v0.17.0-1-gabcdef-dirty", "0.17.0", 0, false},
+		{"v0.17.0-rc.1-2-gabcdef", "0.17.0-rc.1", 0, false},
 	} {
 		got, ok := compareVersions(c.a, c.b)
 		if ok != c.wantOK || got != c.want {
