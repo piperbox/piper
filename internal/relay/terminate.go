@@ -51,6 +51,28 @@ func stampOf(path string) (fileStamp, error) {
 	return fileStamp{modNano: fi.ModTime().UnixNano(), size: fi.Size()}, nil
 }
 
+// diskVersion names what one attempt observed on disk. When both files stat,
+// their (mtime, size) stamps identify the exact bytes the attempt ran against,
+// so two different broken versions are distinguishable even when they fail
+// identically. A failed stat observes no version at all: there are no stamps to
+// name, and the zero value (stamped false) stands for "the files could not be
+// read", not for any particular content.
+type diskVersion struct {
+	stamped bool // both files stat'ed, so cs/ks are meaningful
+	cs, ks  fileStamp
+}
+
+// notedFailure is the failure already written to the log, kept so a repeat of
+// the *same* incident stays quiet: the version it was observed on plus the
+// message. Keying on the version is what keeps two bad on-disk versions with
+// the same error text from collapsing into one line; the message is a second
+// discriminator, and carries the whole identity for an unstamped observation
+// (it names the file that failed to stat and the stat error).
+type notedFailure struct {
+	ver diskVersion
+	msg string
+}
+
 // wildcardReloader serves the relay's wildcard pair and re-reads it from disk
 // when it changes. getCertificate runs on every TLS handshake, concurrently, so
 // the hot path is two stats under an RLock and the parse happens only when a
@@ -59,10 +81,10 @@ func stampOf(path string) (fileStamp, error) {
 type wildcardReloader struct {
 	certFile, keyFile string
 
-	mu      sync.RWMutex
-	cert    *tls.Certificate // never nil: the constructor fails if the first load does
-	cs, ks  fileStamp        // the stamps cert was parsed from
-	lastErr string           // last failure logged, to keep a broken pair from flooding the log
+	mu     sync.RWMutex
+	cert   *tls.Certificate // never nil: the constructor fails if the first load does
+	cs, ks fileStamp        // the stamps of the version last attempted (not necessarily the one that parsed)
+	noted  *notedFailure    // failure already logged, to keep a broken pair from flooding the log; nil once the files are healthy again
 }
 
 func newWildcardReloader(certFile, keyFile string) (*wildcardReloader, error) {
@@ -71,7 +93,7 @@ func newWildcardReloader(certFile, keyFile string) (*wildcardReloader, error) {
 	// loadLocked's contract rather than to exclude anyone.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, err := r.loadLocked(); err != nil {
+	if _, _, err := r.loadLocked(); err != nil {
 		return nil, err
 	}
 	return r, nil
@@ -83,8 +105,19 @@ func (r *wildcardReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificat
 	if err == nil {
 		r.mu.RLock()
 		cert, unchanged := r.cert, cs == r.cs && ks == r.ks
+		stale := r.staleFailureLocked(cs, ks)
 		r.mu.RUnlock()
 		if unchanged {
+			// Serving the cached pair for the version on disk is the only
+			// evidence of health this path produces, and a failure logged
+			// before must be re-armed on it or a second identical outage is
+			// swallowed. Deciding that under the read lock keeps the hot path
+			// off the write lock — including for as long as a broken version
+			// sits on disk, when the noted failure is about these very bytes
+			// and there is nothing to re-arm.
+			if stale {
+				r.rearm(cs, ks)
+			}
 			return cert, nil
 		}
 		return r.reload(), nil
@@ -94,8 +127,39 @@ func (r *wildcardReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificat
 	// file that actually failed, not the cert path in every case.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.noteErrLocked("relay: wildcard cert %s: %v (serving the last good certificate)", failedPath, err)
+	r.noteErrLocked(diskVersion{}, "relay: wildcard cert %s: %v (serving the last good certificate)", failedPath, err)
 	return r.cert, nil
+}
+
+// staleFailureLocked reports whether a failure has been logged that seeing
+// (cs, ks) on disk contradicts. A failure noted on *these* stamps is about the
+// bytes that are there now — a version that failed to parse leaves its own
+// stamps in cs/ks while cert stays the older pair, so every later handshake
+// takes the fast path over bytes that never loaded, and that is not health.
+// Anything else — a stat that failed, or a version since replaced — is stale.
+// Caller holds mu.
+func (r *wildcardReloader) staleFailureLocked(cs, ks fileStamp) bool {
+	if r.noted == nil {
+		return false
+	}
+	v := r.noted.ver
+	return !(v.stamped && v.cs == cs && v.ks == ks)
+}
+
+// rearm clears the logged-failure state once a handshake has served the version
+// that is on disk: the files are healthy, so the next failure — including an
+// exact repeat of the one already logged — gets reported again.
+//
+// The caller's read of staleFailureLocked is only a hint: both it and the stamps
+// it was taken on are re-checked here under the write lock, so a rotation that
+// landed in between — whose stamps the caller never saw — can't have its failure
+// disarmed by an observation that predates it.
+func (r *wildcardReloader) rearm(cs, ks fileStamp) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if cs == r.cs && ks == r.ks && r.staleFailureLocked(cs, ks) {
+		r.noted = nil
+	}
 }
 
 // reload re-parses the pair if it really did change. The stamps are taken again
@@ -105,14 +169,14 @@ func (r *wildcardReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificat
 func (r *wildcardReloader) reload() *tls.Certificate {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	cert, err := r.loadLocked()
+	cert, ver, err := r.loadLocked()
 	if err != nil {
 		// Half-written PEM, a cert whose key hasn't landed yet, a file that
 		// vanished between the two stats: keep the previous certificate. The
 		// stamps of the bad version are recorded by loadLocked, so this costs
 		// one parse and one log line per version on disk, not per handshake —
 		// and the next write moves them again and triggers a retry.
-		r.noteErrLocked("relay: wildcard cert reload from %s/%s: %v (serving the last good certificate)", r.certFile, r.keyFile, err)
+		r.noteErrLocked(ver, "relay: wildcard cert reload from %s/%s: %v (serving the last good certificate)", r.certFile, r.keyFile, err)
 		return r.cert
 	}
 	return cert
@@ -126,21 +190,25 @@ func (r *wildcardReloader) reload() *tls.Certificate {
 // handshake sees a mismatch and re-reads — one wasted parse. Stamping afterwards
 // would file the new bytes under the stamps of a version we never read and miss
 // the rotation entirely.
-func (r *wildcardReloader) loadLocked() (*tls.Certificate, error) {
+//
+// It also returns the version it observed, so a caller that logs the failure
+// can key its suppression to those bytes rather than to the error text.
+func (r *wildcardReloader) loadLocked() (*tls.Certificate, diskVersion, error) {
 	cs, ks, _, err := r.stamps()
 	if err != nil {
-		return nil, err
+		return nil, diskVersion{}, err
 	}
+	ver := diskVersion{stamped: true, cs: cs, ks: ks}
 	if cs == r.cs && ks == r.ks && r.cert != nil {
-		return r.cert, nil // another handshake already reloaded this version
+		return r.cert, ver, nil // another handshake already reloaded this version
 	}
 	cert, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
 	r.cs, r.ks = cs, ks
 	if err != nil {
-		return nil, err
+		return nil, ver, err
 	}
-	r.cert, r.lastErr = &cert, ""
-	return r.cert, nil
+	r.cert, r.noted = &cert, nil
+	return r.cert, ver, nil
 }
 
 func (r *wildcardReloader) stamps() (cs, ks fileStamp, failedPath string, err error) {
@@ -154,16 +222,20 @@ func (r *wildcardReloader) stamps() (cs, ks fileStamp, failedPath string, err er
 	return cs, ks, "", nil
 }
 
-// noteErrLocked logs a failure once per distinct message. Every handshake
-// re-examines the files, so logging unconditionally would turn one bad rotation
-// into a line per connection. A successful load clears it, so a failure that
-// comes back after a good period is reported again. Caller holds mu for writing.
-func (r *wildcardReloader) noteErrLocked(format string, args ...any) {
+// noteErrLocked logs a failure once per observed on-disk version. Every
+// handshake re-examines the files, so logging unconditionally would turn one
+// bad rotation into a line per connection; keying on the version rather than on
+// the message is what still gives two differently-broken versions a line each
+// when they fail with the same text. Serving the version on disk clears the
+// state — a load that parses, or a fast path that re-arms — so an outage that
+// comes back after a healthy period is reported again. Caller holds mu for
+// writing.
+func (r *wildcardReloader) noteErrLocked(ver diskVersion, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	if msg == r.lastErr {
+	if r.noted != nil && r.noted.ver == ver && r.noted.msg == msg {
 		return
 	}
-	r.lastErr = msg
+	r.noted = &notedFailure{ver: ver, msg: msg}
 	log.Print(msg)
 }
 

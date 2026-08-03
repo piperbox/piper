@@ -270,6 +270,129 @@ func TestWildcardConfigLogsMissingKeyFile(t *testing.T) {
 	}
 }
 
+// captureLog redirects the standard logger into a buffer for the duration of
+// the test, the way the rest of the package does it.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return &buf
+}
+
+// countLines returns the logged lines containing sub.
+func countLines(buf *bytes.Buffer, sub string) []string {
+	var hits []string
+	for _, line := range bytes.Split(buf.Bytes(), []byte("\n")) {
+		if len(line) > 0 && bytes.Contains(line, []byte(sub)) {
+			hits = append(hits, string(line))
+		}
+	}
+	return hits
+}
+
+// TestWildcardConfigLogsOutageAgainAfterRecovery: an outage that clears and
+// comes back is two incidents and must be two log lines. The recovery here is
+// the hostile one — the key returns with its original bytes, size and mtime, so
+// nothing is reloaded and the *only* evidence of health is the fast path
+// serving the cached pair. Suppression that is never re-armed there swallows
+// the second outage entirely.
+func TestWildcardConfigLogsOutageAgainAfterRecovery(t *testing.T) {
+	cfg, _, keyFile, _ := armedWildcard(t, "public.getpiper.co")
+	served(t, cfg, "app.public.getpiper.co")
+
+	keyBytes, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatalf("read key file: %v", err)
+	}
+	fi, err := os.Stat(keyFile)
+	if err != nil {
+		t.Fatalf("stat key file: %v", err)
+	}
+	mod := fi.ModTime()
+
+	buf := captureLog(t)
+
+	removeKey := func() {
+		t.Helper()
+		if err := os.Remove(keyFile); err != nil {
+			t.Fatalf("remove key file: %v", err)
+		}
+	}
+	restoreKey := func() {
+		t.Helper()
+		if err := os.WriteFile(keyFile, keyBytes, 0o600); err != nil {
+			t.Fatalf("restore key file: %v", err)
+		}
+		if err := os.Chtimes(keyFile, mod, mod); err != nil {
+			t.Fatalf("chtimes key file: %v", err)
+		}
+		again, err := os.Stat(keyFile)
+		if err != nil {
+			t.Fatalf("stat restored key file: %v", err)
+		}
+		if again.Size() != fi.Size() || !again.ModTime().Equal(mod) {
+			t.Fatalf("restored key file has stamps (%d, %v), want (%d, %v): the test no longer reproduces recovery without a reload",
+				again.Size(), again.ModTime(), fi.Size(), mod)
+		}
+	}
+
+	removeKey()
+	served(t, cfg, "app.public.getpiper.co")
+	if n := len(countLines(buf, keyFile)); n != 1 {
+		t.Fatalf("first outage logged %d lines naming the key file, want 1\nlog: %s", n, buf.Bytes())
+	}
+
+	restoreKey()
+	served(t, cfg, "app.public.getpiper.co")
+
+	removeKey()
+	served(t, cfg, "app.public.getpiper.co")
+
+	if got := countLines(buf, keyFile); len(got) != 2 {
+		t.Fatalf("two separate outages logged %d lines, want 2 — the failure state was never re-armed after the files became healthy\nlog: %s",
+			len(got), buf.Bytes())
+	}
+}
+
+// TestWildcardConfigLogsEachBadVersionWithTheSameError is the other half: the
+// suppression must be keyed to the version observed on disk, not to the text of
+// the message. Two distinct corrupt certificates that fail with the identical
+// error each get a line — while repeated handshakes over one of them still get
+// only the one.
+func TestWildcardConfigLogsEachBadVersionWithTheSameError(t *testing.T) {
+	cfg, certFile, keyFile, derA := armedWildcard(t, "public.getpiper.co")
+	served(t, cfg, "app.public.getpiper.co")
+
+	buf := captureLog(t)
+
+	// Both bodies are non-PEM, so both fail with the same parse error, and
+	// writeFilePadded pads both to pemPad — only the mtime tells them apart.
+	corrupt := func(body string, mod time.Time) {
+		t.Helper()
+		writeFilePadded(t, certFile, []byte(body), mod)
+		for i := 0; i < 3; i++ {
+			if _, got := served(t, cfg, "app.public.getpiper.co"); !bytes.Equal(got, derA) {
+				t.Fatal("a corrupt cert file changed what is served; want the last good certificate")
+			}
+		}
+	}
+
+	corrupt("-----BEGIN CERTIFICATE-----\nnope\n", time.Now().Add(-time.Minute))
+	corrupt("-----BEGIN CERTIFICATE-----\nstill not a certificate\n", time.Now())
+
+	got := countLines(buf, "relay: wildcard cert reload from "+certFile+"/"+keyFile+":")
+	if len(got) != 2 {
+		t.Fatalf("two distinct corrupt versions logged %d lines, want 2 (one per version, and no more than one per version)\nlog: %s",
+			len(got), buf.Bytes())
+	}
+	if got[0] != got[1] {
+		t.Fatalf("the two versions did not fail with the same message, so this test no longer covers message-keyed suppression:\n%s\n%s", got[0], got[1])
+	}
+}
+
 // TestWildcardConfigConcurrentGetCertificate hammers the callback from many
 // goroutines across several rotations — run under -race. Every call must return
 // a certificate that actually exists on disk (some pair we wrote), never an
