@@ -164,13 +164,41 @@ The fresh DB materializes on first start. Then, per box:
 - **Operator-enrolled boxes:** re-run the `piper-relay enroll` transient-unit
   command from [manual-setup.md](../manual-setup.md#run-the-relay-as-a-service)
   and hand the new `rlyt_…` token to the box's `PIPER_RELAY_TOKEN`.
-- **Custom domains** (`piper domains …`) are gone with the DB — re-add them
-  after the box reconnects.
+
+### What comes back on its own
+
+Most relay state is a *projection* of what the boxes hold, so it is restored by
+the reconnect rather than by you. Once a box is enrolled again:
+
+- **Custom domains** re-appear. The agent keeps its own domain rows and cert on
+  disk, and the relay re-derives the mapping when the tunnel session registers.
+  There is nothing to re-add — `piper domains add` on a domain the box already
+  holds answers `409 domain already exists`. (Only a box that never reconnects
+  needs its domains re-created, on whichever box replaces it.)
+- **Repo bindings** re-appear: piperd re-pushes every binding, and its whole app
+  set, on each tunnel (re)connect.
+- **GitHub App links** re-appear at the next `piper login`: when an account has
+  no installations on record the relay asks GitHub's API directly and links back
+  what that account owns.
+
+### What does not
+
+An **org-target installation with no linked Piper org** is the one gap: the
+relay cannot attribute it without the installing user's identity, which only
+the webhook carries. Re-fire that webhook by hand — GitHub org (or user)
+settings → GitHub Apps → **suspend**, then **unsuspend** the Piper
+installation, which sends an `unsuspend` event and links it. Symptom if you
+skip it: `piper github repos` stays empty for that org's boxes.
 
 Verify as in the same-schema upgrade, plus one idempotency check: run
 `piper login` a second time from any box — it must print
 `already enrolled as <domain>` and `piper box ls` must show exactly one row for
-that box.
+that box. It must not ask for a device code the second time: a saved credential
+that still works skips the browser trip.
+
+`piper login` ends with an advisory GitHub-App install poll — the `Waiting…`
+dots. It is bounded (ten minutes) and exits 0 regardless; enrollment already
+succeeded by the time it runs, so dots are never a hung enrollment.
 
 Rollback within the window: stop the service, restore `piper-relay.prev` and
 the moved `relay.db.pre-*`, start. Old tokens become valid again; boxes that

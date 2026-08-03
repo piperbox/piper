@@ -24,9 +24,18 @@ func NewAPI(st *Store, v Verifier) http.Handler { return NewAPIWithTunnel(st, v,
 // when the relay holds no GitHub App, in which case enroll advertises
 // "github_app": false and boxes stay on the BYO path.
 func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) http.Handler {
+	_, h := newAPI(st, v, tunnelEndpoint, router, webRedirects, ghApp)
+	return h
+}
+
+// newAPI builds the account API and returns the concrete value alongside its
+// handler, so same-package tests can drive the seams the exported constructor
+// deliberately keeps private (the reconcile clock).
+func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) (*api, http.Handler) {
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
 		webRedirects: webRedirects, webStates: map[string]webState{},
-		cliStates: map[string]*cliLogin{}, ghApp: ghApp}
+		cliStates: map[string]*cliLogin{}, lastReconcile: map[string]time.Time{},
+		now: time.Now, ghApp: ghApp}
 	if wv, ok := v.(WebVerifier); ok {
 		a.webv = wv
 	}
@@ -51,7 +60,7 @@ func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Rout
 		mux.Handle("/agents", proxy)
 		mux.Handle("/agents/", proxy)
 	}
-	return mux
+	return a, mux
 }
 
 type api struct {
@@ -62,9 +71,12 @@ type api struct {
 	webRedirects   []string   // allowed redirect_uri prefixes; empty ⇒ web login disabled
 	ghApp          *GitHubApp // nil ⇒ relay serves BYO users only
 
-	mu        sync.Mutex
-	webStates map[string]webState  // state → pending dashboard browser flow
-	cliStates map[string]*cliLogin // handle → pending CLI browser login (#291)
+	now func() time.Time // clock seam for the reconcile throttle; tests override
+
+	mu            sync.Mutex
+	webStates     map[string]webState  // state → pending dashboard browser flow
+	cliStates     map[string]*cliLogin // handle → pending CLI browser login (#291)
+	lastReconcile map[string]time.Time // account id → last installation reconcile (#470)
 
 	// Shared per-IP bucket for the two unauthenticated login endpoints (#106):
 	// one budget per IP, so hammering one endpoint can't dodge the limit by
@@ -172,6 +184,9 @@ func (a *api) loginCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "account error", http.StatusInternalServerError)
 		return
 	}
+	if denyDisabled(w, acc) {
+		return
+	}
 	// Login carries no installation linking: the authorize redirect never
 	// includes an installation_id, and installations link through the
 	// HMAC-signed "installation" webhook instead — an unsigned query
@@ -235,6 +250,9 @@ func (a *api) loginPoll(w http.ResponseWriter, r *http.Request) {
 	acc, err := a.st.UpsertAccount(id.Subject, id.Login)
 	if err != nil {
 		http.Error(w, "account error", http.StatusInternalServerError)
+		return
+	}
+	if denyDisabled(w, acc) {
 		return
 	}
 	cred, err := a.st.MintAccountCredential(acc.ID)
@@ -321,13 +339,17 @@ func (a *api) githubRepos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "installation_id required", http.StatusBadRequest)
 		return
 	}
-	owner, err := a.st.AccountForInstallation(instID)
-	if errors.Is(err, ErrNoInstallation) || (err == nil && owner != acc.ID) {
-		http.Error(w, "github app not installed for this account", http.StatusNotFound)
-		return
-	}
+	// Visibility, not bare ownership: an org-target installation is owned by the
+	// org account, so every member of that org may read its repos — the same
+	// trust boundary that already lets them drive the org's boxes. Unknown and
+	// forbidden stay indistinguishable (404), so this leaks no existence.
+	visible, err := a.st.InstallationVisibleTo(instID, acc.ID)
 	if err != nil {
 		http.Error(w, "lookup error", http.StatusInternalServerError)
+		return
+	}
+	if !visible {
+		http.Error(w, "github app not installed for this account", http.StatusNotFound)
 		return
 	}
 	repos, err := a.ghApp.Repos(r.Context(), instID)
@@ -353,22 +375,99 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"github_app":    a.ghApp != nil,
+		"github_app": a.ghApp != nil,
+		// The account this credential belongs to. It makes status the one cheap
+		// authed call that both validates a saved credential and says whose it
+		// is, so `piper login` can confirm an existing session without a browser
+		// trip (#473).
+		"username":      acc.Username,
 		"installations": []Installation{},
 		"install_url":   "",
 	}
 	if a.ghApp != nil {
 		resp["install_url"] = a.ghApp.InstallURL()
-		insts, err := a.st.InstallationsForAccount(acc.ID)
+		insts, err := a.st.InstallationsVisibleTo(acc.ID)
 		if err != nil {
 			http.Error(w, "lookup error", http.StatusInternalServerError)
 			return
+		}
+		// Nothing on record is exactly the case webhooks cannot fix: an App
+		// that is already installed fires no event, so this account would wait
+		// out login's install poll and see an empty `piper github repos`
+		// forever. Ask GitHub directly (#470). Best-effort — GitHub being
+		// unreachable must not fail a status call that has a good answer
+		// already.
+		if len(insts) == 0 && a.shouldReconcile(acc.ID) {
+			if n, err := a.st.ReconcileInstallations(r.Context(), a.ghApp, acc); err != nil {
+				log.Printf("relay: reconcile installations for %s: %v", acc.Username, err)
+			} else if n > 0 {
+				log.Printf("relay: reconciled %d installation(s) for %s from the github api", n, acc.Username)
+				if insts, err = a.st.InstallationsVisibleTo(acc.ID); err != nil {
+					http.Error(w, "lookup error", http.StatusInternalServerError)
+					return
+				}
+			}
 		}
 		if insts != nil {
 			resp["installations"] = insts
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// reconcileEvery bounds how often one account's installation record is
+// reconciled against GitHub's API.
+//
+// The question reconciliation answers — "was the App already installed before
+// we ever looked?" — is only usefully asked once: a *new* install fires a
+// webhook, which is the path that keeps the record fresh from then on. But
+// `piper login`'s advisory install poll hits /v1/github/status every few
+// seconds for a full ten minutes, and the listing it drives is app-global,
+// against a 5000/hour budget shared by every tenant.
+//
+// So this must exceed the CLI's installPollTimeout, not merely damp it: at one
+// minute a single waiting user still spent ten app-global listings. Longer than
+// the poll window means one attempt per login, whatever the poll does.
+const reconcileEvery = 15 * time.Minute
+
+// shouldReconcile rate-limits reconciliation per account, recording the attempt
+// as it admits it. Attempts count whether or not they succeed — a GitHub outage
+// must not turn every polling client into a retry loop against that shared
+// budget, and the status response is honest regardless, since a failed
+// reconcile just leaves the stored answer in place.
+//
+// In-memory and per-process: the cost of forgetting on restart is one extra
+// API call per account.
+func (a *api) shouldReconcile(accountID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := a.now
+	if now == nil {
+		now = time.Now
+	}
+	if t, ok := a.lastReconcile[accountID]; ok && now().Sub(t) < reconcileEvery {
+		return false
+	}
+	if a.lastReconcile == nil {
+		a.lastReconcile = map[string]time.Time{}
+	}
+	a.lastReconcile[accountID] = now()
+	return true
+}
+
+// denyDisabled refuses a login for an account the operator kill-switch has cut
+// off, writing the 403 itself and reporting whether it did. Every door that
+// mints an account credential goes through it. The kill-switch holds regardless
+// — a credential minted for a disabled account is inert, since
+// AuthenticateAccount rejects it — but handing a cut-off user a success and a
+// live-looking secret is a confusing way to say no, and mints a credential row
+// per attempt (#81).
+func denyDisabled(w http.ResponseWriter, acc Account) bool {
+	if !acc.Disabled {
+		return false
+	}
+	http.Error(w, "account disabled", http.StatusForbidden)
+	return true
 }
 
 // authAccount authenticates the request's bearer account credential, writing
