@@ -79,6 +79,17 @@ PIPER_RELAY_TLS_CERT=/var/lib/piper-relay/wildcard.crt
 PIPER_RELAY_TLS_KEY=/var/lib/piper-relay/wildcard.key
 ```
 
+The wildcard pair is re-read when it changes on disk, so a renewal — a certbot
+deploy hook, a cert-manager Secret remount — is served from the next handshake
+with no restart and no dropped tunnels (#484). Write the new pair over the same
+paths; a pair caught half-written is logged and the previous certificate keeps
+serving until a complete one lands.
+
+Most renewal tools write the cert and the key as two separate, non-atomic
+writes, so during a normal renewal you can expect one or more
+`serving the last good certificate` log lines. That is not an incident signal
+by itself: the relay converges to the new pair as soon as both files land.
+
 Without `PIPER_RELAY_GITHUB_CLIENT_ID` the relay logs
 `self-service login disabled` — boxes can then only be operator-enrolled
 (`piper-relay enroll`, see manual-setup). `PIPER_RELAY_FAKE_APPROVE=1` is for

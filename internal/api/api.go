@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/piperbox/piper/internal/domain"
 	"github.com/piperbox/piper/internal/source"
@@ -646,12 +647,16 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 		if !knownApp(w, r, name) {
 			return
 		}
-		env, err := s.AppEnv(name)
+		env, updated, err := s.AppEnvWithTimestamps(name)
 		if err != nil {
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"env": env})
+		updatedAt := make(map[string]string, len(updated))
+		for k, t := range updated {
+			updatedAt[k] = t.UTC().Format(time.RFC3339Nano)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"env": env, "updated_at": updatedAt})
 	})
 	mux.HandleFunc("POST /v1/apps/{name}/env", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")

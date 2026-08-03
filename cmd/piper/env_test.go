@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunEnvSetPostsEachVar(t *testing.T) {
@@ -59,6 +61,60 @@ func TestRunEnvLsMasksUnlessShow(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "SECRET=hunter2") {
 		t.Errorf("--show ls = %q, want the real value", stdout.String())
+	}
+}
+
+func TestRunEnvLsRendersAge(t *testing.T) {
+	updatedAt := time.Now().Add(-(2*time.Minute + 30*time.Second))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"env":        map[string]string{"SECRET": "hunter2"},
+			"updated_at": map[string]string{"SECRET": updatedAt.Format(time.RFC3339Nano)},
+		})
+	}))
+	defer srv.Close()
+	t.Setenv("PIPER_ADDR", srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"env", "dashboard", "ls"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "SECRET=") {
+		t.Errorf("stdout = %q, want SECRET= present", stdout.String())
+	}
+	// The CLI must render the actual age derived from the server's updated_at,
+	// not just any parenthesised text.
+	expectedAge := time.Since(updatedAt).Round(time.Second).String()
+	expectedLine := fmt.Sprintf("SECRET=******  (%s)", expectedAge)
+	if !strings.Contains(stdout.String(), expectedLine) {
+		t.Errorf("stdout = %q, want line %q", stdout.String(), expectedLine)
+	}
+	// The value must still be masked by default.
+	if strings.Contains(stdout.String(), "hunter2") {
+		t.Errorf("stdout = %q, value must be masked", stdout.String())
+	}
+}
+
+func TestRunEnvLsFutureTimestampRendersZero(t *testing.T) {
+	updatedAt := time.Now().Add(30 * time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"env":        map[string]string{"SECRET": "hunter2"},
+			"updated_at": map[string]string{"SECRET": updatedAt.Format(time.RFC3339Nano)},
+		})
+	}))
+	defer srv.Close()
+	t.Setenv("PIPER_ADDR", srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"env", "dashboard", "ls"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	// Clock skew can make the server's updated_at appear in the future on the CLI
+	// host; the age must be clamped to zero instead of rendering a negative duration.
+	expectedLine := "SECRET=******  (0s)"
+	if !strings.Contains(stdout.String(), expectedLine) {
+		t.Errorf("stdout = %q, want line %q", stdout.String(), expectedLine)
 	}
 }
 

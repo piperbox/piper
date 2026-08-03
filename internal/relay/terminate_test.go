@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -45,8 +46,14 @@ func TestLoadWildcardConfig(t *testing.T) {
 	}
 	cert, key := writeWildcard(t, "public.getpiper.co")
 	cfg, err := LoadWildcardConfig(cert, key)
-	if err != nil || cfg == nil || len(cfg.Certificates) != 1 {
+	// The pair is served through GetCertificate rather than a static
+	// Certificates slice so a renewal on disk is picked up without a restart
+	// (#484); the rotation behaviour itself is pinned in wildcard_reload_test.go.
+	if err != nil || cfg == nil || cfg.GetCertificate == nil {
 		t.Fatalf("LoadWildcardConfig = %v,%v", cfg, err)
+	}
+	if _, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "app.public.getpiper.co"}); err != nil {
+		t.Fatalf("GetCertificate: %v", err)
 	}
 }
 
