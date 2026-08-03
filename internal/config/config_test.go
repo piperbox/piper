@@ -44,6 +44,25 @@ func TestClientAddr(t *testing.T) {
 	}
 }
 
+// Only "1" keeps the browser shut; every other value (including the common
+// "0") leaves the launch on, so a stray export can't silently disable it.
+func TestNoBrowser(t *testing.T) {
+	for _, tc := range []struct {
+		val  string
+		want bool
+	}{
+		{"", false},
+		{"0", false},
+		{"true", false},
+		{"1", true},
+	} {
+		t.Setenv("PIPER_NO_BROWSER", tc.val)
+		if got := NoBrowser(); got != tc.want {
+			t.Errorf("PIPER_NO_BROWSER=%q: NoBrowser() = %v, want %v", tc.val, got, tc.want)
+		}
+	}
+}
+
 func TestLoadRelayFields(t *testing.T) {
 	t.Setenv("PIPER_DATA_DIR", t.TempDir())
 	t.Setenv("PIPER_RELAY_ADDR", "relay.example.com:7000")

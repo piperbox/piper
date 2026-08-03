@@ -37,8 +37,9 @@ func TestRelayLoginStoresCredential(t *testing.T) {
 	// No real sleeps or browser during the poll loop.
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
+	oldOpenBrowser := openBrowserFn
 	openBrowserFn = func(string) error { return nil }
-	defer func() { openBrowserFn = openBrowser }()
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
 
 	var polls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -92,8 +93,9 @@ func TestRelayLoginExitsZeroWhenInstallPollTimesOut(t *testing.T) {
 
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
+	oldOpenBrowser := openBrowserFn
 	openBrowserFn = func(string) error { return nil }
-	defer func() { openBrowserFn = openBrowser }()
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
 
 	// The advisory install poll really runs and really waits; its deadline
 	// (well under the 3s poll interval) expires mid-wait.
@@ -163,8 +165,9 @@ func TestRelayLoginExitsZeroWhenInstallPollInterrupted(t *testing.T) {
 
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
+	oldOpenBrowser := openBrowserFn
 	openBrowserFn = func(string) error { return nil }
-	defer func() { openBrowserFn = openBrowser }()
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
 
 	// The relay never records an installation; once the install poll starts,
 	// deliver SIGINT to this process — the login flow's signal.NotifyContext
@@ -229,8 +232,9 @@ func TestRelayLoginExitsNonZeroOnLoginFailure(t *testing.T) {
 
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
+	oldOpenBrowser := openBrowserFn
 	openBrowserFn = func(string) error { return nil }
-	defer func() { openBrowserFn = openBrowser }()
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -266,8 +270,9 @@ func TestRelayLoginWebStoresCredentialAndWaitsForInstall(t *testing.T) {
 	pollSleep = func(time.Duration) {}
 	defer func() { pollSleep = time.Sleep }()
 	var opened string
+	oldOpenBrowser := openBrowserFn
 	openBrowserFn = func(u string) error { opened = u; return nil }
-	defer func() { openBrowserFn = openBrowser }()
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
 
 	var polls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
