@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -187,6 +188,65 @@ func (g *GitHubApp) Installation(ctx context.Context, installationID string) (In
 		return InstallationTarget{}, err
 	}
 	return InstallationTarget{Login: out.Account.Login}, nil
+}
+
+// AppInstallation is one installation of the relay's App, as the app-level
+// listing reports it: the installation id plus the identity of the account it
+// is installed on. AccountGithubID is the stable key reconciliation matches on
+// — logins rename, ids do not.
+type AppInstallation struct {
+	ID              string
+	AccountGithubID string
+	AccountLogin    string
+	AccountType     string // "User" or "Organization"
+}
+
+// Installations lists every installation of this App
+// (GET /app/installations). The relay never retains a user's OAuth token — it
+// is used once at login and discarded — so the App's own listing is the only
+// way to ask GitHub "what is installed?" outside a webhook. Reconciliation
+// filters the answer down to what the asking account can prove it owns.
+//
+// per_page=100 caps a single page, matching Repos; full Link-header pagination
+// is the same follow-up (#308).
+func (g *GitHubApp) Installations(ctx context.Context) ([]AppInstallation, error) {
+	jwt, err := ghjwt.Sign(g.appID, g.key, time.Now())
+	if err != nil {
+		return nil, err
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, g.apiBase+"/app/installations?per_page=100", nil)
+	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := g.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return nil, fmt.Errorf("list installations: %s: %s", resp.Status, b)
+	}
+	var out []struct {
+		ID      int64 `json:"id"`
+		Account struct {
+			ID    int64  `json:"id"`
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"account"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	insts := make([]AppInstallation, 0, len(out))
+	for _, in := range out {
+		insts = append(insts, AppInstallation{
+			ID:              strconv.FormatInt(in.ID, 10),
+			AccountGithubID: strconv.FormatInt(in.Account.ID, 10),
+			AccountLogin:    in.Account.Login,
+			AccountType:     in.Account.Type,
+		})
+	}
+	return insts, nil
 }
 
 // Repo is one installation-accessible repository, as the picker renders it:

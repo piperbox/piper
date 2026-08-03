@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -657,6 +658,190 @@ func accountWithCred(t *testing.T, st *Store) string {
 		t.Fatal(err)
 	}
 	return cred
+}
+
+// reconcileAPI builds the account API against a stubbed GitHub whose
+// /app/installations returns insts verbatim, and reports how many times that
+// endpoint was called.
+func reconcileAPI(t *testing.T, st *Store, insts string) (http.Handler, *int) {
+	t.Helper()
+	calls := 0
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations" {
+			t.Errorf("unexpected github path %q", r.URL.Path)
+		}
+		calls++
+		_, _ = w.Write([]byte(insts))
+	}))
+	t.Cleanup(gh.Close)
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s",
+		Slug: "piper-relay", APIBase: gh.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app), &calls
+}
+
+// An App that is already installed fires no webhook, so an account with nothing
+// on record would wait out login's 10-minute install poll and see an empty
+// `piper github repos` forever. Status asks GitHub directly instead (#470).
+func TestGitHubStatusReconcilesWhenNothingIsOnRecord(t *testing.T) {
+	st := openTestStore(t)
+	cred := accountWithCred(t, st) // github id 1001, login alice
+	api, calls := reconcileAPI(t, st, `[{"id":55,"account":{"id":1001,"login":"alice","type":"User"}}]`)
+
+	rec := getStatus(t, api, cred)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var out ghStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Installations) != 1 || out.Installations[0].ID != "55" {
+		t.Fatalf("installations = %+v, want the reconciled one", out.Installations)
+	}
+	if out.Installations[0].TargetLogin != "alice" || out.Installations[0].TargetType != "user" {
+		t.Errorf("target = %+v, want user/alice", out.Installations[0])
+	}
+	if *calls != 1 {
+		t.Errorf("github calls = %d, want 1", *calls)
+	}
+
+	// The link is durable: the next status is served from the store.
+	if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+		t.Fatalf("second status = %d", rec.Code)
+	}
+	if *calls != 1 {
+		t.Errorf("github calls after a satisfied status = %d, want still 1", *calls)
+	}
+}
+
+// The App's listing spans every tenant, so reconciliation must link only what
+// the asking account can prove it owns. Another user's installation is not it.
+func TestGitHubStatusReconcileIgnoresAnotherTenantsInstallation(t *testing.T) {
+	st := openTestStore(t)
+	cred := accountWithCred(t, st) // github id 1001
+	api, _ := reconcileAPI(t, st, `[{"id":99,"account":{"id":2002,"login":"mallory","type":"User"}}]`)
+
+	rec := getStatus(t, api, cred)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var out ghStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Installations) != 0 {
+		t.Fatalf("claimed another account's installation: %+v", out.Installations)
+	}
+	if _, err := st.AccountForInstallation("99"); !errors.Is(err, ErrNoInstallation) {
+		t.Errorf("installation 99 was linked; err = %v", err)
+	}
+}
+
+// An org-target installation with no linked Piper org has no provable owner
+// from a reconcile's point of view — the webhook's installer identity is what
+// resolves it. Claiming it for whoever asks first would be a tenancy hole.
+func TestGitHubStatusReconcileSkipsUnlinkedOrgInstallation(t *testing.T) {
+	st := openTestStore(t)
+	cred := accountWithCred(t, st)
+	api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme","type":"Organization"}}]`)
+
+	if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.AccountForInstallation("77"); !errors.Is(err, ErrNoInstallation) {
+		t.Errorf("unlinked org installation was claimed; err = %v", err)
+	}
+}
+
+// An org-target installation reconciles to the Piper org the asking account
+// belongs to, through the same membership check the webhook path uses. It
+// links to the org account, not the member — that is the existing tenancy
+// model — so it repairs token minting and the org's boxes rather than the
+// member's own status.
+func TestGitHubStatusReconcilesOrgInstallationForAMember(t *testing.T) {
+	st := openTestStore(t)
+	alice, err := st.UpsertAccount("1001", "alice") // owner ⇒ member
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err := st.MintAccountCredential(alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := st.CreateOrg(alice.ID, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgGitHub(org.ID, "Acme-Inc"); err != nil {
+		t.Fatal(err)
+	}
+	api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme-inc","type":"Organization"}}]`)
+
+	if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	owner, err := st.AccountForInstallation("77")
+	if err != nil {
+		t.Fatalf("org installation was not reconciled: %v", err)
+	}
+	if owner != org.ID {
+		t.Errorf("installation linked to %q, want the org account %q", owner, org.ID)
+	}
+}
+
+// GitHub being unreachable must not fail a status call — login's install poll
+// depends on it answering, and an empty answer is the honest one.
+func TestGitHubStatusSurvivesAFailedReconcile(t *testing.T) {
+	st := openTestStore(t)
+	cred := accountWithCred(t, st)
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer gh.Close()
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s",
+		Slug: "piper-relay", APIBase: gh.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app)
+
+	rec := getStatus(t, api, cred)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var out ghStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Installations) != 0 {
+		t.Fatalf("installations = %+v, want empty", out.Installations)
+	}
+}
+
+// login's install poll hits status every few seconds for up to ten minutes. A
+// new install fires a webhook, so re-asking GitHub on every poll would spend
+// hundreds of app-API calls per waiting user against a shared hourly budget.
+func TestGitHubStatusThrottlesRepeatedReconciles(t *testing.T) {
+	st := openTestStore(t)
+	cred := accountWithCred(t, st)
+	// Nothing this account owns, so every poll stays on the reconcile path.
+	api, calls := reconcileAPI(t, st, `[{"id":99,"account":{"id":2002,"login":"mallory","type":"User"}}]`)
+
+	for i := 0; i < 5; i++ {
+		if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+			t.Fatalf("status %d = %d", i, rec.Code)
+		}
+	}
+	if *calls != 1 {
+		t.Errorf("github calls across 5 polls = %d, want 1", *calls)
+	}
 }
 
 func TestGitHubStatusInstalled(t *testing.T) {

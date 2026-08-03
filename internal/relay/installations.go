@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
@@ -107,6 +108,73 @@ func (s *Store) LinkInstallationForAccountIfAbsent(installationID, accountID, ta
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+// ReconcileInstallations repairs an account's installation record from GitHub's
+// own listing, and reports how many links it made.
+//
+// Webhooks are the relay's only other source of installation knowledge, and
+// they only ever fire on a *change*: an App that is already installed sends
+// nothing, so an account that never saw the created/unsuspend event waits
+// forever. That bites on more than the pre-1.0 fresh-DB reset — a user can
+// install the public App before ever logging in (the webhook's sender then has
+// no account row and the event is dropped permanently), and GitHub retries a
+// failed delivery only briefly, so a relay outage at install time loses the
+// link for good. Webhook-only state is eventually inconsistent (#470).
+//
+// Reconciliation only ever links what the asking account can *prove* it owns,
+// because the App's listing spans every tenant:
+//
+//   - a user-target installation whose GitHub id is the account's own;
+//   - an org-target installation for a Piper org this account belongs to,
+//     verified through the same OrgForGitHubInstall membership check the
+//     webhook path uses.
+//
+// One case is deliberately skipped: an org-target installation with no linked
+// Piper org. The webhook falls back to linking whoever installed it, but a
+// reconcile has no installer identity to fall back on, and handing the
+// installation to whichever account asks first would be a tenancy hole. Those
+// still need the install event (or a suspend/unsuspend to re-fire one).
+//
+// Links are insert-if-absent, so a reconcile racing a live webhook never
+// steals an installation from its rightful owner.
+func (s *Store) ReconcileInstallations(ctx context.Context, app *GitHubApp, acc Account) (int, error) {
+	// Org accounts hold no GitHub user id and never authenticate, so there is
+	// no identity here to prove ownership with.
+	if app == nil || acc.GithubID == "" {
+		return 0, nil
+	}
+	insts, err := app.Installations(ctx)
+	if err != nil {
+		return 0, err
+	}
+	linked := 0
+	for _, in := range insts {
+		var accountID, targetType string
+		switch {
+		case in.AccountType == "Organization":
+			orgID, err := s.OrgForGitHubInstall(in.AccountGithubID, in.AccountLogin, acc.GithubID)
+			if errors.Is(err, ErrNoOrg) {
+				continue // not an org this account can vouch for
+			}
+			if err != nil {
+				return linked, err
+			}
+			accountID, targetType = orgID, "org"
+		case in.AccountGithubID == acc.GithubID:
+			accountID, targetType = acc.ID, "user"
+		default:
+			continue // another tenant's installation
+		}
+		inserted, err := s.LinkInstallationForAccountIfAbsent(in.ID, accountID, targetType, in.AccountLogin)
+		if err != nil {
+			return linked, err
+		}
+		if inserted {
+			linked++
+		}
+	}
+	return linked, nil
 }
 
 // UnlinkInstallation drops an installation, e.g. on installation.deleted.

@@ -26,7 +26,7 @@ func NewAPI(st *Store, v Verifier) http.Handler { return NewAPIWithTunnel(st, v,
 func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) http.Handler {
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
 		webRedirects: webRedirects, webStates: map[string]webState{},
-		cliStates: map[string]*cliLogin{}, ghApp: ghApp}
+		cliStates: map[string]*cliLogin{}, lastReconcile: map[string]time.Time{}, ghApp: ghApp}
 	if wv, ok := v.(WebVerifier); ok {
 		a.webv = wv
 	}
@@ -62,9 +62,10 @@ type api struct {
 	webRedirects   []string   // allowed redirect_uri prefixes; empty ⇒ web login disabled
 	ghApp          *GitHubApp // nil ⇒ relay serves BYO users only
 
-	mu        sync.Mutex
-	webStates map[string]webState  // state → pending dashboard browser flow
-	cliStates map[string]*cliLogin // handle → pending CLI browser login (#291)
+	mu            sync.Mutex
+	webStates     map[string]webState  // state → pending dashboard browser flow
+	cliStates     map[string]*cliLogin // handle → pending CLI browser login (#291)
+	lastReconcile map[string]time.Time // account id → last installation reconcile (#470)
 
 	// Shared per-IP bucket for the two unauthenticated login endpoints (#106):
 	// one budget per IP, so hammering one endpoint can't dodge the limit by
@@ -375,11 +376,53 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "lookup error", http.StatusInternalServerError)
 			return
 		}
+		// Nothing on record is exactly the case webhooks cannot fix: an App
+		// that is already installed fires no event, so this account would wait
+		// out login's install poll and see an empty `piper github repos`
+		// forever. Ask GitHub directly (#470). Best-effort — GitHub being
+		// unreachable must not fail a status call that has a good answer
+		// already.
+		if len(insts) == 0 && a.shouldReconcile(acc.ID) {
+			if n, err := a.st.ReconcileInstallations(r.Context(), a.ghApp, acc); err != nil {
+				log.Printf("relay: reconcile installations for %s: %v", acc.Username, err)
+			} else if n > 0 {
+				log.Printf("relay: reconciled %d installation(s) for %s from the github api", n, acc.Username)
+				if insts, err = a.st.InstallationsForAccount(acc.ID); err != nil {
+					http.Error(w, "lookup error", http.StatusInternalServerError)
+					return
+				}
+			}
+		}
 		if insts != nil {
 			resp["installations"] = insts
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// reconcileEvery bounds how often one account's installation record is
+// reconciled against GitHub's API. `piper login`'s advisory install poll hits
+// /v1/github/status every few seconds for up to ten minutes, and a *new*
+// install fires a webhook anyway — so the question reconciliation answers
+// ("was it already installed before we ever looked?") is only usefully asked
+// once. Un-throttled, one waiting user would spend hundreds of app-API calls
+// against a 5000/hour budget shared by every tenant.
+const reconcileEvery = time.Minute
+
+// shouldReconcile rate-limits reconciliation per account, recording the attempt
+// as it admits it. In-memory and per-process: the cost of forgetting on restart
+// is one extra API call per account.
+func (a *api) shouldReconcile(accountID string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if t, ok := a.lastReconcile[accountID]; ok && time.Since(t) < reconcileEvery {
+		return false
+	}
+	if a.lastReconcile == nil {
+		a.lastReconcile = map[string]time.Time{}
+	}
+	a.lastReconcile[accountID] = time.Now()
+	return true
 }
 
 // denyDisabled refuses a login for an account the operator kill-switch has cut

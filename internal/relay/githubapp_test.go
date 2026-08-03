@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -102,6 +103,44 @@ func TestRepoTokenIsScopedToOneRepo(t *testing.T) {
 	perms, _ := gotBody["permissions"].(map[string]any)
 	if perms["contents"] != "read" || perms["deployments"] != "write" {
 		t.Fatalf("permissions = %v", perms)
+	}
+}
+
+// The App's own installation listing is what reconciliation reads when an
+// account has nothing on record and no webhook is ever going to arrive (#470).
+func TestInstallationsListsEveryAppInstallation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("per_page = %q, want 100", got)
+		}
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
+			t.Errorf("Authorization = %q, want an app JWT", got)
+		}
+		_, _ = w.Write([]byte(`[` +
+			`{"id":55,"account":{"id":4242,"login":"alice","type":"User"}},` +
+			`{"id":56,"account":{"id":9001,"login":"acme","type":"Organization"}}]`))
+	}))
+	defer srv.Close()
+
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", APIBase: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.Installations(context.Background())
+	if err != nil {
+		t.Fatalf("Installations: %v", err)
+	}
+	want := []AppInstallation{
+		{ID: "55", AccountGithubID: "4242", AccountLogin: "alice", AccountType: "User"},
+		{ID: "56", AccountGithubID: "9001", AccountLogin: "acme", AccountType: "Organization"},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("installations = %+v, want %+v", got, want)
 	}
 }
 
