@@ -22,9 +22,11 @@ Cloudflare API token, terminates TLS itself, and asks the relay to splice
 `*.example.com` SNI down its tunnel. Your existing shared-domain URLs
 (`<hash>-<user>.<apex>`) keep working alongside.
 
-Create the DNS records `GET /v1/domain` lists (wildcard + apex → the relay
-host). Issuance starts immediately — records are needed for traffic, not for
-the cert. `dns_ok` flips true once the wildcard resolves to the relay.
+Create the DNS records `GET /v1/domain` lists (wildcard + apex → the box's
+base domain, or the relay host when the box has no base domain). Issuance
+starts immediately — records are needed for traffic, not for the cert.
+`dns_ok` flips true once the wildcard resolves to the same address as the base
+domain.
 
 Secrets never leave the box: the DNS token is write-only (`dns_token_set`
 signals presence), and the cert's private key and ACME account key live in
@@ -54,12 +56,15 @@ relay splice as your traffic.
     piper domains list [--app shop]           # domain, app, status, cert expiry, dns_ok
     piper domains remove myshop.com
 
-Create the record `add` prints at your DNS host:
+Create the record `add` prints at your DNS host. The target is the box's base
+domain, or the relay host when the box has no base domain — for a relay-mode
+box the base domain is under the relay apex, e.g. `<box>.public.getpiper.dev`:
 
-    myshop.com  CNAME  public.getpiper.dev
+    myshop.com  CNAME  <box>.public.getpiper.dev
 
 Unlike DNS-01 above, issuance **waits for DNS**: the cert can only issue once
-the name resolves to the relay (the same trade Vercel/Netlify make).
+the name resolves to the same address as that target (the same trade
+Vercel/Netlify make).
 `piper domains list` shows `dns=ok` when it does, and the status walks
 `pending → issuing → active`. Once active, both `https://myshop.com` and
 `http://myshop.com` reach the app, and the shared-domain URL keeps working
@@ -69,8 +74,8 @@ Notes:
 
 - **Apex domains** need a DNS host that supports CNAME at the apex
   (Cloudflare, or ALIAS/ANAME on others). Otherwise use a subdomain
-  (`www.myshop.com`), or point an A/AAAA record at the relay's current
-  address — accepting it may change.
+  (`www.myshop.com`), or point an A/AAAA record at the address the printed
+  target resolves to — accepting it may change.
 - `www.myshop.com` is its own domain — attach it separately if you want both.
 - A domain claim on the relay expires if the cert never issues, so a domain
   you don't control can't be squatted durably.
