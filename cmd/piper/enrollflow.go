@@ -169,8 +169,12 @@ func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stde
 				}
 			}
 		}
+		// Read the seams on this goroutine, not the sleeper's: a cancelled wait
+		// abandons the sleeper, which would otherwise still be reading these
+		// package-level vars while a test's Cleanup restores them (#467).
+		sleep, interval := pollSleep, enrollPollInterval
 		slept := make(chan struct{})
-		go func() { pollSleep(enrollPollInterval); close(slept) }()
+		go func() { sleep(interval); close(slept) }()
 		select {
 		case <-ctx.Done():
 		case <-slept:
