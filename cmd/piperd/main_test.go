@@ -17,6 +17,7 @@ import (
 
 	"github.com/piperbox/piper/internal/api"
 	"github.com/piperbox/piper/internal/config"
+	"github.com/piperbox/piper/internal/domain"
 	"github.com/piperbox/piper/internal/enrollapi"
 	"github.com/piperbox/piper/internal/store"
 	"github.com/piperbox/piper/internal/tunnel"
@@ -948,6 +949,52 @@ func TestDomainOptionsDNSTargetFollowsBaseDomain(t *testing.T) {
 	}
 	if opts.RelayHost != "127.0.0.1" {
 		t.Errorf("RelayHost = %q, want the dial host 127.0.0.1 kept as fallback", opts.RelayHost)
+	}
+}
+
+// cfg.BaseDomain is never empty — config defaults it to piper.localhost — so a
+// box told only PIPER_RELAY_ADDR has no publicly resolvable name of its own.
+// Handing that default on as the DNS target would instruct `CNAME
+// piper.localhost` and wedge the same gate #434 is about, one name over. The
+// default therefore counts as unset and the dial host stays the target, which
+// is what such a box already ships.
+func TestDefaultBaseDomainIsNotADNSTarget(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddAppDomain("shop.example.com", "blog"); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{BaseDomain: config.DefaultBaseDomain, DataDir: dir, RelayAddr: "relay.example.net:7000"}
+	opts := newDomainOptions(cfg, st, nil, nil, "relay.example.net")
+	if opts.BaseDomain != "" {
+		t.Errorf("Options.BaseDomain = %q, want empty: the built-in default is not a public name", opts.BaseDomain)
+	}
+	// Keep the status read off the network; the record value does not depend on it.
+	opts.Resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	m := domain.New(opts)
+	defer m.Close()
+
+	got, err := m.AppDomainStatus("shop.example.com")
+	if err != nil {
+		t.Fatalf("AppDomainStatus: %v", err)
+	}
+	if len(got.DNSRecords) != 1 {
+		t.Fatalf("DNSRecords = %+v, want exactly one", got.DNSRecords)
+	}
+	if rec := got.DNSRecords[0]; rec.Value == config.DefaultBaseDomain {
+		t.Errorf("CNAME target = %q: the built-in default, which resolves nowhere public", rec.Value)
+	} else if rec.Value != "relay.example.net" {
+		t.Errorf("CNAME target = %q, want the dial host relay.example.net", rec.Value)
 	}
 }
 

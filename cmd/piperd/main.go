@@ -350,11 +350,17 @@ func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte
 // Likewise the DNS-record target is cfg.BaseDomain, not the relay dial host:
 // the dial host answers "where does this box dial", not "where should the
 // public point this domain" (#434). relayHost stays as the fallback for a box
-// with no base domain.
+// whose base domain is still the built-in default — nobody has told that box
+// what it is publicly called, and config.DefaultBaseDomain resolves nowhere, so
+// passing it on would swap the reported bug for the same bug one name over.
 func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string) domain.Options {
+	baseDomain := cfg.BaseDomain
+	if baseDomain == config.DefaultBaseDomain {
+		baseDomain = ""
+	}
 	opts := domain.Options{
 		Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
-		DataDir: cfg.DataDir, BaseDomain: cfg.BaseDomain, RelayHost: relayHost,
+		DataDir: cfg.DataDir, BaseDomain: baseDomain, RelayHost: relayHost,
 		HTTPSListen: cfg.HTTPSAddr,
 		Issuer: func(provider, token string) (domain.Issuer, error) {
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {

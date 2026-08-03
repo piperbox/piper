@@ -100,7 +100,9 @@ type Options struct {
 	DataDir   string
 	// BaseDomain is the box's base domain — the name the public already
 	// resolves to the relay, and so the DNS-record target and the name the DNS
-	// gate compares against. Empty falls back to RelayHost.
+	// gate compares against. Empty means the box has no publicly resolvable
+	// name of its own and falls back to RelayHost; the caller decides what
+	// counts as unset (cf. cmd/piperd and config.DefaultBaseDomain).
 	BaseDomain string
 	// RelayHost is the host part of the relay *dial* address. It is only the
 	// DNS-record target when BaseDomain is empty: the two diverge whenever the
