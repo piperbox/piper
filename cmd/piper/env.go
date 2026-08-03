@@ -10,6 +10,9 @@ import (
 )
 
 func formatAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
 	return d.Round(time.Second).String()
 }
 

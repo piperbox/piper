@@ -95,6 +95,29 @@ func TestRunEnvLsRendersAge(t *testing.T) {
 	}
 }
 
+func TestRunEnvLsFutureTimestampRendersZero(t *testing.T) {
+	updatedAt := time.Now().Add(30 * time.Second)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"env":        map[string]string{"SECRET": "hunter2"},
+			"updated_at": map[string]string{"SECRET": updatedAt.Format(time.RFC3339Nano)},
+		})
+	}))
+	defer srv.Close()
+	t.Setenv("PIPER_ADDR", srv.URL)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"env", "dashboard", "ls"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+	}
+	// Clock skew can make the server's updated_at appear in the future on the CLI
+	// host; the age must be clamped to zero instead of rendering a negative duration.
+	expectedLine := "SECRET=******  (0s)"
+	if !strings.Contains(stdout.String(), expectedLine) {
+		t.Errorf("stdout = %q, want line %q", stdout.String(), expectedLine)
+	}
+}
+
 func TestRunEnvRmDeletes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodDelete || r.URL.Path != "/v1/apps/dashboard/env/SECRET" {
