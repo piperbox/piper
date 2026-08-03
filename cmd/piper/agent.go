@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/piperbox/piper/internal/client"
 	"github.com/piperbox/piper/internal/config"
 )
@@ -23,8 +25,12 @@ import (
 // agentGOOS is runtime.GOOS; a var so tests can exercise the non-darwin gate.
 var agentGOOS = runtime.GOOS
 
-// piperdPath resolves the piperd whose --version installedPiperdVersion reports:
-// the one sitting next to this piper binary (the installer places both in one
+// piperdOnPATH is what the user's shell runs when they type `piperd`. A var so
+// tests can stub it.
+var piperdOnPATH = func() (string, error) { return exec.LookPath("piperd") }
+
+// piperdPath resolves the piperd to probe when no system unit names one: the
+// one sitting next to this piper binary (the installer places both in one
 // prefix), else whatever is on PATH. A var so tests can stub it.
 var piperdPath = func() (string, error) {
 	if exe, err := os.Executable(); err == nil {
@@ -32,7 +38,7 @@ var piperdPath = func() (string, error) {
 			return cand, nil
 		}
 	}
-	return exec.LookPath("piperd")
+	return piperdOnPATH()
 }
 
 // runningAgentInfo asks the control API which build is actually serving, and
@@ -91,42 +97,83 @@ var installedPiperdVersion = func() (string, error) {
 	return binaryVersion(p)
 }
 
-// versionNewer reports whether a is a strictly newer X.Y.Z than b. Unparseable
-// input is never "newer", so an unknown build can't win a comparison it should
-// not be in.
-func versionNewer(a, b string) bool {
-	av, aok := parseVersion(a)
-	bv, bok := parseVersion(b)
-	if !aok || !bok {
-		return false
-	}
-	for i := range av {
-		if av[i] != bv[i] {
-			return av[i] > bv[i]
-		}
-	}
-	return false
+// diskVersion is the on-disk piperd that status compares the running daemon
+// against. known is false when there is no honest target — and then status says
+// nothing about disk at all, because the alternative is guessing from the
+// caller's PATH, which is the lie #472 was about.
+type diskVersion struct {
+	version string
+	known   bool
 }
 
-// parseVersion reads the leading X.Y.Z of a version string, ignoring any
-// pre-release suffix.
-func parseVersion(s string) ([3]int, bool) {
-	var out [3]int
-	parts := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(s), "v"), ".", 3)
-	if len(parts) != 3 {
-		return out, false
+// serviceDiskVersion reports the version of the binary a system unit runs.
+// Nothing else will do: the caller's PATH can resolve a stale copy the service
+// never runs. An ExecStart systemd would not report leaves this unknown.
+func serviceDiskVersion(execStart string) diskVersion {
+	if execStart == "" {
+		return diskVersion{}
 	}
-	for i, p := range parts {
-		if i == 2 {
-			p, _, _ = strings.Cut(p, "-")
-		}
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			return out, false
-		}
-		out[i] = n
+	v, err := binaryVersion(execStart)
+	if err != nil {
+		return diskVersion{}
 	}
-	return out, true
+	return diskVersion{version: v, known: true}
+}
+
+// installedDiskVersion resolves a piperd the way a user-mode install leaves
+// one: next to this piper binary, else on PATH. macOS's brew-managed launchd
+// service has no ExecStart to read, so this is the only target there.
+func installedDiskVersion() diskVersion {
+	v, err := installedPiperdVersion()
+	if err != nil {
+		return diskVersion{}
+	}
+	return diskVersion{version: v, known: true}
+}
+
+// developmentVersion matches what `git describe --tags --always --dirty` (the
+// Makefile's VERSION) appends to a tag: `-<commits since tag>-g<hash>`, and/or
+// a trailing `-dirty`.
+var developmentVersion = regexp.MustCompile(`-\d+-g[0-9a-f]+$|-dirty$`)
+
+// compareVersions orders two version strings the way semver does, reporting
+// ok=false when either side won't parse or isn't safely orderable.
+//
+// Prereleases have to order properly: a hand-rolled X.Y.Z parser dropped the
+// suffix, which made 0.16.0 and 0.16.0-rc.1 compare equal and let status
+// recommend a downgrade (#472).
+//
+// Development builds must not be ordered at all. semver parses `git describe`
+// output as a prerelease and then applies rules that have nothing to do with
+// git history: `-10-g…` sorts below `-9-g…` because the identifiers compare
+// lexically, a post-tag build sorts below the very tag it is ahead of, two
+// branches at equal distance differ only by hash, and a dirty tree has no
+// defined relationship to its base tag. Commit count and hash are not a total
+// order, so refuse instead of inventing one.
+//
+// Parsing is strict for the same reason. semver.NewVersion coerces rather than
+// rejects — `1` becomes 1.0.0, `01.2.3` becomes 1.2.3, a label like
+// `20221209-update-renovatejson-v4` becomes 20221209.0.0-… — and every one of
+// those then sorts above a real release, turning a meaningless build string
+// into the "evidence" that justifies telling someone to restart.
+func compareVersions(a, b string) (int, bool) {
+	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
+	if developmentVersion.MatchString(a) || developmentVersion.MatchString(b) {
+		return 0, false
+	}
+	av, aerr := strictVersion(a)
+	bv, berr := strictVersion(b)
+	if aerr != nil || berr != nil {
+		return 0, false
+	}
+	return av.Compare(bv), true
+}
+
+// strictVersion parses a full MAJOR.MINOR.PATCH and nothing looser, allowing
+// only the single leading `v` that Piper's own release tags carry (`v0.17.0`)
+// and that StrictNewVersion rejects on its own.
+func strictVersion(s string) (*semver.Version, error) {
+	return semver.StrictNewVersion(strings.TrimPrefix(s, "v"))
 }
 
 // dialableAddr turns a listen address into one a client can connect to: a
@@ -146,19 +193,28 @@ func dialableAddr(addr string) string {
 
 // printAgentVersions reports the running build, and flags a piperd on disk that
 // differs — the state a restart-less upgrade leaves behind, which otherwise
-// reads as "the fix didn't work". It returns the daemon's full self-report so
-// status can print the listen config the daemon actually loaded; zero when
-// the daemon could not answer (#476).
-func printAgentVersions(stdout io.Writer, apiAddr string) client.AgentInfo {
+// reads as "the fix didn't work". disk is the binary to compare against, which
+// the caller resolves because only it knows whether a unit's ExecStart is the
+// truth. It returns the daemon's full self-report so status can print the
+// listen config the daemon actually loaded; zero when the daemon could not
+// answer (#476).
+func printAgentVersions(stdout io.Writer, apiAddr string, disk diskVersion) client.AgentInfo {
 	info, rerr := runningAgentInfo(apiAddr)
 	running := info.Version
-	disk, derr := installedPiperdVersion()
 
 	var se *client.StatusError
+	diskDefinitelyNewer := false
 	switch {
 	case rerr == nil:
 	case errors.Is(rerr, client.ErrVersionUnsupported):
 		running = "unknown (agent too old to report it)"
+		// A 404 bounds the running daemon from above — it is older than
+		// versionEndpointRelease — and says nothing whatever about the file on
+		// disk. Only a disk build at or after that boundary is provably the
+		// newer one; an older one there would make "restart" a downgrade.
+		if c, ok := compareVersions(disk.version, versionEndpointRelease); ok && c >= 0 {
+			diskDefinitelyNewer = true
+		}
 	case errors.As(rerr, &se) && se.Code == http.StatusUnauthorized:
 		// A daemon that answered, not one that could not be reached. Conflating
 		// the two sent a live investigation looking at systemd and sockets while
@@ -170,12 +226,40 @@ func printAgentVersions(stdout io.Writer, apiAddr string) client.AgentInfo {
 		fmt.Fprintf(stdout, "  version      unknown (control API unreachable at %s)\n", apiAddr)
 		return client.AgentInfo{}
 	}
-	if derr == nil && disk != running {
-		fmt.Fprintf(stdout, "  version      %s  ⚠ %s is installed on disk — restart piperd to apply\n", running, disk)
+	if disk.known && disk.version != running {
+		fmt.Fprintf(stdout, "  version      %s  ⚠ %s\n", running, skewNote(running, disk.version, diskDefinitelyNewer))
 		return info
 	}
 	fmt.Fprintf(stdout, "  version      %s\n", running)
 	return info
+}
+
+// versionEndpointRelease is the first release whose control API answers
+// GET /v1/version. The route landed in #388 (commit a9aa8a3) and first shipped
+// in this tag — verified absent at v0.8.5 and present at v0.8.6 — so a daemon
+// that 404s it is provably older than this, and nothing more than that.
+const versionEndpointRelease = "0.8.6"
+
+// skewNote words a running-vs-disk mismatch by direction. The old wording
+// assumed disk ≥ running and always said "restart to apply"; when the running
+// daemon is the newer build that advice accomplishes nothing, and would be a
+// downgrade presented as an upgrade if it did take (#472).
+//
+// "restart piperd to apply" asserts the disk build is the newer one, so it is
+// only said with positive evidence: either the ordering says so, or the caller
+// passes diskDefinitelyNewer because it established the direction some other
+// way. Otherwise the mismatch is reported without a direction rather than sold
+// as an upgrade.
+func skewNote(running, disk string, diskDefinitelyNewer bool) string {
+	c, ok := compareVersions(disk, running)
+	switch {
+	case diskDefinitelyNewer || (ok && c > 0):
+		return fmt.Sprintf("%s is installed on disk — restart piperd to apply", disk)
+	case ok && c < 0:
+		return fmt.Sprintf("the binary on disk is %s — the running build is newer", disk)
+	default:
+		return fmt.Sprintf("the binary on disk is %s — cannot tell which build is newer", disk)
+	}
 }
 
 const userUnitName = "piperd"
@@ -343,8 +427,8 @@ func agentStatusDarwin(stdout io.Writer) int {
 	if infos[0].Running {
 		fmt.Fprintln(stdout, "piperd: running (brew services)")
 		// The formula's service block leaves the control API on piperd's
-		// default.
-		printAgentVersions(stdout, "127.0.0.1:8088")
+		// default, and launchd has no ExecStart to read.
+		printAgentVersions(stdout, "127.0.0.1:8088", installedDiskVersion())
 		return 0
 	}
 	fmt.Fprintln(stdout, "piperd: stopped")
@@ -377,6 +461,52 @@ func agentLinux(args []string, stdout, stderr io.Writer) int {
 func unitLoaded() bool {
 	out, err := systemctlRun("show", "piperd", "--property=LoadState", "--value")
 	return err == nil && strings.TrimSpace(out) == "loaded"
+}
+
+// unitExecStart returns the binary the piperd unit actually runs, or "" when
+// systemd won't say. Everything about a system service's version — is it
+// current, would a restart help — is a claim about *this* path, not about
+// whatever the caller's PATH resolves to (#472).
+func unitExecStart() string {
+	out, err := systemctlRun("show", userUnitName, "--property=ExecStart", "--value")
+	if err != nil {
+		return ""
+	}
+	return execStartPath(out)
+}
+
+// execStartPath pulls the binary out of systemd's ExecStart value, which reads
+// `{ path=/usr/local/bin/piperd ; argv[]=… ; ignore_errors=no }`.
+func execStartPath(value string) string {
+	_, rest, ok := strings.Cut(value, "path=")
+	if !ok {
+		return ""
+	}
+	path, _, _ := strings.Cut(rest, ";")
+	return strings.TrimSpace(path)
+}
+
+// warnPATHShadow flags a `piperd` earlier on the caller's PATH than the one the
+// service runs. That stale user-level copy is what made the version report lie
+// in #472, and until now nothing detected it after install time.
+func warnPATHShadow(stdout io.Writer, execStart string) {
+	onPath, err := piperdOnPATH()
+	if execStart == "" || err != nil || samePiperd(onPath, execStart) {
+		return
+	}
+	fmt.Fprintf(stdout, "  ⚠ `piperd` on your PATH is %s, but the service runs %s\n", onPath, execStart)
+}
+
+// samePiperd compares two piperd paths through any symlinks, so a packaged
+// symlink into the real binary is not reported as a shadow.
+func samePiperd(a, b string) bool {
+	if r, err := filepath.EvalSymlinks(a); err == nil {
+		a = r
+	}
+	if r, err := filepath.EvalSymlinks(b); err == nil {
+		b = r
+	}
+	return a == b
 }
 
 const notInstalledLinuxHint = "`sudo apt install piperd` (see the README for other channels)"
@@ -435,7 +565,9 @@ func agentStatusLinux(stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "piperd: running")
 	env := agentEnviron()
 	apiAddr := envOr(env, "PIPER_API_ADDR", "127.0.0.1:8088")
-	info := printAgentVersions(stdout, apiAddr)
+	execStart := unitExecStart()
+	info := printAgentVersions(stdout, apiAddr, serviceDiskVersion(execStart))
+	warnPATHShadow(stdout, execStart)
 	fmt.Fprintf(stdout, "  control API  http://%s\n", apiAddr)
 	if info.HTTPAddr != "" {
 		// The daemon's self-report: the config it actually loaded.
