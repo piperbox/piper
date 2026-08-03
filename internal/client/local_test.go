@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/piperbox/piper/internal/enrollapi"
 )
@@ -64,6 +65,33 @@ func TestUnixClientStatusAndEnroll(t *testing.T) {
 	}
 	if gotEnroll.RelayAPI != "https://api.relay" || gotEnroll.AccountCredential != "cred-xyz" {
 		t.Fatalf("wire body = %+v", gotEnroll)
+	}
+}
+
+// The enroll POST is not a local call: piperd does the relay round-trip, the
+// tunnel validation and the persistence before it answers. The socket client's
+// ordinary 10s timeout is a plausible loser on a Pi behind a slow uplink, and
+// losing it converts a success into the alarming "enrollment response lost"
+// note. It gets the same generous budget as the box's other real-work calls
+// (#467).
+func TestEnrollRelayOutlivesTheDefaultSocketTimeout(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+enrollapi.PathEnroll, func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(150 * time.Millisecond) // a claim that takes real time
+		_ = json.NewEncoder(w).Encode(enrollapi.EnrollResponse{
+			BaseDomain: "ab12-erin.public.getpiper.co", RelayAddr: "relay:7000"})
+	})
+	c := NewUnix(serveUnix(t, mux))
+	// Stand in for "the daemon took longer than the client's patience" without
+	// making the test wait out the real 10s.
+	c.http.Timeout = 30 * time.Millisecond
+
+	resp, err := c.EnrollRelay(enrollapi.EnrollRequest{RelayAPI: "https://api.relay", AccountCredential: "cred-xyz"})
+	if err != nil {
+		t.Fatalf("EnrollRelay timed out on a claim the daemon completed: %v", err)
+	}
+	if resp.BaseDomain != "ab12-erin.public.getpiper.co" {
+		t.Fatalf("EnrollRelay = %+v", resp)
 	}
 }
 

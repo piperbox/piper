@@ -185,6 +185,9 @@ func (a *api) cliCallback(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "account error", http.StatusInternalServerError)
 		return true
 	}
+	if denyDisabled(w, acc) {
+		return true
+	}
 	cred, err := a.st.MintAccountCredential(acc.ID)
 	if err != nil {
 		http.Error(w, "credential error", http.StatusInternalServerError)

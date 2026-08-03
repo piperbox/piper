@@ -221,6 +221,7 @@ type Installation struct {
 // brokers an App at all, where to install it, and the account's installations.
 type Status struct {
 	GitHubApp     bool           `json:"github_app"`
+	Username      string         `json:"username"`
 	InstallURL    string         `json:"install_url"`
 	Installations []Installation `json:"installations"`
 }

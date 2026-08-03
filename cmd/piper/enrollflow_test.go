@@ -302,6 +302,36 @@ func TestEnrollFlowInterruptStopsApplyWait(t *testing.T) {
 	}
 }
 
+// A daemon that answers throughout but never reports the enrollment is a
+// different failure from a daemon that vanished, and deserves a different
+// diagnosis. This is the lost-response path's bad ending: the enroll POST's
+// reply never arrived, the status poll settles it, and the claim simply did not
+// persist. Telling the user "piperd did not come back" — and pointing them at
+// service logs for a process that is plainly up — sends them the wrong way (#467).
+func TestEnrollFlowLiveDaemonThatNeverEnrolledSaysSo(t *testing.T) {
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	f := &fakePiperd{}
+	// Answers every status poll, always unenrolled.
+	f.status.Store(enrollapi.Status{Enrolled: false, Tunnel: "off"})
+	f.enroll = func(enrollapi.EnrollRequest) (int, any) {
+		return http.StatusOK, enrollapi.EnrollResponse{BaseDomain: "b.public.getpiper.co", RelayAddr: "relay:7000"}
+	}
+	dataDir := startFakeEnrollSocket(t, f.mux())
+
+	var out, errb bytes.Buffer
+	code := enrollAfterLogin(context.Background(), enrollFlowOpts{relayAPI: "a", dataDir: dataDir}, "cred", &out, &errb)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; err = %s", code, errb.String())
+	}
+	if strings.Contains(errb.String(), "did not come back") {
+		t.Errorf("diagnosed a live daemon as vanished:\n%s", errb.String())
+	}
+	if !strings.Contains(errb.String(), "did not persist") {
+		t.Errorf("stderr = %q, want the claim-never-persisted diagnosis", errb.String())
+	}
+}
+
 func TestEnrollFlowRejectedTokenIsDefinitive(t *testing.T) {
 	stubNoLocalPiperd(t)
 	fastPoll(t)
