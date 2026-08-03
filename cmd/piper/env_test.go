@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,10 +82,12 @@ func TestRunEnvLsRendersAge(t *testing.T) {
 	if !strings.Contains(stdout.String(), "SECRET=") {
 		t.Errorf("stdout = %q, want SECRET= present", stdout.String())
 	}
-	// Old clients/servers printed KEY=value with no age; the new output appends
-	// the age in parentheses.
-	if !strings.Contains(stdout.String(), "(") || !strings.Contains(stdout.String(), ")") {
-		t.Errorf("stdout = %q, want age rendered in parentheses", stdout.String())
+	// The CLI must render the actual age derived from the server's updated_at,
+	// not just any parenthesised text.
+	expectedAge := time.Since(updatedAt).Round(time.Second).String()
+	expectedLine := fmt.Sprintf("SECRET=******  (%s)", expectedAge)
+	if !strings.Contains(stdout.String(), expectedLine) {
+		t.Errorf("stdout = %q, want line %q", stdout.String(), expectedLine)
 	}
 	// The value must still be masked by default.
 	if strings.Contains(stdout.String(), "hunter2") {
