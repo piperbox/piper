@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -187,6 +188,90 @@ func TestGitHubDeviceFlowPollPrunesCompletedFlow(t *testing.T) {
 	// same handle must not still redeem the cached identity.
 	if _, err := v.Poll(context.Background(), handle); err == nil {
 		t.Fatal("Poll(completed handle) succeeded a second time, want unknown-handle error")
+	}
+}
+
+// Most device flows are never polled to completion: the user closes the tab,
+// the CLI is Ctrl-C'd, the code expires unapproved. Those entries used to sit in
+// the flows map for the life of the process, so a long-running relay's memory
+// grew with every login ever started. Start sweeps what has expired (#81).
+func TestGitHubDeviceFlowPrunesAbandonedFlows(t *testing.T) {
+	// Never approved: every poll answers authorization_pending until the device
+	// code's own lifetime runs out.
+	v, _ := newTestGitHubVerifier(t, &fakeGitHub{t: t})
+
+	// A fake clock the poll loop drives itself: each slept interval advances it,
+	// so the fake's 900s expires_in is reached in a few hundred instant polls
+	// rather than fifteen real minutes.
+	var clockMu sync.Mutex
+	now := time.Now()
+	v.now = func() time.Time {
+		clockMu.Lock()
+		defer clockMu.Unlock()
+		return now
+	}
+	v.sleep = func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+	advance := func(d time.Duration) {
+		clockMu.Lock()
+		now = now.Add(d)
+		clockMu.Unlock()
+	}
+
+	var abandoned []string
+	for i := 0; i < 3; i++ {
+		h, _, err := v.Start(context.Background())
+		if err != nil {
+			t.Fatalf("Start %d: %v", i, err)
+		}
+		abandoned = append(abandoned, h)
+	}
+
+	// Let the three background pollers run their codes out.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		v.mu.Lock()
+		allDone := true
+		for _, fl := range v.flows {
+			if !fl.done {
+				allDone = false
+			}
+		}
+		v.mu.Unlock()
+		if allDone {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("device codes never expired")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The codes have run out, but each entry is still resolvable through its
+	// grace window — a poll landing right on the deadline deserves the real
+	// "device code expired" error, not a bare unknown-handle.
+	if _, err := v.Poll(context.Background(), abandoned[0]); err == nil || errors.Is(err, ErrAuthPending) {
+		t.Errorf("Poll within grace = %v, want the flow's terminal error", err)
+	}
+	advance(flowGrace + time.Second)
+
+	// A fresh login is the sweep trigger: the dead flows must not outlive it.
+	if _, _, err := v.Start(context.Background()); err != nil {
+		t.Fatalf("Start (post-expiry): %v", err)
+	}
+	v.mu.Lock()
+	n := len(v.flows)
+	v.mu.Unlock()
+	if n != 1 {
+		t.Errorf("flows after sweep = %d, want 1 (only the live flow)", n)
+	}
+	for i, h := range abandoned {
+		if _, err := v.Poll(context.Background(), h); err == nil || errors.Is(err, ErrAuthPending) {
+			t.Errorf("Poll(abandoned handle %d) = %v, want unknown-handle error", i, err)
+		}
 	}
 }
 
