@@ -225,7 +225,7 @@ func TestAgentStatusLinuxRunning(t *testing.T) {
 	runningAgentInfo = func(string) (client.AgentInfo, error) { return client.AgentInfo{Version: "9.9.9"}, nil }
 	t.Cleanup(func() { runningAgentInfo = origVer })
 	origDisk := installedPiperdVersion
-	installedPiperdVersion = func() (string, error) { return "9.9.9", nil }
+	installedPiperdVersion = func(string) (string, error) { return "9.9.9", nil }
 	t.Cleanup(func() { installedPiperdVersion = origDisk })
 	var out, errb bytes.Buffer
 	if code := agent([]string{"status"}, &out, &errb); code != 0 {
@@ -256,17 +256,29 @@ func stubVersions(t *testing.T, running string, rerr error, disk string, derr er
 	t.Helper()
 	oldRunning, oldDisk := runningAgentInfo, installedPiperdVersion
 	runningAgentInfo = func(string) (client.AgentInfo, error) { return client.AgentInfo{Version: running}, rerr }
-	installedPiperdVersion = func() (string, error) { return disk, derr }
+	installedPiperdVersion = func(string) (string, error) { return disk, derr }
 	t.Cleanup(func() { runningAgentInfo, installedPiperdVersion = oldRunning, oldDisk })
 }
 
 // statusOutput runs `piper agent status` against a unit systemctl reports as
-// loaded and active.
+// loaded and active, with no readable ExecStart.
 func statusOutput(t *testing.T) string {
+	t.Helper()
+	return statusOutputUnit(t, "")
+}
+
+// statusOutputUnit is statusOutput for a unit whose `systemctl show
+// --property=ExecStart --value` answers with execStart.
+func statusOutputUnit(t *testing.T, execStart string) string {
 	t.Helper()
 	oldRun := systemctlRun
 	systemctlRun = func(args ...string) (string, error) {
 		if len(args) > 0 && args[0] == "show" {
+			for _, a := range args {
+				if a == "--property=ExecStart" {
+					return execStart, nil
+				}
+			}
 			return "loaded\n", nil
 		}
 		return "active\n", nil
@@ -290,7 +302,7 @@ func TestAgentStatusPrintsDaemonReportedAddrs(t *testing.T) {
 	runningAgentInfo = func(string) (client.AgentInfo, error) {
 		return client.AgentInfo{Version: "0.16.1", HTTPAddr: "127.0.0.1:8081", HTTPSAddr: "127.0.0.1:8444", DataDir: "/data/piper"}, nil
 	}
-	installedPiperdVersion = func() (string, error) { return "0.16.1", nil }
+	installedPiperdVersion = func(string) (string, error) { return "0.16.1", nil }
 	t.Cleanup(func() { runningAgentInfo, installedPiperdVersion = oldInfo, oldDisk })
 
 	got := statusOutput(t)
@@ -329,6 +341,113 @@ func TestAgentStatusFlagsUnrestartedUpgrade(t *testing.T) {
 	for _, want := range []string{"0.8.4", "0.8.5 is installed on disk", "restart piperd"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// The hint assumed disk ≥ running. When the running daemon is the *newer*
+// build — a stale copy left behind on disk — "restart piperd to apply" is
+// advice that accomplishes nothing, and would be a downgrade dressed up as an
+// upgrade if the unit did point at the stale binary (#472).
+func TestAgentStatusWordsVersionSkewByDirection(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.16.0", nil, "0.12.0", nil)
+
+	got := statusOutput(t)
+	if strings.Contains(got, "restart piperd to apply") {
+		t.Errorf("told the user to restart into an older build:\n%s", got)
+	}
+	for _, want := range []string{"0.12.0", "running build is newer"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// stubDiskBinaries makes each path report its own version and puts onPATH at
+// the front of the caller's PATH.
+func stubDiskBinaries(t *testing.T, onPATH string, versions map[string]string) {
+	t.Helper()
+	oldLook, oldVer := piperdOnPATH, binaryVersion
+	piperdOnPATH = func() (string, error) {
+		if onPATH == "" {
+			return "", errors.New("executable file not found in $PATH")
+		}
+		return onPATH, nil
+	}
+	binaryVersion = func(p string) (string, error) {
+		v, ok := versions[p]
+		if !ok {
+			return "", fmt.Errorf("no such binary %s", p)
+		}
+		return v, nil
+	}
+	t.Cleanup(func() { piperdOnPATH, binaryVersion = oldLook, oldVer })
+}
+
+const execStartValue = "{ path=/usr/local/bin/piperd ; argv[]=/usr/local/bin/piperd ; ignore_errors=no }\n"
+
+// #472: the on-disk probe exec'd whatever `piperd` resolved to in the caller's
+// PATH. On a box whose unit runs a current /usr/local/bin/piperd while a stale
+// 0.12.0 copy sits in ~/.local/bin, that invented a pending upgrade for a
+// system install that was already current. The unit's ExecStart is the only
+// honest comparison target.
+func TestAgentStatusComparesAgainstUnitExecStart(t *testing.T) {
+	onLinux(t)
+	oldRunning := runningAgentInfo
+	runningAgentInfo = func(string) (client.AgentInfo, error) {
+		return client.AgentInfo{Version: "0.16.0"}, nil
+	}
+	t.Cleanup(func() { runningAgentInfo = oldRunning })
+	stubDiskBinaries(t, "/home/u/.local/bin/piperd", map[string]string{
+		"/usr/local/bin/piperd":     "0.16.0",
+		"/home/u/.local/bin/piperd": "0.12.0",
+	})
+
+	got := statusOutputUnit(t, execStartValue)
+	if strings.Contains(got, "0.12.0") {
+		t.Errorf("compared against the PATH copy, not the unit's ExecStart:\n%s", got)
+	}
+	if !strings.Contains(got, "version      0.16.0\n") {
+		t.Errorf("status should report the version line clean:\n%s", got)
+	}
+}
+
+// The stale PATH copy is the actual problem, and nothing detected it after
+// install time. Name both paths so the fix is obvious (#472).
+func TestAgentStatusWarnsWhenPATHShadowsTheService(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.16.0", nil, "0.16.0", nil)
+	stubDiskBinaries(t, "/home/u/.local/bin/piperd", nil)
+
+	got := statusOutputUnit(t, execStartValue)
+	for _, want := range []string{"/home/u/.local/bin/piperd", "/usr/local/bin/piperd", "PATH"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// No shadow, no warning — the common case must stay quiet.
+func TestAgentStatusQuietWhenPATHMatchesTheService(t *testing.T) {
+	onLinux(t)
+	stubVersions(t, "0.16.0", nil, "0.16.0", nil)
+	stubDiskBinaries(t, "/usr/local/bin/piperd", nil)
+
+	if got := statusOutputUnit(t, execStartValue); strings.Contains(got, "PATH") {
+		t.Errorf("warned about a PATH shadow that does not exist:\n%s", got)
+	}
+}
+
+func TestExecStartPath(t *testing.T) {
+	for in, want := range map[string]string{
+		execStartValue: "/usr/local/bin/piperd",
+		"{ path=/usr/bin/piperd ; argv[]=/usr/bin/piperd --foo ; ignore_errors=no ; start_time=[n/a] }\n": "/usr/bin/piperd",
+		"loaded\n": "",
+		"":         "",
+	} {
+		if got := execStartPath(in); got != want {
+			t.Errorf("execStartPath(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -558,7 +677,7 @@ func TestAgentDarwinStatusRunning(t *testing.T) {
 	runningAgentInfo = func(string) (client.AgentInfo, error) { return client.AgentInfo{Version: "9.9.9"}, nil }
 	t.Cleanup(func() { runningAgentInfo = origVer })
 	origDisk := installedPiperdVersion
-	installedPiperdVersion = func() (string, error) { return "9.9.9", nil }
+	installedPiperdVersion = func(string) (string, error) { return "9.9.9", nil }
 	t.Cleanup(func() { installedPiperdVersion = origDisk })
 	var out, errb bytes.Buffer
 	if code := agent([]string{"status"}, &out, &errb); code != 0 {
