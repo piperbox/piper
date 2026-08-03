@@ -24,9 +24,18 @@ func NewAPI(st *Store, v Verifier) http.Handler { return NewAPIWithTunnel(st, v,
 // when the relay holds no GitHub App, in which case enroll advertises
 // "github_app": false and boxes stay on the BYO path.
 func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) http.Handler {
+	_, h := newAPI(st, v, tunnelEndpoint, router, webRedirects, ghApp)
+	return h
+}
+
+// newAPI builds the account API and returns the concrete value alongside its
+// handler, so same-package tests can drive the seams the exported constructor
+// deliberately keeps private (the reconcile clock).
+func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) (*api, http.Handler) {
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
 		webRedirects: webRedirects, webStates: map[string]webState{},
-		cliStates: map[string]*cliLogin{}, lastReconcile: map[string]time.Time{}, ghApp: ghApp}
+		cliStates: map[string]*cliLogin{}, lastReconcile: map[string]time.Time{},
+		now: time.Now, ghApp: ghApp}
 	if wv, ok := v.(WebVerifier); ok {
 		a.webv = wv
 	}
@@ -51,7 +60,7 @@ func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Rout
 		mux.Handle("/agents", proxy)
 		mux.Handle("/agents/", proxy)
 	}
-	return mux
+	return a, mux
 }
 
 type api struct {
@@ -61,6 +70,8 @@ type api struct {
 	tunnelEndpoint string
 	webRedirects   []string   // allowed redirect_uri prefixes; empty ⇒ web login disabled
 	ghApp          *GitHubApp // nil ⇒ relay serves BYO users only
+
+	now func() time.Time // clock seam for the reconcile throttle; tests override
 
 	mu            sync.Mutex
 	webStates     map[string]webState  // state → pending dashboard browser flow
@@ -405,27 +416,42 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 // reconcileEvery bounds how often one account's installation record is
-// reconciled against GitHub's API. `piper login`'s advisory install poll hits
-// /v1/github/status every few seconds for up to ten minutes, and a *new*
-// install fires a webhook anyway — so the question reconciliation answers
-// ("was it already installed before we ever looked?") is only usefully asked
-// once. Un-throttled, one waiting user would spend hundreds of app-API calls
+// reconciled against GitHub's API.
+//
+// The question reconciliation answers — "was the App already installed before
+// we ever looked?" — is only usefully asked once: a *new* install fires a
+// webhook, which is the path that keeps the record fresh from then on. But
+// `piper login`'s advisory install poll hits /v1/github/status every few
+// seconds for a full ten minutes, and the listing it drives is app-global,
 // against a 5000/hour budget shared by every tenant.
-const reconcileEvery = time.Minute
+//
+// So this must exceed the CLI's installPollTimeout, not merely damp it: at one
+// minute a single waiting user still spent ten app-global listings. Longer than
+// the poll window means one attempt per login, whatever the poll does.
+const reconcileEvery = 15 * time.Minute
 
 // shouldReconcile rate-limits reconciliation per account, recording the attempt
-// as it admits it. In-memory and per-process: the cost of forgetting on restart
-// is one extra API call per account.
+// as it admits it. Attempts count whether or not they succeed — a GitHub outage
+// must not turn every polling client into a retry loop against that shared
+// budget, and the status response is honest regardless, since a failed
+// reconcile just leaves the stored answer in place.
+//
+// In-memory and per-process: the cost of forgetting on restart is one extra
+// API call per account.
 func (a *api) shouldReconcile(accountID string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if t, ok := a.lastReconcile[accountID]; ok && time.Since(t) < reconcileEvery {
+	now := a.now
+	if now == nil {
+		now = time.Now
+	}
+	if t, ok := a.lastReconcile[accountID]; ok && now().Sub(t) < reconcileEvery {
 		return false
 	}
 	if a.lastReconcile == nil {
 		a.lastReconcile = map[string]time.Time{}
 	}
-	a.lastReconcile[accountID] = time.Now()
+	a.lastReconcile[accountID] = now()
 	return true
 }
 

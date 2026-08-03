@@ -663,7 +663,7 @@ func accountWithCred(t *testing.T, st *Store) string {
 // reconcileAPI builds the account API against a stubbed GitHub whose
 // /app/installations returns insts verbatim, and reports how many times that
 // endpoint was called.
-func reconcileAPI(t *testing.T, st *Store, insts string) (http.Handler, *int) {
+func reconcileAPI(t *testing.T, st *Store, insts string) (*api, http.Handler, *int) {
 	t.Helper()
 	calls := 0
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -681,7 +681,8 @@ func reconcileAPI(t *testing.T, st *Store, insts string) (http.Handler, *int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app), &calls
+	a, h := newAPI(st, NewFakeVerifier(), "", nil, nil, app)
+	return a, h, &calls
 }
 
 // An App that is already installed fires no webhook, so an account with nothing
@@ -690,7 +691,7 @@ func reconcileAPI(t *testing.T, st *Store, insts string) (http.Handler, *int) {
 func TestGitHubStatusReconcilesWhenNothingIsOnRecord(t *testing.T) {
 	st := openTestStore(t)
 	cred := accountWithCred(t, st) // github id 1001, login alice
-	api, calls := reconcileAPI(t, st, `[{"id":55,"account":{"id":1001,"login":"alice","type":"User"}}]`)
+	_, api, calls := reconcileAPI(t, st, `[{"id":55,"account":{"id":1001,"login":"alice","type":"User"}}]`)
 
 	rec := getStatus(t, api, cred)
 	if rec.Code != http.StatusOK {
@@ -724,7 +725,7 @@ func TestGitHubStatusReconcilesWhenNothingIsOnRecord(t *testing.T) {
 func TestGitHubStatusReconcileIgnoresAnotherTenantsInstallation(t *testing.T) {
 	st := openTestStore(t)
 	cred := accountWithCred(t, st) // github id 1001
-	api, _ := reconcileAPI(t, st, `[{"id":99,"account":{"id":2002,"login":"mallory","type":"User"}}]`)
+	_, api, _ := reconcileAPI(t, st, `[{"id":99,"account":{"id":2002,"login":"mallory","type":"User"}}]`)
 
 	rec := getStatus(t, api, cred)
 	if rec.Code != http.StatusOK {
@@ -748,7 +749,7 @@ func TestGitHubStatusReconcileIgnoresAnotherTenantsInstallation(t *testing.T) {
 func TestGitHubStatusReconcileSkipsUnlinkedOrgInstallation(t *testing.T) {
 	st := openTestStore(t)
 	cred := accountWithCred(t, st)
-	api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme","type":"Organization"}}]`)
+	_, api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme","type":"Organization"}}]`)
 
 	if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
@@ -789,7 +790,7 @@ func ghOrgWithMember(t *testing.T, st *Store, githubID, login, orgName, orgGitHu
 func TestGitHubStatusReconcilesOrgInstallationForAMember(t *testing.T) {
 	st := openTestStore(t)
 	cred, orgID := ghOrgWithMember(t, st, "1001", "alice", "acme", "Acme-Inc")
-	api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme-inc","type":"Organization"}}]`)
+	_, api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme-inc","type":"Organization"}}]`)
 
 	rec := getStatus(t, api, cred)
 	if rec.Code != http.StatusOK {
@@ -857,7 +858,7 @@ func TestGitHubReposRejectsANonMemberOfTheOrg(t *testing.T) {
 		t.Fatalf("repos status = %d, want 404 for a non-member", rec.Code)
 	}
 	// ...and it must not surface in their status listing either.
-	sapi, _ := reconcileAPI(t, st, `[]`)
+	_, sapi, _ := reconcileAPI(t, st, `[]`)
 	rec := getStatus(t, sapi, outsider)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
@@ -904,20 +905,98 @@ func TestGitHubStatusSurvivesAFailedReconcile(t *testing.T) {
 
 // login's install poll hits status every few seconds for up to ten minutes. A
 // new install fires a webhook, so re-asking GitHub on every poll would spend
-// hundreds of app-API calls per waiting user against a shared hourly budget.
-func TestGitHubStatusThrottlesRepeatedReconciles(t *testing.T) {
+// hundreds of app-global listings per waiting user against a shared hourly
+// budget. Simulated over the whole install-wait window on a fake clock: the
+// throttle has to outlast the window, not merely damp it.
+func TestGitHubStatusReconcilesOnceAcrossAWholeInstallWait(t *testing.T) {
 	st := openTestStore(t)
 	cred := accountWithCred(t, st)
 	// Nothing this account owns, so every poll stays on the reconcile path.
-	api, calls := reconcileAPI(t, st, `[{"id":99,"account":{"id":2002,"login":"mallory","type":"User"}}]`)
+	a, api, calls := reconcileAPI(t, st, `[{"id":99,"account":{"id":2002,"login":"mallory","type":"User"}}]`)
 
-	for i := 0; i < 5; i++ {
+	// installPollTimeout is ten minutes and the CLI polls every three seconds.
+	const installWait = 10 * time.Minute
+	const pollInterval = 3 * time.Second
+	clock := time.Now()
+	a.now = func() time.Time { return clock }
+
+	for elapsed := time.Duration(0); elapsed <= installWait; elapsed += pollInterval {
 		if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
-			t.Fatalf("status %d = %d", i, rec.Code)
+			t.Fatalf("status at %v = %d", elapsed, rec.Code)
 		}
+		clock = clock.Add(pollInterval)
 	}
 	if *calls != 1 {
-		t.Errorf("github calls across 5 polls = %d, want 1", *calls)
+		t.Fatalf("app-global listings across a %v install wait = %d, want 1", installWait, *calls)
+	}
+
+	// Well past the window, a fresh login may ask again.
+	clock = clock.Add(reconcileEvery)
+	if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+		t.Fatalf("status after the window = %d", rec.Code)
+	}
+	if *calls != 2 {
+		t.Errorf("listings after the interval lapsed = %d, want 2", *calls)
+	}
+}
+
+// A GitHub outage must leave status answering from the store rather than
+// failing, and must not turn every polling client into a retry loop against
+// the shared budget.
+func TestGitHubStatusFailedReconcileKeepsStoredAnswerAndStaysThrottled(t *testing.T) {
+	st := openTestStore(t)
+	cred := accountWithCred(t, st) // github id 1001 / alice
+	// A linked installation the store already knows about, so there is an
+	// honest stored answer to preserve...
+	if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer gh.Close()
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s",
+		Slug: "piper-relay", APIBase: gh.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, api := newAPI(st, NewFakeVerifier(), "", nil, nil, app)
+	clock := time.Now()
+	a.now = func() time.Time { return clock }
+
+	rec := getStatus(t, api, cred)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
+	}
+	var out ghStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Installations) != 1 || out.Installations[0].ID != "55" {
+		t.Fatalf("installations = %+v, want the stored answer", out.Installations)
+	}
+	// A stored answer means the reconcile path is never entered at all.
+	if calls != 0 {
+		t.Errorf("asked github despite a stored installation: %d call(s)", calls)
+	}
+
+	// Now with nothing stored: the attempt fails, status still answers, and the
+	// failure is throttled like any other attempt.
+	if err := st.UnlinkInstallation("55"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+			t.Fatalf("status after github failure = %d, body %s", rec.Code, rec.Body.String())
+		}
+		clock = clock.Add(time.Minute)
+	}
+	if calls != 1 {
+		t.Errorf("failed reconciles retried %d times, want 1 within the interval", calls)
 	}
 }
 
