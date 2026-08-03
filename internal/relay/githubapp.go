@@ -210,21 +210,48 @@ type AppInstallation struct {
 // per_page=100 caps a single page, matching Repos; full Link-header pagination
 // is the same follow-up (#308).
 func (g *GitHubApp) Installations(ctx context.Context) ([]AppInstallation, error) {
+	var insts []AppInstallation
+	next := g.apiBase + "/app/installations?per_page=100"
+	for pages := 0; next != ""; pages++ {
+		if pages >= maxInstallationPages {
+			return nil, fmt.Errorf("list installations: more than %d pages", maxInstallationPages)
+		}
+		page, link, err := g.installationsPage(ctx, next)
+		if err != nil {
+			return nil, err
+		}
+		insts = append(insts, page...)
+		next = g.sameHost(nextLink(link))
+	}
+	return insts, nil
+}
+
+// maxInstallationPages backstops the page walk. The loop is driven by a header
+// from the far end, so a server that always answers rel="next" would spin
+// forever; at 100 per page this still covers 100k installations.
+const maxInstallationPages = 1000
+
+// installationsPage fetches one page and returns it with the raw Link header.
+// The JWT is minted per page: a long walk can outlive one token's lifetime.
+func (g *GitHubApp) installationsPage(ctx context.Context, url string) ([]AppInstallation, string, error) {
 	jwt, err := ghjwt.Sign(g.appID, g.key, time.Now())
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, g.apiBase+"/app/installations?per_page=100", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, "", err
+	}
 	req.Header.Set("Authorization", "Bearer "+jwt)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	resp, err := g.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return nil, fmt.Errorf("list installations: %s: %s", resp.Status, b)
+		return nil, "", fmt.Errorf("list installations: %s: %s", resp.Status, b)
 	}
 	var out []struct {
 		ID      int64 `json:"id"`
@@ -235,7 +262,7 @@ func (g *GitHubApp) Installations(ctx context.Context) ([]AppInstallation, error
 		} `json:"account"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	insts := make([]AppInstallation, 0, len(out))
 	for _, in := range out {
@@ -246,7 +273,48 @@ func (g *GitHubApp) Installations(ctx context.Context) ([]AppInstallation, error
 			AccountType:     in.Account.Type,
 		})
 	}
-	return insts, nil
+	return insts, resp.Header.Get("Link"), nil
+}
+
+// sameHost drops a next-page URL that leaves the configured API host. Every
+// page request carries the App JWT, and the URL comes from a response header,
+// so following it off-host would hand that credential to whoever set the
+// header. Ending the walk is the safe failure: reconciliation is best-effort.
+func (g *GitHubApp) sameHost(next string) string {
+	if next == "" {
+		return ""
+	}
+	base, err := url.Parse(g.apiBase)
+	if err != nil {
+		return ""
+	}
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != base.Scheme || u.Host != base.Host {
+		return ""
+	}
+	return next
+}
+
+// nextLink returns the rel="next" URL from a GitHub Link header, or "" on the
+// last page — which is the walk's stop condition. GitHub sends the relations in
+// no guaranteed order and includes prev/first/last alongside next.
+func nextLink(header string) string {
+	for _, part := range strings.Split(header, ",") {
+		seg := strings.Split(strings.TrimSpace(part), ";")
+		if len(seg) < 2 {
+			continue
+		}
+		target := strings.TrimSpace(seg[0])
+		if !strings.HasPrefix(target, "<") || !strings.HasSuffix(target, ">") {
+			continue
+		}
+		for _, param := range seg[1:] {
+			if strings.TrimSpace(param) == `rel="next"` {
+				return target[1 : len(target)-1]
+			}
+		}
+	}
+	return ""
 }
 
 // Repo is one installation-accessible repository, as the picker renders it:
