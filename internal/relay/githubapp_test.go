@@ -12,6 +12,7 @@ import (
 	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -102,6 +103,162 @@ func TestRepoTokenIsScopedToOneRepo(t *testing.T) {
 	perms, _ := gotBody["permissions"].(map[string]any)
 	if perms["contents"] != "read" || perms["deployments"] != "write" {
 		t.Fatalf("permissions = %v", perms)
+	}
+}
+
+// The App's own installation listing is what reconciliation reads when an
+// account has nothing on record and no webhook is ever going to arrive (#470).
+func TestInstallationsListsEveryAppInstallation(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("per_page"); got != "100" {
+			t.Errorf("per_page = %q, want 100", got)
+		}
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
+			t.Errorf("Authorization = %q, want an app JWT", got)
+		}
+		_, _ = w.Write([]byte(`[` +
+			`{"id":55,"account":{"id":4242,"login":"alice","type":"User"}},` +
+			`{"id":56,"account":{"id":9001,"login":"acme","type":"Organization"}}]`))
+	}))
+	defer srv.Close()
+
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", APIBase: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.Installations(context.Background())
+	if err != nil {
+		t.Fatalf("Installations: %v", err)
+	}
+	want := []AppInstallation{
+		{ID: "55", AccountGithubID: "4242", AccountLogin: "alice", AccountType: "User"},
+		{ID: "56", AccountGithubID: "9001", AccountLogin: "acme", AccountType: "Organization"},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("installations = %+v, want %+v", got, want)
+	}
+}
+
+// This is the App-global list — every tenant's installation, not one account's
+// — so it outgrows a single page long before any individual does. Stopping at
+// page one would mean accounts past the first hundred could never reconcile,
+// with no symptom except the original bug quietly persisting for them (#470).
+func TestInstallationsFollowsPagination(t *testing.T) {
+	var srv *httptest.Server
+	pages := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer ") {
+			t.Errorf("page %s dropped the app JWT: Authorization = %q", r.URL.Query().Get("page"), got)
+		}
+		pages++
+		switch r.URL.Query().Get("page") {
+		case "", "1":
+			// rel="next" alongside rel="last", in the order GitHub sends them.
+			w.Header().Set("Link", `<`+srv.URL+`/app/installations?per_page=100&page=2>; rel="next", `+
+				`<`+srv.URL+`/app/installations?per_page=100&page=2>; rel="last"`)
+			_, _ = w.Write([]byte(`[{"id":55,"account":{"id":4242,"login":"alice","type":"User"}}]`))
+		case "2":
+			// Last page: rel="prev"/"first" only, no next — the stop condition.
+			w.Header().Set("Link", `<`+srv.URL+`/app/installations?per_page=100&page=1>; rel="prev", `+
+				`<`+srv.URL+`/app/installations?per_page=100&page=1>; rel="first"`)
+			_, _ = w.Write([]byte(`[{"id":56,"account":{"id":9001,"login":"acme","type":"Organization"}}]`))
+		default:
+			t.Errorf("walked past the last page: page=%q", r.URL.Query().Get("page"))
+			_, _ = w.Write([]byte(`[]`))
+		}
+	}))
+	defer srv.Close()
+
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", APIBase: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.Installations(context.Background())
+	if err != nil {
+		t.Fatalf("Installations: %v", err)
+	}
+	want := []AppInstallation{
+		{ID: "55", AccountGithubID: "4242", AccountLogin: "alice", AccountType: "User"},
+		{ID: "56", AccountGithubID: "9001", AccountLogin: "acme", AccountType: "Organization"},
+	}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("installations = %+v, want both pages %+v", got, want)
+	}
+	if pages != 2 {
+		t.Errorf("fetched %d page(s), want exactly 2", pages)
+	}
+}
+
+// Every page request carries the App JWT and the next-page URL comes from a
+// response header, so a Link pointing off-host must end the walk rather than
+// hand that credential to whoever set the header.
+func TestInstallationsIgnoresAnOffHostNextLink(t *testing.T) {
+	leaked := make(chan string, 1)
+	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case leaked <- r.Header.Get("Authorization"):
+		default:
+		}
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer attacker.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Link", `<`+attacker.URL+`/app/installations?page=2>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"id":55,"account":{"id":4242,"login":"alice","type":"User"}}]`))
+	}))
+	defer srv.Close()
+
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", APIBase: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := app.Installations(context.Background())
+	if err != nil {
+		t.Fatalf("Installations: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "55" {
+		t.Fatalf("installations = %+v, want just the on-host page", got)
+	}
+	select {
+	case auth := <-leaked:
+		t.Fatalf("followed an off-host Link and sent it %q", auth)
+	default:
+	}
+}
+
+// A cancelled context must stop the walk rather than paging on.
+func TestInstallationsStopsOnCancelledContext(t *testing.T) {
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Always another page: only cancellation ends this.
+		w.Header().Set("Link", `<`+srv.URL+`/app/installations?page=99>; rel="next"`)
+		_, _ = w.Write([]byte(`[{"id":1,"account":{"id":1,"login":"a","type":"User"}}]`))
+	}))
+	defer srv.Close()
+
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", APIBase: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := app.Installations(ctx); err == nil {
+		t.Fatal("Installations with a cancelled context returned nil error")
 	}
 }
 

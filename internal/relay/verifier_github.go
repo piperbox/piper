@@ -28,6 +28,7 @@ type GitHubVerifier struct {
 	apiBase                string // https://api.github.com; tests override
 	httpc                  *http.Client
 	sleep                  func(time.Duration) // poll delay seam; tests override
+	now                    func() time.Time    // clock seam; tests override
 
 	mu    sync.Mutex
 	flows map[string]*githubFlow
@@ -37,7 +38,17 @@ type githubFlow struct {
 	done bool
 	id   Identity
 	err  error
+	// expires bounds how long this entry may occupy the map: the device code's
+	// own lifetime plus a grace for the poll that redeems it. A flow polled to
+	// completion is deleted by Poll; this is what retires the ones nobody ever
+	// comes back for (#81).
+	expires time.Time
 }
+
+// flowGrace is how long past a device code's expiry a flow stays resolvable, so
+// a poll racing the deadline still gets the real "device code expired" error
+// rather than a bare unknown-handle.
+const flowGrace = time.Minute
 
 func NewGitHubVerifier(clientID, clientSecret string) *GitHubVerifier {
 	return &GitHubVerifier{
@@ -47,6 +58,7 @@ func NewGitHubVerifier(clientID, clientSecret string) *GitHubVerifier {
 		apiBase:      "https://api.github.com",
 		httpc:        &http.Client{Timeout: 15 * time.Second},
 		sleep:        time.Sleep,
+		now:          time.Now,
 		flows:        map[string]*githubFlow{},
 	}
 }
@@ -82,8 +94,13 @@ func (g *GitHubVerifier) Start(ctx context.Context) (string, DeviceAuth, error) 
 	_, _ = rand.Read(raw)
 	handle := hex.EncodeToString(raw)
 
-	fl := &githubFlow{}
+	expiresIn := res.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 900 // GitHub's documented device-code lifetime
+	}
+	fl := &githubFlow{expires: g.now().Add(time.Duration(expiresIn)*time.Second + flowGrace)}
 	g.mu.Lock()
+	g.sweepLocked()
 	g.flows[handle] = fl
 	g.mu.Unlock()
 
@@ -109,10 +126,10 @@ func (g *GitHubVerifier) pollUntilDone(deviceCode string, interval, expiresIn in
 	if interval <= 0 {
 		interval = 5
 	}
-	deadline := time.Now().Add(time.Duration(expiresIn) * time.Second)
+	deadline := g.now().Add(time.Duration(expiresIn) * time.Second)
 	ctx := context.Background()
 	for {
-		if time.Now().After(deadline) {
+		if g.now().After(deadline) {
 			finish(Identity{}, errors.New("device code expired"))
 			return
 		}
@@ -202,7 +219,7 @@ func (g *GitHubVerifier) Poll(_ context.Context, handle string) (Identity, error
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	fl, ok := g.flows[handle]
-	if !ok {
+	if !ok || g.now().After(fl.expires) {
 		return Identity{}, errors.New("unknown handle")
 	}
 	if !fl.done {
@@ -210,6 +227,19 @@ func (g *GitHubVerifier) Poll(_ context.Context, handle string) (Identity, error
 	}
 	delete(g.flows, handle)
 	return fl.id, fl.err
+}
+
+// sweepLocked drops flows past their expiry. Called from Start, so the map is
+// bounded by the number of logins actually in flight: entries can only be added
+// there, and every add pays one pass over a map that size. No background
+// goroutine, nothing to shut down.
+func (g *GitHubVerifier) sweepLocked() {
+	now := g.now()
+	for h, fl := range g.flows {
+		if now.After(fl.expires) {
+			delete(g.flows, h)
+		}
+	}
 }
 
 // AuthCodeURL is the GitHub authorize URL for the browser flow. No

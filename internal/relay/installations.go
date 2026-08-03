@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"time"
@@ -109,6 +110,73 @@ func (s *Store) LinkInstallationForAccountIfAbsent(installationID, accountID, ta
 	return n > 0, err
 }
 
+// ReconcileInstallations repairs an account's installation record from GitHub's
+// own listing, and reports how many links it made.
+//
+// Webhooks are the relay's only other source of installation knowledge, and
+// they only ever fire on a *change*: an App that is already installed sends
+// nothing, so an account that never saw the created/unsuspend event waits
+// forever. That bites on more than the pre-1.0 fresh-DB reset — a user can
+// install the public App before ever logging in (the webhook's sender then has
+// no account row and the event is dropped permanently), and GitHub retries a
+// failed delivery only briefly, so a relay outage at install time loses the
+// link for good. Webhook-only state is eventually inconsistent (#470).
+//
+// Reconciliation only ever links what the asking account can *prove* it owns,
+// because the App's listing spans every tenant:
+//
+//   - a user-target installation whose GitHub id is the account's own;
+//   - an org-target installation for a Piper org this account belongs to,
+//     verified through the same OrgForGitHubInstall membership check the
+//     webhook path uses.
+//
+// One case is deliberately skipped: an org-target installation with no linked
+// Piper org. The webhook falls back to linking whoever installed it, but a
+// reconcile has no installer identity to fall back on, and handing the
+// installation to whichever account asks first would be a tenancy hole. Those
+// still need the install event (or a suspend/unsuspend to re-fire one).
+//
+// Links are insert-if-absent, so a reconcile racing a live webhook never
+// steals an installation from its rightful owner.
+func (s *Store) ReconcileInstallations(ctx context.Context, app *GitHubApp, acc Account) (int, error) {
+	// Org accounts hold no GitHub user id and never authenticate, so there is
+	// no identity here to prove ownership with.
+	if app == nil || acc.GithubID == "" {
+		return 0, nil
+	}
+	insts, err := app.Installations(ctx)
+	if err != nil {
+		return 0, err
+	}
+	linked := 0
+	for _, in := range insts {
+		var accountID, targetType string
+		switch {
+		case in.AccountType == "Organization":
+			orgID, err := s.OrgForGitHubInstall(in.AccountGithubID, in.AccountLogin, acc.GithubID)
+			if errors.Is(err, ErrNoOrg) {
+				continue // not an org this account can vouch for
+			}
+			if err != nil {
+				return linked, err
+			}
+			accountID, targetType = orgID, "org"
+		case in.AccountGithubID == acc.GithubID:
+			accountID, targetType = acc.ID, "user"
+		default:
+			continue // another tenant's installation
+		}
+		inserted, err := s.LinkInstallationForAccountIfAbsent(in.ID, accountID, targetType, in.AccountLogin)
+		if err != nil {
+			return linked, err
+		}
+		if inserted {
+			linked++
+		}
+	}
+	return linked, nil
+}
+
 // UnlinkInstallation drops an installation, e.g. on installation.deleted.
 func (s *Store) UnlinkInstallation(installationID string) error {
 	_, err := s.db.Exec(`DELETE FROM github_installations WHERE installation_id=?`, installationID)
@@ -138,11 +206,46 @@ type Installation struct {
 }
 
 // InstallationsForAccount lists every installation linked to the account,
-// newest first. Empty (not an error) when the account has none.
+// newest first. Empty (not an error) when the account has none. This is
+// ownership, not visibility — see InstallationsVisibleTo for what a user may
+// actually see and use.
 func (s *Store) InstallationsForAccount(accountID string) ([]Installation, error) {
-	rows, err := s.db.Query(
+	return s.installations(
 		`SELECT installation_id, target_type, target_login FROM github_installations
 		  WHERE account_id=? ORDER BY created_at DESC, rowid DESC`, accountID)
+}
+
+// InstallationsVisibleTo lists the installations accountID may use: its own,
+// plus those owned by any Piper org it belongs to. An org-target installation
+// belongs to the org account — that is what keeps one member's identity from
+// owning an org-wide install — so ownership alone would hide it from every
+// human who could act on it. Membership is the same trust boundary
+// AgentsVisibleTo already draws for driving an org's boxes.
+func (s *Store) InstallationsVisibleTo(accountID string) ([]Installation, error) {
+	return s.installations(
+		`SELECT installation_id, target_type, target_login FROM github_installations
+		  WHERE account_id = ?
+		     OR account_id IN (SELECT org_id FROM org_members WHERE account_id = ?)
+		  ORDER BY created_at DESC, rowid DESC`, accountID, accountID)
+}
+
+// InstallationVisibleTo reports whether accountID may use installationID. It is
+// the single-row form of InstallationsVisibleTo, deliberately sharing its
+// predicate so the listing and the per-installation authorization can never
+// disagree about what a caller is allowed to touch.
+func (s *Store) InstallationVisibleTo(installationID, accountID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM github_installations
+		  WHERE installation_id = ?
+		    AND (account_id = ?
+		         OR account_id IN (SELECT org_id FROM org_members WHERE account_id = ?))`,
+		installationID, accountID, accountID).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) installations(query string, args ...any) ([]Installation, error) {
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
