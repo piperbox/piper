@@ -121,8 +121,8 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	if err := r.AddCustomDomain(row.Domain); err != nil {
 		return err
 	}
-	if !m.dnsPointsAt(m.relayHost, row.Domain) {
-		return fmt.Errorf("%w: point a CNAME or A record for %s at %s", errWaitDNS, row.Domain, m.relayHost)
+	if !m.dnsPointsAt(m.dnsTarget, row.Domain) {
+		return fmt.Errorf("%w: point a CNAME or A record for %s at %s", errWaitDNS, row.Domain, m.dnsTarget)
 	}
 	if err := m.st.UpdateAppDomainStatus(row.Domain, StatusIssuing, "", time.Time{}); err != nil {
 		return err
@@ -392,7 +392,7 @@ func (m *Manager) appDomainStatus(row store.AppDomain) AppDomainStatus {
 	st := AppDomainStatus{
 		Domain: row.Domain, App: row.App,
 		Status: row.Status, Error: row.Error,
-		DNSRecords: []DNSRecord{{Type: "CNAME", Name: row.Domain, Value: m.relayHost}},
+		DNSRecords: []DNSRecord{{Type: "CNAME", Name: row.Domain, Value: m.dnsTarget}},
 		DNSOK:      m.cachedDNSPointsAt(row.Domain),
 	}
 	if !row.CertNotAfter.IsZero() {

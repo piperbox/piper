@@ -75,7 +75,12 @@ func (c *Client) EnrollRelay(req enrollapi.EnrollRequest) (enrollapi.EnrollRespo
 	if err != nil {
 		return enrollapi.EnrollResponse{}, err
 	}
-	resp, err := c.do(http.MethodPost, enrollapi.PathEnroll, "application/json", bytes.NewReader(body))
+	// forAction, not the socket's ordinary timeout: this POST spans piperd's
+	// relay round-trip, tunnel validation and persistence, which a Pi on a slow
+	// uplink can carry past 10s. Losing the response there does not lose the
+	// enrollment — the caller's status poll settles it — but it reports a
+	// success as "enrollment response lost", which reads like a failure (#467).
+	resp, err := c.doWith(c.forAction(), http.MethodPost, enrollapi.PathEnroll, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return enrollapi.EnrollResponse{}, err
 	}

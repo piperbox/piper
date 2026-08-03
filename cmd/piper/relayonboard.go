@@ -46,15 +46,70 @@ func finishInstall(ctx context.Context, rc *relayclient.Client, acc relayclient.
 	}
 }
 
+// reusableLogin reports the account behind the saved credential when it is
+// still good for this relay. `piper login` is the universal "make everything
+// right" verb, so re-running it on a healthy box must not charge a browser
+// round-trip when nothing is wrong: identity durability skips re-enrollment,
+// and this skips re-authentication (#473). One cheap authed request answers
+// both "is this credential live" and "whose is it". Anything short of a clean
+// answer — expired, revoked, disabled, relay unreachable — falls through to the
+// full flow, which reports the real failure itself.
+func reusableLogin(ctx context.Context, rc *relayclient.Client, relayAPI string) (relayclient.Account, bool) {
+	cc, err := config.LoadClient()
+	if err != nil || cc.AccountCredential == "" || cc.RelayAPI != relayAPI {
+		return relayclient.Account{}, false
+	}
+	st, err := rc.GitHubStatus(ctx, cc.AccountCredential)
+	if err != nil || st.Username == "" {
+		return relayclient.Account{}, false
+	}
+	acc := relayclient.Account{AccountCredential: cc.AccountCredential, Username: st.Username}
+	// Only advertise the install page when there is nothing installed yet;
+	// otherwise finishInstall would print install instructions to someone who
+	// finished that step long ago.
+	if len(st.Installations) == 0 {
+		acc.InstallURL = st.InstallURL
+	}
+	return acc, true
+}
+
+// finishLogin is the shared tail of every login path: persist the credential,
+// name the user, claim the box, then run the advisory install poll.
+func finishLogin(ctx context.Context, rc *relayclient.Client, relayAPI string, o enrollFlowOpts, acc relayclient.Account, stdout, stderr io.Writer) int {
+	cc, err := config.LoadClient()
+	if err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	cc.RelayAPI = relayAPI
+	cc.AccountCredential = acc.AccountCredential
+	if err := config.SaveClient(cc); err != nil {
+		fmt.Fprintln(stderr, "error:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
+	if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
+		return code // identity is durable; re-running login resumes at the claim
+	}
+	finishInstall(ctx, rc, acc, stdout, stderr)
+	return 0
+}
+
 // relayLogin runs the GitHub device flow against the relay, printing the
 // verification URL + user code, polling to completion, and storing the returned
-// account credential (and relay API base) in the CLI config.
+// account credential (and relay API base) in the CLI config. A saved credential
+// that still works short-circuits the whole browser trip.
 func relayLogin(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) int {
 	// Interrupt-aware: Ctrl-C during the poll loop cancels the in-flight
 	// request instead of waiting out the 30s client timeout.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	rc := relayclient.New(relayAPI)
+	if !o.relogin {
+		if acc, ok := reusableLogin(ctx, rc, relayAPI); ok {
+			return finishLogin(ctx, rc, relayAPI, o, acc, stdout, stderr)
+		}
+	}
 	da, err := rc.LoginDevice(ctx)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
@@ -86,23 +141,7 @@ func relayLogin(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) int
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
-		cc, err := config.LoadClient()
-		if err != nil {
-			fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		cc.RelayAPI = relayAPI
-		cc.AccountCredential = acc.AccountCredential
-		if err := config.SaveClient(cc); err != nil {
-			fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
-		if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
-			return code // identity is durable; re-running login resumes at the claim
-		}
-		finishInstall(ctx, rc, acc, stdout, stderr)
-		return 0
+		return finishLogin(ctx, rc, relayAPI, o, acc, stdout, stderr)
 	}
 }
 
@@ -116,6 +155,11 @@ func relayLoginWeb(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	rc := relayclient.New(relayAPI)
+	if !o.relogin {
+		if acc, ok := reusableLogin(ctx, rc, relayAPI); ok {
+			return finishLogin(ctx, rc, relayAPI, o, acc, stdout, stderr)
+		}
+	}
 	handle, code, err := rc.CLILoginStart(ctx)
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
@@ -140,23 +184,7 @@ func relayLoginWeb(relayAPI string, o enrollFlowOpts, stdout, stderr io.Writer) 
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
-		cc, err := config.LoadClient()
-		if err != nil {
-			fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		cc.RelayAPI = relayAPI
-		cc.AccountCredential = acc.AccountCredential
-		if err := config.SaveClient(cc); err != nil {
-			fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		fmt.Fprintf(stdout, "logged in to relay as %s\n", acc.Username)
-		if code := enrollAfterLogin(ctx, o, acc.AccountCredential, stdout, stderr); code != 0 {
-			return code // identity is durable; re-running login resumes at the claim
-		}
-		finishInstall(ctx, rc, acc, stdout, stderr)
-		return 0
+		return finishLogin(ctx, rc, relayAPI, o, acc, stdout, stderr)
 	}
 }
 

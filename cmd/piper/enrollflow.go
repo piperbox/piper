@@ -21,6 +21,7 @@ type enrollFlowOpts struct {
 	org      string
 	noEnroll bool
 	reEnroll bool
+	relogin  bool
 }
 
 // Seams so tests run instantly.
@@ -169,8 +170,12 @@ func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stde
 				}
 			}
 		}
+		// Read the seams on this goroutine, not the sleeper's: a cancelled wait
+		// abandons the sleeper, which would otherwise still be reading these
+		// package-level vars while a test's Cleanup restores them (#467).
+		sleep, interval := pollSleep, enrollPollInterval
 		slept := make(chan struct{})
-		go func() { pollSleep(enrollPollInterval); close(slept) }()
+		go func() { sleep(interval); close(slept) }()
 		select {
 		case <-ctx.Done():
 		case <-slept:
@@ -184,9 +189,19 @@ func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stde
 		fmt.Fprintln(stderr, "interrupted before the enrollment was confirmed applied.")
 		return 1
 	}
-	if !sawStatus || !enrolled {
+	if !sawStatus {
 		fmt.Fprintln(stderr, "error: piperd did not come back after applying the enrollment.")
 		fmt.Fprintln(stderr, applyDiagnosisHint())
+		return 1
+	}
+	if !enrolled {
+		// piperd answered every poll and never claimed to be enrolled: the
+		// daemon is fine, the claim is what failed (reachable via the
+		// lost-response path, where the enroll POST's reply never arrived and
+		// this loop is what settles whether it applied). Service logs are the
+		// wrong place to send someone whose service is plainly up.
+		fmt.Fprintln(stderr, "error: piperd is running, but the enrollment did not persist.")
+		fmt.Fprintln(stderr, "run `piper login --re-enroll` to claim this box again; if it keeps failing, check piperd's log for the claim error.")
 		return 1
 	}
 	fmt.Fprintf(stdout, "enrollment applied; the tunnel is still retrying in the background — check later with `piper box ls`.\n")

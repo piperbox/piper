@@ -16,6 +16,7 @@ import (
 type Account struct {
 	ID          string
 	Username    string
+	GithubID    string // stable GitHub user id; "" for org accounts
 	GithubLogin string // raw GitHub login, refreshed at every login; "" for org accounts
 	Disabled    bool
 }
@@ -141,12 +142,12 @@ func (s *Store) MintAccountCredential(accountID string) (string, error) {
 func (s *Store) AuthenticateAccount(cred string) (Account, error) {
 	var acc Account
 	var disabled int
-	var gl sql.NullString
+	var gl, gid sql.NullString
 	err := s.db.QueryRow(
-		`SELECT a.id, a.username, a.github_login, a.disabled
+		`SELECT a.id, a.username, a.github_id, a.github_login, a.disabled
 		   FROM account_creds c JOIN accounts a ON a.id = c.account_id
 		  WHERE c.token_hash = ?`, hashToken(cred)).
-		Scan(&acc.ID, &acc.Username, &gl, &disabled)
+		Scan(&acc.ID, &acc.Username, &gid, &gl, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrBadCredential
 	}
@@ -156,7 +157,7 @@ func (s *Store) AuthenticateAccount(cred string) (Account, error) {
 	if disabled != 0 {
 		return Account{}, ErrBadCredential
 	}
-	acc.GithubLogin = gl.String
+	acc.GithubID, acc.GithubLogin = gid.String, gl.String
 	return acc, nil
 }
 
