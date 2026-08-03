@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -237,6 +238,35 @@ func TestWildcardConfigKeepsLastGoodCertOnFailedReload(t *testing.T) {
 	derB := writeWildcardPair(t, certFile, keyFile, "public.getpiper.co", time.Now())
 	if _, got := served(t, cfg, "app.public.getpiper.co"); !bytes.Equal(got, derB) {
 		t.Fatal("did not recover: a valid pair written after a failed reload was not picked up")
+	}
+}
+
+// TestWildcardConfigLogsMissingKeyFile pins the failure log to the file that
+// actually failed. Removing only the key must not make the log name the cert.
+func TestWildcardConfigLogsMissingKeyFile(t *testing.T) {
+	cfg, _, keyFile, _ := armedWildcard(t, "public.getpiper.co")
+
+	origOut := log.Writer()
+	origFlags := log.Flags()
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(origOut)
+		log.SetFlags(origFlags)
+	}()
+
+	if err := os.Remove(keyFile); err != nil {
+		t.Fatalf("remove key file: %v", err)
+	}
+	served(t, cfg, "app.public.getpiper.co")
+
+	got := buf.Bytes()
+	if !bytes.Contains(got, []byte("relay: wildcard cert "+keyFile+":")) {
+		t.Fatalf("log message does not name the missing key file in the prefix\nlog: %s", got)
+	}
+	if !bytes.Contains(got, []byte("(serving the last good certificate)")) {
+		t.Fatalf("log message missing expected suffix\nlog: %s", got)
 	}
 }
 

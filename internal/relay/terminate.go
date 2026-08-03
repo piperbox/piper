@@ -79,7 +79,7 @@ func newWildcardReloader(certFile, keyFile string) (*wildcardReloader, error) {
 
 // getCertificate is the tls.Config callback: serve the newest pair on disk.
 func (r *wildcardReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-	cs, ks, err := r.stamps()
+	cs, ks, failedPath, err := r.stamps()
 	if err == nil {
 		r.mu.RLock()
 		cert, unchanged := r.cert, cs == r.cs && ks == r.ks
@@ -90,10 +90,11 @@ func (r *wildcardReloader) getCertificate(*tls.ClientHelloInfo) (*tls.Certificat
 		return r.reload(), nil
 	}
 	// One of the two files can't be stat'ed — it was removed, or a rotation is
-	// mid-rename. Nothing to reload from, so keep serving what we have.
+	// mid-rename. Nothing to reload from, so keep serving what we have. Name the
+	// file that actually failed, not the cert path in every case.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.noteErrLocked("relay: wildcard cert %s: %v (serving the last good certificate)", r.certFile, err)
+	r.noteErrLocked("relay: wildcard cert %s: %v (serving the last good certificate)", failedPath, err)
 	return r.cert, nil
 }
 
@@ -111,7 +112,7 @@ func (r *wildcardReloader) reload() *tls.Certificate {
 		// stamps of the bad version are recorded by loadLocked, so this costs
 		// one parse and one log line per version on disk, not per handshake —
 		// and the next write moves them again and triggers a retry.
-		r.noteErrLocked("relay: wildcard cert reload from %s: %v (serving the last good certificate)", r.certFile, err)
+		r.noteErrLocked("relay: wildcard cert reload from %s/%s: %v (serving the last good certificate)", r.certFile, r.keyFile, err)
 		return r.cert
 	}
 	return cert
@@ -126,7 +127,7 @@ func (r *wildcardReloader) reload() *tls.Certificate {
 // would file the new bytes under the stamps of a version we never read and miss
 // the rotation entirely.
 func (r *wildcardReloader) loadLocked() (*tls.Certificate, error) {
-	cs, ks, err := r.stamps()
+	cs, ks, _, err := r.stamps()
 	if err != nil {
 		return nil, err
 	}
@@ -142,15 +143,15 @@ func (r *wildcardReloader) loadLocked() (*tls.Certificate, error) {
 	return r.cert, nil
 }
 
-func (r *wildcardReloader) stamps() (cs, ks fileStamp, err error) {
+func (r *wildcardReloader) stamps() (cs, ks fileStamp, failedPath string, err error) {
 	if cs, err = stampOf(r.certFile); err != nil {
-		return fileStamp{}, fileStamp{}, err
+		return fileStamp{}, fileStamp{}, r.certFile, err
 	}
 	ks, err = stampOf(r.keyFile)
 	if err != nil {
-		return fileStamp{}, fileStamp{}, err
+		return fileStamp{}, fileStamp{}, r.keyFile, err
 	}
-	return cs, ks, nil
+	return cs, ks, "", nil
 }
 
 // noteErrLocked logs a failure once per distinct message. Every handshake
