@@ -91,9 +91,11 @@ func TestOneCommandLogin(t *testing.T) {
 	// `piper login`: device flow (auto-approved) then claims this box through
 	// the enrollment socket. HOME is a scratch dir so the CLI config lands
 	// there; PIPER_ADDR/PIPER_TOKEN are cleared so no ambient LAN target leaks
-	// in from the outer environment.
+	// in from the outer environment; PIPER_NO_BROWSER stops the real binary
+	// popping a tab at the fake verifier's URL on the developer's desktop
+	// (nothing here asserts on the browser, so the tab tested nothing).
 	home := t.TempDir()
-	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=")
+	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=", "PIPER_NO_BROWSER=1")
 	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", relayAPI, "--data-dir", piperdData)
 	login.Env = piperEnv
 	out, err := login.CombinedOutput()

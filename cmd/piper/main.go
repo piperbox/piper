@@ -703,15 +703,31 @@ func manifestFormHandler(page string) http.HandlerFunc {
 
 func htmlEscape(s string) string { return strings.ReplaceAll(s, "'", "&#39;") }
 
-func openBrowser(url string) error {
+// browserCmd builds the OS command that opens url, or nil when the browser must
+// stay shut: PIPER_NO_BROWSER=1 for headless boxes, SSH sessions, and the e2e
+// suite, which drives the real binary and so cannot reach the openBrowserFn
+// test seam. Split out from openBrowser so the knob is testable without
+// spawning anything.
+func browserCmd(url string) *exec.Cmd {
+	if config.NoBrowser() {
+		return nil
+	}
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("open", url).Start()
+		return exec.Command("open", url)
 	case "windows":
-		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
 	default:
-		return exec.Command("xdg-open", url).Start()
+		return exec.Command("xdg-open", url)
 	}
+}
+
+func openBrowser(url string) error {
+	cmd := browserCmd(url)
+	if cmd == nil {
+		return nil
+	}
+	return cmd.Start()
 }
 
 // confirmPrompt guards a destructive command; only "y"/"yes" proceeds.
