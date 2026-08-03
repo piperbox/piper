@@ -34,6 +34,13 @@ type Config struct {
 	TLSKeyFile     string // static key path
 }
 
+// DefaultBaseDomain is BaseDomain's built-in default: the LAN-only name apps
+// are served at until something — PIPER_BASE_DOMAIN or an enrolled relay's
+// relay.json — says what this box is really called. It resolves nowhere
+// public, so callers that need a publicly resolvable name must treat it as
+// "unset" rather than as an answer.
+const DefaultBaseDomain = "piper.localhost"
+
 func env(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -56,7 +63,7 @@ func Load() Config {
 		APIAddr:     env("PIPER_API_ADDR", "127.0.0.1:8088"),
 		WebhookAddr: env("PIPER_WEBHOOK_ADDR", "127.0.0.1:8089"),
 		DataDir:     dataDir,
-		BaseDomain:  firstNonEmpty(os.Getenv("PIPER_BASE_DOMAIN"), rf.BaseDomain, "piper.localhost"),
+		BaseDomain:  firstNonEmpty(os.Getenv("PIPER_BASE_DOMAIN"), rf.BaseDomain, DefaultBaseDomain),
 		CaddyAdmin:  env("PIPER_CADDY_ADMIN", "http://127.0.0.1:2019"),
 		HTTPAddr:    env("PIPER_HTTP_ADDR", ":80"),
 		HTTPSAddr:   env("PIPER_HTTPS_ADDR", ":443"),

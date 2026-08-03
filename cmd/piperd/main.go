@@ -347,10 +347,21 @@ func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte
 // the manager arms certs on must be cfg.HTTPSAddr, the same address
 // newDialLocal splices relay passthrough streams to — hardcoding ":443" here
 // broke every box that cannot bind it (#435, the listener half of #399).
+// Likewise the DNS-record target is cfg.BaseDomain, not the relay dial host:
+// the dial host answers "where does this box dial", not "where should the
+// public point this domain" (#434). relayHost stays as the fallback for a box
+// whose base domain is still the built-in default — nobody has told that box
+// what it is publicly called, and config.DefaultBaseDomain resolves nowhere, so
+// passing it on would swap the reported bug for the same bug one name over.
 func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string) domain.Options {
+	baseDomain := cfg.BaseDomain
+	if baseDomain == config.DefaultBaseDomain {
+		baseDomain = ""
+	}
 	opts := domain.Options{
 		Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
-		DataDir: cfg.DataDir, RelayHost: relayHost, HTTPSListen: cfg.HTTPSAddr,
+		DataDir: cfg.DataDir, BaseDomain: baseDomain, RelayHost: relayHost,
+		HTTPSListen: cfg.HTTPSAddr,
 		Issuer: func(provider, token string) (domain.Issuer, error) {
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 				return testSelfSignedIssuer{}, nil

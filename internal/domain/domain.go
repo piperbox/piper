@@ -92,13 +92,23 @@ type AppRouter interface {
 // env-managed (the pre-#102 PIPER_BASE_DOMAIN BYO path): API writes are
 // rejected and Status reports source "env".
 type Options struct {
-	Store       *store.Store
-	Issuer      IssuerFactory
-	AppIssuer   func() (Issuer, error) // TLS-ALPN-01 issuer for per-app domains
-	Proxy       Proxy
-	Router      AppRouter // per-app route backfill; nil tolerated (tests)
-	DataDir     string
-	RelayHost   string // host part of the relay address; the DNS-record target
+	Store     *store.Store
+	Issuer    IssuerFactory
+	AppIssuer func() (Issuer, error) // TLS-ALPN-01 issuer for per-app domains
+	Proxy     Proxy
+	Router    AppRouter // per-app route backfill; nil tolerated (tests)
+	DataDir   string
+	// BaseDomain is the box's base domain — the name the public already
+	// resolves to the relay, and so the DNS-record target and the name the DNS
+	// gate compares against. Empty means the box has no publicly resolvable
+	// name of its own and falls back to RelayHost; the caller decides what
+	// counts as unset (cf. cmd/piperd and config.DefaultBaseDomain).
+	BaseDomain string
+	// RelayHost is the host part of the relay *dial* address. It is only the
+	// DNS-record target when BaseDomain is empty: the two diverge whenever the
+	// box dials the relay over loopback, a LAN address, or an internal
+	// load-balancer name (#434).
+	RelayHost   string
 	HTTPSListen string // e.g. ":443"
 	EnvDomain   string
 	// Resolve overrides the DNS lookup behind dns_ok and the per-app DNS
@@ -120,7 +130,7 @@ type Manager struct {
 	proxy       Proxy
 	router      AppRouter
 	dataDir     string
-	relayHost   string
+	dnsTarget   string // what the user's records must point at (see Options.BaseDomain)
 	httpsListen string
 	envDomain   string
 
@@ -176,6 +186,14 @@ func New(o Options) *Manager {
 	if o.EnvDomain != "" {
 		envStatus = StatusIssuing // pending until RunEnv reports its outcome
 	}
+	// The DNS target is the base domain, not the dial address: the base domain
+	// is relay-assigned under the relay's apex (terminated mode) or already
+	// pointed at the relay by the user (BYO), whereas the dial address may be
+	// loopback or LAN-only. A box with no base domain keeps the dial host.
+	dnsTarget := o.BaseDomain
+	if dnsTarget == "" {
+		dnsTarget = o.RelayHost
+	}
 	resolve := o.Resolve
 	if resolve == nil {
 		resolve = func(ctx context.Context, host string) ([]net.IP, error) {
@@ -185,7 +203,7 @@ func New(o Options) *Manager {
 	return &Manager{
 		st: o.Store, newIssuer: o.Issuer, appIssuer: o.AppIssuer,
 		proxy: o.Proxy, router: o.Router,
-		dataDir: o.DataDir, relayHost: o.RelayHost,
+		dataDir: o.DataDir, dnsTarget: dnsTarget,
 		httpsListen: o.HTTPSListen, envDomain: o.EnvDomain,
 		appMu:      map[string]*sync.Mutex{},
 		gens:       map[string]int{},
@@ -674,12 +692,12 @@ type Status struct {
 
 func (m *Manager) dnsRecords(domain string) []DNSRecord {
 	return []DNSRecord{
-		{Type: "CNAME", Name: "*." + domain, Value: m.relayHost},
-		{Type: "CNAME", Name: domain, Value: m.relayHost},
+		{Type: "CNAME", Name: "*." + domain, Value: m.dnsTarget},
+		{Type: "CNAME", Name: domain, Value: m.dnsTarget},
 	}
 }
 
-// cachedDNSPointsAt serves dnsPointsAt(relayHost, host) from a short TTL
+// cachedDNSPointsAt serves dnsPointsAt(dnsTarget, host) from a short TTL
 // cache so a dashboard polling the status endpoints doesn't trigger a pair of
 // blocking DNS lookups every call. The lookup runs outside the lock (#114).
 func (m *Manager) cachedDNSPointsAt(host string) bool {
@@ -690,7 +708,7 @@ func (m *Manager) cachedDNSPointsAt(host string) bool {
 	}
 	m.dnsMu.Unlock()
 
-	ok := m.dnsPointsAt(m.relayHost, host)
+	ok := m.dnsPointsAt(m.dnsTarget, host)
 
 	m.dnsMu.Lock()
 	m.dnsCache[host] = dnsCacheEntry{ok: ok, at: m.now()}
