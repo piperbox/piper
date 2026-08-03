@@ -394,25 +394,6 @@ func (c *Client) DeleteApp(name string) error {
 	return nil
 }
 
-// AppEnv returns app's saved environment variables.
-func (c *Client) AppEnv(app string) (map[string]string, error) {
-	resp, err := c.do(http.MethodGet, "/v1/apps/"+app+"/env", "", nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, responseError("env", resp)
-	}
-	var out struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return out.Env, nil
-}
-
 // AppEnvWithTimestamps returns app's saved environment variables and the time
 // each var was last updated.
 func (c *Client) AppEnvWithTimestamps(app string) (map[string]string, map[string]time.Time, error) {
