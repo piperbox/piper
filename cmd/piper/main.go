@@ -229,11 +229,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 		org := fs.String("org", "", "enroll this box for a GitHub org you own")
 		noEnroll := fs.Bool("no-enroll", false, "stop after identity; do not claim this box")
 		reEnroll := fs.Bool("re-enroll", false, "claim this box fresh even if already enrolled (after `piper box rm`, or switching accounts/relays)")
+		relogin := fs.Bool("relogin", false, "authenticate again even if the saved credential still works (switching GitHub accounts)")
 		dataDir := fs.String("data-dir", config.DefaultDataDir(), "piperd data directory (enrollment-socket probe)")
 		if err := fs.Parse(args[1:]); err != nil {
 			return 2
 		}
-		o := enrollFlowOpts{relayAPI: *relay, dataDir: *dataDir, org: *org, noEnroll: *noEnroll, reEnroll: *reEnroll}
+		o := enrollFlowOpts{relayAPI: *relay, dataDir: *dataDir, org: *org, noEnroll: *noEnroll, reEnroll: *reEnroll, relogin: *relogin}
 		if *token != "" {
 			return login(*addr, *token, stdout, stderr) // LAN login: identity only, unchanged
 		}

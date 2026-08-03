@@ -359,7 +359,12 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := map[string]any{
-		"github_app":    a.ghApp != nil,
+		"github_app": a.ghApp != nil,
+		// The account this credential belongs to. It makes status the one cheap
+		// authed call that both validates a saved credential and says whose it
+		// is, so `piper login` can confirm an existing session without a browser
+		// trip (#473).
+		"username":      acc.Username,
 		"installations": []Installation{},
 		"install_url":   "",
 	}

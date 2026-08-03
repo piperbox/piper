@@ -522,6 +522,177 @@ func TestAgentInstalledProbesBinaryAndState(t *testing.T) {
 // (the merged-login design). The relay stub grants the login immediately; the
 // fake piperd behind the enrollment socket then sees the claim, and the CLI's
 // stdout narrates login → claim in order.
+// saveCredential seeds the client config as a previous login would have.
+func saveCredential(t *testing.T, relayAPI, cred string) {
+	t.Helper()
+	cc, err := config.LoadClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc.RelayAPI, cc.AccountCredential = relayAPI, cred
+	if err := config.SaveClient(cc); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// `piper login` is the universal "make everything right" verb, so re-running it
+// on a healthy box must be cheap. Identity durability skipped re-enrollment but
+// not re-authentication: the second login, seconds after the first, still made
+// the user fetch a code and go back to the browser before printing "already
+// enrolled" (#473).
+func TestRelayLoginReusesAValidSavedCredential(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+
+	var deviceCalls int
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/github/status":
+			if got := r.Header.Get("Authorization"); got != "Bearer cred-xyz" {
+				t.Errorf("status Authorization = %q", got)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"github_app": true, "username": "erin",
+				"install_url":   "https://github.com/apps/piper/installations/new",
+				"installations": []map[string]string{{"installation_id": "1"}},
+			})
+		case "/v1/login/device":
+			deviceCalls++
+			http.Error(w, "should not start a device flow", http.StatusTeapot)
+		case "/agents":
+			_ = json.NewEncoder(w).Encode(map[string]any{"agents": []map[string]any{
+				{"agent": "ab12-erin.public.getpiper.co", "connected": true}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer relay.Close()
+	saveCredential(t, relay.URL, "cred-xyz")
+
+	openedBrowser := false
+	oldOpenBrowser := openBrowserFn
+	openBrowserFn = func(string) error { openedBrowser = true; return nil }
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
+
+	f := &fakePiperd{}
+	f.status.Store(enrollapi.Status{Enrolled: true, BaseDomain: "ab12-erin.public.getpiper.co", Tunnel: "connected"})
+	f.enroll = func(enrollapi.EnrollRequest) (int, any) {
+		t.Error("re-login must not re-claim an already-enrolled box")
+		return http.StatusOK, enrollapi.EnrollResponse{}
+	}
+	dataDir := startFakeEnrollSocket(t, f.mux())
+
+	var out, errb bytes.Buffer
+	code := run([]string{"login", "--relay", relay.URL, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if deviceCalls != 0 {
+		t.Errorf("started %d device flow(s) with a valid credential in hand", deviceCalls)
+	}
+	if openedBrowser {
+		t.Error("re-login opened a browser with a valid credential in hand")
+	}
+	for _, want := range []string{"logged in to relay as erin", "already enrolled as ab12-erin.public.getpiper.co"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout missing %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// A credential the relay no longer accepts must not strand the user: login
+// falls through to the device flow exactly as it did before.
+func TestRelayLoginFallsBackWhenSavedCredentialIsRejected(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	dataDir := stubNoLocalPiperd(t)
+	fastPoll(t)
+	pollSleep = func(time.Duration) {}
+	oldOpenBrowser := openBrowserFn
+	openBrowserFn = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
+
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/github/status":
+			http.Error(w, "bad credential", http.StatusUnauthorized)
+		case "/v1/login/device":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"verification_uri": "https://github.com/login/device", "user_code": "ABCD-1234",
+				"device_code": "dev-1", "interval": 0, "expires_in": 300})
+		case "/v1/login/poll":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"account_credential": "cred-fresh", "username": "erin"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer relay.Close()
+	saveCredential(t, relay.URL, "cred-stale")
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"login", "--relay", relay.URL, "--data-dir", dataDir}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	cc, err := config.LoadClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc.AccountCredential != "cred-fresh" {
+		t.Fatalf("stale credential survived: %q", cc.AccountCredential)
+	}
+}
+
+// --relogin is the escape hatch for switching GitHub accounts: it must reach the
+// device flow even though the saved credential still works.
+func TestRelayLoginReloginForcesTheDeviceFlow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	dataDir := stubNoLocalPiperd(t)
+	fastPoll(t)
+	pollSleep = func(time.Duration) {}
+	oldOpenBrowser := openBrowserFn
+	openBrowserFn = func(string) error { return nil }
+	t.Cleanup(func() { openBrowserFn = oldOpenBrowser })
+
+	var deviceCalls int
+	relay := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/github/status":
+			t.Error("--relogin must not consult the saved credential")
+			http.Error(w, "unexpected", http.StatusTeapot)
+		case "/v1/login/device":
+			deviceCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"verification_uri": "https://github.com/login/device", "user_code": "ABCD-1234",
+				"device_code": "dev-1", "interval": 0, "expires_in": 300})
+		case "/v1/login/poll":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"account_credential": "cred-bob", "username": "bob"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer relay.Close()
+	saveCredential(t, relay.URL, "cred-alice")
+
+	var out, errb bytes.Buffer
+	if code := run([]string{"login", "--relay", relay.URL, "--data-dir", dataDir, "--relogin"}, &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if deviceCalls != 1 {
+		t.Errorf("device flows started = %d, want 1", deviceCalls)
+	}
+	if !strings.Contains(out.String(), "logged in to relay as bob") {
+		t.Errorf("stdout = %q", out.String())
+	}
+}
+
 func TestRelayLoginRunsClaimStage(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "")

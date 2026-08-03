@@ -21,6 +21,7 @@ type enrollFlowOpts struct {
 	org      string
 	noEnroll bool
 	reEnroll bool
+	relogin  bool
 }
 
 // Seams so tests run instantly.

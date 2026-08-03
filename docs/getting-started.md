@@ -228,6 +228,8 @@ the claim:
   (the laptop/remote-management shape, forced).
 - `--re-enroll` — force a fresh claim on an already-enrolled box — recovery
   after `piper box rm`, or after switching accounts or relays.
+- `--relogin` — authenticate again even though the saved credential still
+  works, for signing in as a different GitHub account.
 - `--data-dir <path>` — the piperd data directory to probe for the enrollment
   socket, when it isn't the default.
 
