@@ -66,6 +66,55 @@ func TestLoginDeviceThenPoll(t *testing.T) {
 	}
 }
 
+// A disabled account re-running the device flow must be told no, not handed a
+// fresh credential with a 200. The credential would be inert (AuthenticateAccount
+// rejects disabled accounts) so the kill-switch holds either way, but a 200 plus
+// a live-looking secret is a confusing, mildly leaky way to say "you are cut off"
+// — and it mints a row per attempt (#81).
+func TestLoginPollDisabledAccountIsForbidden(t *testing.T) {
+	api, st, fv := newTestAPI(t)
+	id := Identity{Subject: "sub-disabled", Login: "ivan"}
+
+	first := loginOnce(t, api, fv, id)
+	if first.Code != http.StatusOK {
+		t.Fatalf("first login status = %d, body = %s", first.Code, first.Body.String())
+	}
+
+	if err := st.DisableAccount("ivan", "user"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := loginOnce(t, api, fv, id)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("disabled re-login status = %d, want 403; body = %s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "account_credential") {
+		t.Errorf("disabled re-login handed back a credential: %s", rr.Body.String())
+	}
+}
+
+// loginOnce drives one full device flow (start → approve → poll) and returns the
+// poll's response recorder.
+func loginOnce(t *testing.T, api http.Handler, fv *FakeVerifier, id Identity) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	api.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/login/device", nil))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("device status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var dev struct {
+		DeviceCode string `json:"device_code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &dev); err != nil {
+		t.Fatal(err)
+	}
+	fv.Approve(dev.DeviceCode, id)
+	rr = httptest.NewRecorder()
+	api.ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/login/poll",
+		strings.NewReader(`{"device_code":"`+dev.DeviceCode+`"}`)))
+	return rr
+}
+
 func TestLoginPollUnknownHandle(t *testing.T) {
 	api, _, _ := newTestAPI(t)
 	rr := httptest.NewRecorder()

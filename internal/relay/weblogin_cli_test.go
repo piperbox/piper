@@ -124,6 +124,34 @@ func TestCLILoginBrokeredFlowBouncesToInstall(t *testing.T) {
 	}
 }
 
+// The brokered browser login is the same door as the device flow, so the
+// kill-switch must answer the same way: a disabled account's callback is
+// refused instead of minting a credential for the CLI to collect (#81).
+func TestCLILoginDisabledAccountIsForbidden(t *testing.T) {
+	api, fv, st := newCLILoginAPI(t, "piper-app")
+	if _, err := st.UpsertAccount("42", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DisableAccount("alice", "user"); err != nil {
+		t.Fatal(err)
+	}
+
+	handle, cookie := startCLILogin(t, api)
+	fv.GrantCode("code-1", Identity{Subject: "42", Login: "alice"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/login/callback?code=code-1&state="+url.QueryEscape(handle), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("disabled callback = %d, want 403; body %s", rec.Code, rec.Body.String())
+	}
+
+	// The CLI's poll must stay pending, not collect a credential.
+	if rr := apiReq(t, api, "POST", "/v1/login/cli/poll", "", `{"handle":"`+handle+`"}`); rr.Code == http.StatusOK {
+		t.Fatalf("poll handed back a credential after a disabled callback: %s", rr.Body.String())
+	}
+}
+
 // startCLILogin runs start + confirm and returns the handle and binding cookie.
 func startCLILogin(t *testing.T, api http.Handler) (handle string, cookie *http.Cookie) {
 	t.Helper()

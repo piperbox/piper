@@ -172,6 +172,9 @@ func (a *api) loginCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "account error", http.StatusInternalServerError)
 		return
 	}
+	if denyDisabled(w, acc) {
+		return
+	}
 	// Login carries no installation linking: the authorize redirect never
 	// includes an installation_id, and installations link through the
 	// HMAC-signed "installation" webhook instead — an unsigned query
@@ -235,6 +238,9 @@ func (a *api) loginPoll(w http.ResponseWriter, r *http.Request) {
 	acc, err := a.st.UpsertAccount(id.Subject, id.Login)
 	if err != nil {
 		http.Error(w, "account error", http.StatusInternalServerError)
+		return
+	}
+	if denyDisabled(w, acc) {
 		return
 	}
 	cred, err := a.st.MintAccountCredential(acc.ID)
@@ -369,6 +375,21 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// denyDisabled refuses a login for an account the operator kill-switch has cut
+// off, writing the 403 itself and reporting whether it did. Every door that
+// mints an account credential goes through it. The kill-switch holds regardless
+// — a credential minted for a disabled account is inert, since
+// AuthenticateAccount rejects it — but handing a cut-off user a success and a
+// live-looking secret is a confusing way to say no, and mints a credential row
+// per attempt (#81).
+func denyDisabled(w http.ResponseWriter, acc Account) bool {
+	if !acc.Disabled {
+		return false
+	}
+	http.Error(w, "account disabled", http.StatusForbidden)
+	return true
 }
 
 // authAccount authenticates the request's bearer account credential, writing
