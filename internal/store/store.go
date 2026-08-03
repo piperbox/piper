@@ -754,8 +754,9 @@ func (s *Store) DeleteAppDomain(domain string) error {
 // caller (api) validates the key and gates on app existence; the table's FK is
 // documentation, not enforcement.
 func (s *Store) SetAppEnv(app, key, value string) error {
-	_, err := s.db.Exec(`INSERT INTO app_env(app, key, value) VALUES(?,?,?)
-		ON CONFLICT(app, key) DO UPDATE SET value=excluded.value`, app, key, value)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err := s.db.Exec(`INSERT INTO app_env(app, key, value, updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(app, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`, app, key, value, now)
 	return err
 }
 
@@ -781,4 +782,25 @@ func (s *Store) AppEnv(app string) (map[string]string, error) {
 		env[k] = v
 	}
 	return env, rows.Err()
+}
+
+// AppEnvWithTimestamps returns app's env vars and the time each var was last
+// updated; an empty (non-nil) map when it has none.
+func (s *Store) AppEnvWithTimestamps(app string) (map[string]string, map[string]time.Time, error) {
+	rows, err := s.db.Query(`SELECT key, value, updated_at FROM app_env WHERE app=?`, app)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	env := map[string]string{}
+	updated := map[string]time.Time{}
+	for rows.Next() {
+		var k, v, ts string
+		if err := rows.Scan(&k, &v, &ts); err != nil {
+			return nil, nil, err
+		}
+		env[k] = v
+		updated[k], _ = time.Parse(time.RFC3339Nano, ts)
+	}
+	return env, updated, rows.Err()
 }

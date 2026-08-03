@@ -944,6 +944,34 @@ func TestMutatingCallsOutliveTheShortPollTimeout(t *testing.T) {
 	}
 }
 
+// TestAppEnvReturnsUpdatedAt pins the new client method that exposes when
+// each env var was last changed. Against older code this test fails to compile
+// because AppEnvWithTimestamps does not exist.
+func TestAppEnvReturnsUpdatedAt(t *testing.T) {
+	updatedAt := time.Date(2026, 8, 3, 10, 0, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/apps/blog/env" {
+			t.Errorf("request = %s %s", r.Method, r.URL.Path)
+		}
+		writeJSONTest(w, map[string]any{
+			"env":        map[string]string{"A": "one"},
+			"updated_at": map[string]string{"A": updatedAt.Format(time.RFC3339Nano)},
+		})
+	}))
+	defer srv.Close()
+
+	env, updated, err := New(srv.URL, "").AppEnvWithTimestamps("blog")
+	if err != nil {
+		t.Fatalf("AppEnvWithTimestamps: %v", err)
+	}
+	if len(env) != 1 || env["A"] != "one" {
+		t.Errorf("env = %v", env)
+	}
+	if len(updated) != 1 || !updated["A"].Equal(updatedAt) {
+		t.Errorf("updated = %v, want %v", updated, updatedAt)
+	}
+}
+
 func TestAgentVersion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/version" {
