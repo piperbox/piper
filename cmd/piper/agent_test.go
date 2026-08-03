@@ -566,6 +566,9 @@ func TestAgentStatusOldAgentWithUnprovableDiskStaysNeutral(t *testing.T) {
 		"disk predates the version endpoint": "0.8.4",
 		"disk is a git describe build":       "v0.17.0-3-gabc123",
 		"disk version is unparseable":        "devel",
+		// A lenient parser coerces this to 20221209.0.0-… and ranks it above
+		// 0.8.6 — an arbitrary build label manufacturing its own evidence.
+		"disk reports an arbitrary label": "20221209-update-renovatejson-v4",
 	} {
 		t.Run(name, func(t *testing.T) {
 			onLinux(t)
@@ -933,6 +936,20 @@ func TestCompareVersions(t *testing.T) {
 		{"v0.17.0-dirty", "0.17.0", 0, false},
 		{"v0.17.0-1-gabcdef-dirty", "0.17.0", 0, false},
 		{"v0.17.0-rc.1-2-gabcdef", "0.17.0-rc.1", 0, false},
+		// Labels a lenient parser silently coerces into a version. Every one of
+		// these compares *above* 0.8.6 once coerced, which is exactly how a
+		// meaningless build label turns into evidence for "restart to apply".
+		{"1", "0.8.6", 0, false},
+		{"1.2", "0.8.6", 0, false},
+		{"v1.2", "0.8.6", 0, false},
+		{"01.2.3", "0.8.6", 0, false},
+		{"20221209-update-renovatejson-v4", "0.8.6", 0, false},
+		{"abc1234", "0.8.6", 0, false}, // a bare git hash
+		// Piper tags releases with a leading v, so that must stay comparable.
+		{"v0.17.0", "0.17.0", 0, true},
+		{"v0.17.0-rc.2", "v0.17.0-rc.1", 1, true},
+		{"v0.8.6", "0.8.6", 0, true},
+		{"0.17.0+build.1", "0.17.0", 0, true}, // build metadata is not precedence
 	} {
 		got, ok := compareVersions(c.a, c.b)
 		if ok != c.wantOK || got != c.want {

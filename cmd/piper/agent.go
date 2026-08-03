@@ -150,17 +150,30 @@ var developmentVersion = regexp.MustCompile(`-\d+-g[0-9a-f]+$|-dirty$`)
 // branches at equal distance differ only by hash, and a dirty tree has no
 // defined relationship to its base tag. Commit count and hash are not a total
 // order, so refuse instead of inventing one.
+//
+// Parsing is strict for the same reason. semver.NewVersion coerces rather than
+// rejects — `1` becomes 1.0.0, `01.2.3` becomes 1.2.3, a label like
+// `20221209-update-renovatejson-v4` becomes 20221209.0.0-… — and every one of
+// those then sorts above a real release, turning a meaningless build string
+// into the "evidence" that justifies telling someone to restart.
 func compareVersions(a, b string) (int, bool) {
 	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
 	if developmentVersion.MatchString(a) || developmentVersion.MatchString(b) {
 		return 0, false
 	}
-	av, aerr := semver.NewVersion(a)
-	bv, berr := semver.NewVersion(b)
+	av, aerr := strictVersion(a)
+	bv, berr := strictVersion(b)
 	if aerr != nil || berr != nil {
 		return 0, false
 	}
 	return av.Compare(bv), true
+}
+
+// strictVersion parses a full MAJOR.MINOR.PATCH and nothing looser, allowing
+// only the single leading `v` that Piper's own release tags carry (`v0.17.0`)
+// and that StrictNewVersion rejects on its own.
+func strictVersion(s string) (*semver.Version, error) {
+	return semver.StrictNewVersion(strings.TrimPrefix(s, "v"))
 }
 
 // dialableAddr turns a listen address into one a client can connect to: a
