@@ -206,11 +206,46 @@ type Installation struct {
 }
 
 // InstallationsForAccount lists every installation linked to the account,
-// newest first. Empty (not an error) when the account has none.
+// newest first. Empty (not an error) when the account has none. This is
+// ownership, not visibility — see InstallationsVisibleTo for what a user may
+// actually see and use.
 func (s *Store) InstallationsForAccount(accountID string) ([]Installation, error) {
-	rows, err := s.db.Query(
+	return s.installations(
 		`SELECT installation_id, target_type, target_login FROM github_installations
 		  WHERE account_id=? ORDER BY created_at DESC, rowid DESC`, accountID)
+}
+
+// InstallationsVisibleTo lists the installations accountID may use: its own,
+// plus those owned by any Piper org it belongs to. An org-target installation
+// belongs to the org account — that is what keeps one member's identity from
+// owning an org-wide install — so ownership alone would hide it from every
+// human who could act on it. Membership is the same trust boundary
+// AgentsVisibleTo already draws for driving an org's boxes.
+func (s *Store) InstallationsVisibleTo(accountID string) ([]Installation, error) {
+	return s.installations(
+		`SELECT installation_id, target_type, target_login FROM github_installations
+		  WHERE account_id = ?
+		     OR account_id IN (SELECT org_id FROM org_members WHERE account_id = ?)
+		  ORDER BY created_at DESC, rowid DESC`, accountID, accountID)
+}
+
+// InstallationVisibleTo reports whether accountID may use installationID. It is
+// the single-row form of InstallationsVisibleTo, deliberately sharing its
+// predicate so the listing and the per-installation authorization can never
+// disagree about what a caller is allowed to touch.
+func (s *Store) InstallationVisibleTo(installationID, accountID string) (bool, error) {
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM github_installations
+		  WHERE installation_id = ?
+		    AND (account_id = ?
+		         OR account_id IN (SELECT org_id FROM org_members WHERE account_id = ?))`,
+		installationID, accountID, accountID).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) installations(query string, args ...any) ([]Installation, error) {
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -328,13 +328,17 @@ func (a *api) githubRepos(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "installation_id required", http.StatusBadRequest)
 		return
 	}
-	owner, err := a.st.AccountForInstallation(instID)
-	if errors.Is(err, ErrNoInstallation) || (err == nil && owner != acc.ID) {
-		http.Error(w, "github app not installed for this account", http.StatusNotFound)
-		return
-	}
+	// Visibility, not bare ownership: an org-target installation is owned by the
+	// org account, so every member of that org may read its repos — the same
+	// trust boundary that already lets them drive the org's boxes. Unknown and
+	// forbidden stay indistinguishable (404), so this leaks no existence.
+	visible, err := a.st.InstallationVisibleTo(instID, acc.ID)
 	if err != nil {
 		http.Error(w, "lookup error", http.StatusInternalServerError)
+		return
+	}
+	if !visible {
+		http.Error(w, "github app not installed for this account", http.StatusNotFound)
 		return
 	}
 	repos, err := a.ghApp.Repos(r.Context(), instID)
@@ -371,7 +375,7 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.ghApp != nil {
 		resp["install_url"] = a.ghApp.InstallURL()
-		insts, err := a.st.InstallationsForAccount(acc.ID)
+		insts, err := a.st.InstallationsVisibleTo(acc.ID)
 		if err != nil {
 			http.Error(w, "lookup error", http.StatusInternalServerError)
 			return
@@ -387,7 +391,7 @@ func (a *api) githubStatus(w http.ResponseWriter, r *http.Request) {
 				log.Printf("relay: reconcile installations for %s: %v", acc.Username, err)
 			} else if n > 0 {
 				log.Printf("relay: reconciled %d installation(s) for %s from the github api", n, acc.Username)
-				if insts, err = a.st.InstallationsForAccount(acc.ID); err != nil {
+				if insts, err = a.st.InstallationsVisibleTo(acc.ID); err != nil {
 					http.Error(w, "lookup error", http.StatusInternalServerError)
 					return
 				}

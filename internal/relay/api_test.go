@@ -758,39 +758,116 @@ func TestGitHubStatusReconcileSkipsUnlinkedOrgInstallation(t *testing.T) {
 	}
 }
 
+// ghOrgWithMember builds a Piper org that has declared a GitHub login, owned by
+// a fresh account, and returns the member's credential plus the org id.
+func ghOrgWithMember(t *testing.T, st *Store, githubID, login, orgName, orgGitHub string) (cred, orgID string) {
+	t.Helper()
+	acc, err := st.UpsertAccount(githubID, login)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cred, err = st.MintAccountCredential(acc.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := st.CreateOrg(acc.ID, orgName) // creator ⇒ owner ⇒ member
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetOrgGitHub(org.ID, orgGitHub); err != nil {
+		t.Fatal(err)
+	}
+	return cred, org.ID
+}
+
 // An org-target installation reconciles to the Piper org the asking account
-// belongs to, through the same membership check the webhook path uses. It
-// links to the org account, not the member — that is the existing tenancy
-// model — so it repairs token minting and the org's boxes rather than the
-// member's own status.
+// belongs to — never to the asking user, which would hand one member's
+// identity an org-wide installation. It must nonetheless be visible in the
+// very response that reconciled it: linking it somewhere the caller cannot see
+// leaves #470's symptom exactly as it was, with login waiting out its ten
+// minutes and `piper github repos` empty.
 func TestGitHubStatusReconcilesOrgInstallationForAMember(t *testing.T) {
 	st := openTestStore(t)
-	alice, err := st.UpsertAccount("1001", "alice") // owner ⇒ member
-	if err != nil {
-		t.Fatal(err)
-	}
-	cred, err := st.MintAccountCredential(alice.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	org, err := st.CreateOrg(alice.ID, "acme")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := st.SetOrgGitHub(org.ID, "Acme-Inc"); err != nil {
-		t.Fatal(err)
-	}
+	cred, orgID := ghOrgWithMember(t, st, "1001", "alice", "acme", "Acme-Inc")
 	api, _ := reconcileAPI(t, st, `[{"id":77,"account":{"id":3003,"login":"acme-inc","type":"Organization"}}]`)
 
-	if rec := getStatus(t, api, cred); rec.Code != http.StatusOK {
+	rec := getStatus(t, api, cred)
+	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, body %s", rec.Code, rec.Body.String())
 	}
+	var out ghStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Installations) != 1 || out.Installations[0].ID != "77" {
+		t.Fatalf("installations = %+v, want the reconciled org installation", out.Installations)
+	}
+	if out.Installations[0].TargetType != "org" || out.Installations[0].TargetLogin != "acme-inc" {
+		t.Errorf("target = %+v, want org/acme-inc", out.Installations[0])
+	}
+
+	// Ownership stays with the org, not the member who triggered the reconcile.
 	owner, err := st.AccountForInstallation("77")
 	if err != nil {
 		t.Fatalf("org installation was not reconciled: %v", err)
 	}
-	if owner != org.ID {
-		t.Errorf("installation linked to %q, want the org account %q", owner, org.ID)
+	if owner != orgID {
+		t.Errorf("installation linked to %q, want the org account %q", owner, orgID)
+	}
+}
+
+// A member may list the org installation's repositories: same trust boundary
+// as AgentsVisibleTo, which already lets a member drive the org's boxes.
+func TestGitHubReposAllowsAnOrgMember(t *testing.T) {
+	gh := ghAPIStub(t)
+	defer gh.Close()
+	st := openTestStore(t)
+	cred, orgID := ghOrgWithMember(t, st, "1001", "alice", "acme", "Acme-Inc")
+	if err := st.LinkInstallationForAccount("55", orgID, "org", "acme-inc"); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := getRepos(t, reposAPI(t, st, gh), cred, "55")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a member; body = %s", rec.Code, rec.Body)
+	}
+}
+
+// Membership is the whole authorization: a user who is not in the Piper org
+// gets the same 404 as any other foreign installation — no existence leak.
+func TestGitHubReposRejectsANonMemberOfTheOrg(t *testing.T) {
+	gh := ghAPIStub(t)
+	defer gh.Close()
+	st := openTestStore(t)
+	_, orgID := ghOrgWithMember(t, st, "1001", "alice", "acme", "Acme-Inc")
+	if err := st.LinkInstallationForAccount("77", orgID, "org", "acme-inc"); err != nil {
+		t.Fatal(err)
+	}
+	// mallory has an account, but no membership in acme.
+	mallory, err := st.UpsertAccount("2002", "mallory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outsider, err := st.MintAccountCredential(mallory.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec := getRepos(t, reposAPI(t, st, gh), outsider, "77"); rec.Code != http.StatusNotFound {
+		t.Fatalf("repos status = %d, want 404 for a non-member", rec.Code)
+	}
+	// ...and it must not surface in their status listing either.
+	sapi, _ := reconcileAPI(t, st, `[]`)
+	rec := getStatus(t, sapi, outsider)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d", rec.Code)
+	}
+	var out ghStatus
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Installations) != 0 {
+		t.Fatalf("non-member sees the org installation: %+v", out.Installations)
 	}
 }
 
