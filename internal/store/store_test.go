@@ -1093,6 +1093,72 @@ func TestAppEnvRoundTrip(t *testing.T) {
 	}
 }
 
+// readEnvTimestamps reads the updated_at timestamps directly from app_env so
+// the test compiles against the old store API and fails at runtime when the
+// column is missing.
+func readEnvTimestamps(t *testing.T, s *Store, app string) map[string]time.Time {
+	t.Helper()
+	rows, err := s.db.Query(`SELECT key, updated_at FROM app_env WHERE app=?`, app)
+	if err != nil {
+		t.Fatalf("query app_env: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var k, ts string
+		if err := rows.Scan(&k, &ts); err != nil {
+			t.Fatalf("scan app_env: %v", err)
+		}
+		out[k], _ = time.Parse(time.RFC3339Nano, ts)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	return out
+}
+
+// TestAppEnvUpdatedAtMovesOnUpsert proves that SetAppEnv stamps updated_at on
+// both the insert and the DO UPDATE arms, and leaves an untouched key's
+// timestamp alone.
+func TestAppEnvUpdatedAtMovesOnUpsert(t *testing.T) {
+	s := openTemp(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+
+	if err := s.SetAppEnv("blog", "TOUCHED", "first"); err != nil {
+		t.Fatalf("SetAppEnv: %v", err)
+	}
+	firstUpdated := readEnvTimestamps(t, s, "blog")
+	first := firstUpdated["TOUCHED"]
+	if first.IsZero() {
+		t.Fatalf("updated_at not set on insert")
+	}
+
+	if err := s.SetAppEnv("blog", "UNTOUCHED", "stable"); err != nil {
+		t.Fatalf("SetAppEnv untouched: %v", err)
+	}
+	beforeUpdate := readEnvTimestamps(t, s, "blog")
+	untouchedBefore := beforeUpdate["UNTOUCHED"]
+	if untouchedBefore.IsZero() {
+		t.Fatalf("UNTOUCHED updated_at not set")
+	}
+
+	// Sleep long enough that the touched var's updated_at must move forward.
+	time.Sleep(10 * time.Millisecond)
+	if err := s.SetAppEnv("blog", "TOUCHED", "second"); err != nil {
+		t.Fatalf("SetAppEnv update: %v", err)
+	}
+
+	updated := readEnvTimestamps(t, s, "blog")
+	if !updated["TOUCHED"].After(first) {
+		t.Errorf("TOUCHED updated_at did not move forward: %v -> %v", first, updated["TOUCHED"])
+	}
+	if !updated["UNTOUCHED"].Equal(untouchedBefore) {
+		t.Errorf("UNTOUCHED updated_at moved: %v -> %v", untouchedBefore, updated["UNTOUCHED"])
+	}
+}
+
 func TestDeleteAppRemovesEnv(t *testing.T) {
 	s := openTemp(t)
 	if _, err := s.CreateApp("blog", 8080); err != nil {

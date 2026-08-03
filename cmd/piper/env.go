@@ -6,7 +6,15 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
+
+func formatAge(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	return d.Round(time.Second).String()
+}
 
 const envUsage = "usage: piper env <app> <set KEY=VALUE [KEY2=VALUE2 ...] | ls [--show] | rm KEY>"
 
@@ -61,7 +69,7 @@ func cmdEnv(remote string, args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "usage: piper env <app> ls [--show]")
 			return 2
 		}
-		env, err := c.AppEnv(app)
+		env, updated, err := c.AppEnvWithTimestamps(app)
 		if err != nil {
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
@@ -76,7 +84,8 @@ func cmdEnv(remote string, args []string, stdout, stderr io.Writer) int {
 			if *show {
 				v = env[k]
 			}
-			fmt.Fprintf(stdout, "%s=%s\n", k, v)
+			age := formatAge(time.Since(updated[k]))
+			fmt.Fprintf(stdout, "%s=%s  (%s)\n", k, v, age)
 		}
 		return 0
 	case "rm":

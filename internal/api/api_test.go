@@ -1559,6 +1559,45 @@ func TestAppEnvCRUD(t *testing.T) {
 	}
 }
 
+// TestAppEnvEndpointCarriesUpdatedAtMap proves the wire shape is purely
+// additive: the existing "env" map is unchanged and a parallel "updated_at"
+// map appears beside it.
+func TestAppEnvEndpointCarriesUpdatedAtMap(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatalf("CreateApp: %v", err)
+	}
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/blog/env",
+		strings.NewReader(`{"key":"A","value":"one"}`)))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("post code = %d, body %s", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/blog/env", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get code = %d, body %s", rec.Code, rec.Body)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	envMap, ok := raw["env"].(map[string]any)
+	if !ok || len(envMap) != 1 || envMap["A"] != "one" {
+		t.Errorf("env map = %v, want map[A:one]", raw["env"])
+	}
+	updated, ok := raw["updated_at"].(map[string]any)
+	if !ok {
+		t.Fatalf("updated_at missing or not an object: %v", raw["updated_at"])
+	}
+	if ts, ok := updated["A"].(string); !ok || ts == "" {
+		t.Errorf("updated_at[A] = %v, want non-empty timestamp string", updated["A"])
+	}
+}
+
 func TestAppEnvRejects(t *testing.T) {
 	s := newTestStore(t)
 	if _, err := s.CreateApp("blog", 8080); err != nil {
