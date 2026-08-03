@@ -413,6 +413,35 @@ func (c *Client) AppEnv(app string) (map[string]string, error) {
 	return out.Env, nil
 }
 
+// AppEnvWithTimestamps returns app's saved environment variables and the time
+// each var was last updated.
+func (c *Client) AppEnvWithTimestamps(app string) (map[string]string, map[string]time.Time, error) {
+	resp, err := c.do(http.MethodGet, "/v1/apps/"+app+"/env", "", nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, responseError("env", resp)
+	}
+	var out struct {
+		Env       map[string]string `json:"env"`
+		UpdatedAt map[string]string `json:"updated_at"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, nil, err
+	}
+	updated := make(map[string]time.Time, len(out.UpdatedAt))
+	for k, v := range out.UpdatedAt {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse updated_at for %s: %w", k, err)
+		}
+		updated[k] = t
+	}
+	return out.Env, updated, nil
+}
+
 // SetAppEnv saves one env var; it applies on the app's next deploy or restart.
 func (c *Client) SetAppEnv(app, key, value string) error {
 	body, err := json.Marshal(map[string]string{"key": key, "value": value})

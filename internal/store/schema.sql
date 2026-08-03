@@ -54,8 +54,9 @@ CREATE TABLE IF NOT EXISTS app_domains (
     updated_at     TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS app_env (
-    app   TEXT NOT NULL REFERENCES apps(name),
-    key   TEXT NOT NULL,
-    value TEXT NOT NULL,
+    app        TEXT NOT NULL REFERENCES apps(name),
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     PRIMARY KEY (app, key)
 );
