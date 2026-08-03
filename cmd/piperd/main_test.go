@@ -934,6 +934,23 @@ func TestDomainOptionsHTTPSListenFollowsConfig(t *testing.T) {
 	}
 }
 
+// The DNS-record target is not the tunnel dial address: cfg.RelayAddr says
+// where this box dials, which on a relay-colocated box is loopback or a LAN
+// address. Handing that to the domain manager instructed `CNAME 127.0.0.1` and
+// wedged the DNS gate, so the cert never issued (#434). The base domain is what
+// actually points at the relay, so that is the target — with the dial host kept
+// as the fallback for a box that has no base domain.
+func TestDomainOptionsDNSTargetFollowsBaseDomain(t *testing.T) {
+	cfg := config.Config{BaseDomain: "ab12-alice.public.getpiper.co", RelayAddr: "127.0.0.1:7000"}
+	opts := newDomainOptions(cfg, nil, nil, nil, "127.0.0.1")
+	if opts.BaseDomain != cfg.BaseDomain {
+		t.Errorf("BaseDomain = %q, want cfg.BaseDomain %q", opts.BaseDomain, cfg.BaseDomain)
+	}
+	if opts.RelayHost != "127.0.0.1" {
+		t.Errorf("RelayHost = %q, want the dial host 127.0.0.1 kept as fallback", opts.RelayHost)
+	}
+}
+
 // The relay is the authority on what each app is called, and #405 made every
 // hostname change on upgrade (the hash moved onto the agent). The box persists
 // apps.hostname only at deploy time, so unless the connect-time sync writes the
