@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,6 +217,153 @@ func TestIngressLinksAndUnlinksInstallation(t *testing.T) {
 	}
 	if _, err := st.AccountForInstallation("55"); err == nil {
 		t.Fatal("installation survived deletion")
+	}
+}
+
+// TestIngressInstallationEventLinkingAndLogging covers #471: the linking
+// triggers the relay honours, and the two silent paths a failing install-link
+// used to take. installation_repositories is the event GitHub fires when a
+// user re-saves the repository selection of an installation that already
+// exists — the only linking action its UI offers at that point — so it must
+// link like installation.created. Anything the handler chooses not to act on,
+// and any link that fails, has to say so in the log: a relay that drops these
+// in silence is what made #471 expensive to diagnose.
+func TestIngressInstallationEventLinkingAndLogging(t *testing.T) {
+	const alice = `"installation":{"id":55,"account":{"type":"User","login":"alice"}},` +
+		`"sender":{"id":1001,"login":"alice"}}`
+
+	for _, tc := range []struct {
+		name    string
+		account bool // create the piper account for github id 1001
+		// prelink links installation 55 to github id 1001 before the event,
+		// and also creates the sender's account (github id 2002) so a
+		// sender-resolving relink would actually succeed — unless
+		// unknownSender skips that account, leaving the sender with no
+		// piper account at all.
+		prelink       bool
+		unknownSender bool
+		event         string
+		body          string
+		wantLinked    bool
+		wantLogged    []string
+		notLogged     []string
+	}{
+		{
+			name:       "repositories added links",
+			account:    true,
+			event:      "installation_repositories",
+			body:       `{"action":"added",` + alice,
+			wantLinked: true,
+		},
+		{
+			name:    "repositories event preserves the current owner",
+			account: true,
+			prelink: true,
+			event:   "installation_repositories",
+			body: `{"action":"added","installation":{"id":55,` +
+				`"account":{"type":"User","login":"alice"}},` +
+				`"sender":{"id":2002,"login":"mallory"}}`,
+			wantLinked: true,
+			wantLogged: []string{"already-linked", "55"},
+		},
+		{
+			// #489: an already-linked installation must log the
+			// preserving-owner diagnostic even when the admin re-saving the
+			// repository selection has no piper account — no recovery link
+			// was needed, so there is nothing to fail.
+			name:          "repositories event preserves the owner for an unknown sender",
+			account:       true,
+			prelink:       true,
+			unknownSender: true,
+			event:         "installation_repositories",
+			body: `{"action":"added","installation":{"id":55,` +
+				`"account":{"type":"User","login":"alice"}},` +
+				`"sender":{"id":2002,"login":"mallory"}}`,
+			wantLinked: true,
+			wantLogged: []string{"already-linked", "55"},
+			notLogged:  []string{"no piper account"},
+		},
+		{
+			name:       "repositories removed links",
+			account:    true,
+			event:      "installation_repositories",
+			body:       `{"action":"removed",` + alice,
+			wantLinked: true,
+		},
+		{
+			name:       "unhandled action is logged",
+			account:    true,
+			event:      "installation",
+			body:       `{"action":"edited",` + alice,
+			wantLinked: false,
+			wantLogged: []string{"installation", "edited", "55"},
+		},
+		{
+			name:       "failed link names the installer",
+			account:    false, // nobody has run piper login as alice
+			event:      "installation",
+			body:       `{"action":"created",` + alice,
+			wantLinked: false,
+			wantLogged: []string{"55", "alice", "1001"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := openTestStore(t)
+			if tc.account {
+				if _, err := st.UpsertAccount("1001", "alice"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			prelinked := ""
+			if tc.prelink {
+				if !tc.unknownSender {
+					if _, err := st.UpsertAccount("2002", "mallory"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
+					t.Fatal(err)
+				}
+				owner, err := st.AccountForInstallation("55")
+				if err != nil {
+					t.Fatal(err)
+				}
+				prelinked = owner
+			}
+			h := newTestIngress(t, st, &capturingDeliverer{done: make(chan struct{}, 8)})
+
+			var logged syncLogBuffer
+			prevOut, prevFlags := log.Writer(), log.Flags()
+			log.SetOutput(&logged)
+			log.SetFlags(0)
+			t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+			if rec := postEvent(t, h, tc.event, signed("s3cret", []byte(tc.body)), tc.body); rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202", rec.Code)
+			}
+
+			acct, err := st.AccountForInstallation("55")
+			if tc.wantLinked && err != nil {
+				t.Fatalf("%s/%s did not link the installation: %v", tc.event, tc.body, err)
+			}
+			if !tc.wantLinked && err == nil {
+				t.Fatalf("%s/%s linked the installation, want no link", tc.event, tc.body)
+			}
+			if tc.prelink && acct != prelinked {
+				t.Fatalf("%s/%s reassigned the installation owner: was %q, now %q",
+					tc.event, tc.body, prelinked, acct)
+			}
+			for _, want := range tc.wantLogged {
+				if !strings.Contains(logged.String(), want) {
+					t.Fatalf("log = %q, want it to mention %q", logged.String(), want)
+				}
+			}
+			for _, unwanted := range tc.notLogged {
+				if strings.Contains(logged.String(), unwanted) {
+					t.Fatalf("log = %q, want it not to mention %q", logged.String(), unwanted)
+				}
+			}
+		})
 	}
 }
 
