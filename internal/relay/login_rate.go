@@ -83,9 +83,12 @@ func rateLimitKey(ip string) string {
 	return netip.PrefixFrom(addr, 64).Masked().String()
 }
 
-// clientIP derives the rate-limit key from the request's direct peer. The
-// relay terminates TLS itself with no trusted proxy in front, and nothing in
-// this codebase honors X-Forwarded-For, so RemoteAddr is the client IP.
+// clientIP derives the rate-limit key from the request's RemoteAddr. Nothing
+// in this codebase honors X-Forwarded-For, so RemoteAddr is the client IP —
+// the direct peer by default, or, with PIPER_RELAY_PROXY_PROTOCOL=1 (#485),
+// the source address the trusted L4 proxy's PROXY v2 header claimed for the
+// connection (Serve wraps the public listeners, and net/http captures the
+// wrapped conn's RemoteAddr into the request).
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

@@ -50,6 +50,7 @@ Goal: public HTTPS from behind NAT/CGNAT — `piperd` dials an outbound yamux tu
 - ✅ `piper-relay` infra-only ops endpoints — Prometheus `/metrics` + ring-buffered `/logs`, env-toggled, bind-address isolated from the SNI dispatcher — [#396](https://github.com/piperbox/piper/issues/396)
 - ✅ `piper-relay` container image — multi-arch `ghcr.io/piperbox/piper-relay` published per release via goreleaser `dockers_v2` — [#483](https://github.com/piperbox/piper/issues/483)
 - ✅ `piper-relay` wildcard cert hot reload — a renewed pair on disk is served from the next handshake, no restart and no dropped tunnels — [#484](https://github.com/piperbox/piper/issues/484)
+- ✅ `piper-relay` PROXY protocol v2 — opt-in `PIPER_RELAY_PROXY_PROTOCOL=1` wraps the public :443/:80/:7000 listeners (v2-only, fail-closed) so rate limiting and logs key on the real client IP behind a trusted L4 proxy — [#485](https://github.com/piperbox/piper/issues/485)
 - ✅ `piperd` — outbound tunnel client + cert wiring (additive; LAN-only unchanged) — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ e2e — loopback relay path (tunnel + SNI + on-box TLS) — [#10](https://github.com/piperbox/piper/issues/10)
 - ✅ **Public-relay onboarding slice (Plans 1–3)** — relay accounts + device-flow, `piper login`/`connect`, and relay-terminated shared domain; `login → connect → deploy → curl` e2e green — [#90](https://github.com/piperbox/piper/issues/90) (child of epic [#49](https://github.com/piperbox/piper/issues/49))
