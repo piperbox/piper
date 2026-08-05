@@ -69,7 +69,12 @@ nfpms:
     # ConventionalFileName is what maps GOARM=7 → armhf and drops the _linux_
     # infix; the default template would name this piperd_<ver>_linux_armv7.deb
     # and silently break the apt pipeline's filename parsing.
-    file_name_template: "{{ .ConventionalFileName }}"
+    # The `replace` keeps GitHub asset names tilde-free (#475): GitHub rewrites
+    # `~` to `.` in uploaded asset names, so a prerelease deb built as
+    # piperd_0.16.0~rc.1_arm64.deb would publish under a name checksums.txt
+    # doesn't list. The deb's internal Version keeps the Debian-correct `~`;
+    # stable versions contain no `~`, so their names are unchanged.
+    file_name_template: '{{ replace .ConventionalFileName "~" "." }}'
     formats: [deb]
     bindir: /usr/bin
     vendor: piperbox
@@ -92,7 +97,9 @@ nfpms:
   - id: piper
     ids: [piper]
     package_name: piper
-    file_name_template: "{{ .ConventionalFileName }}"
+    # See the piperd entry above for why ConventionalFileName and the tilde
+    # replacement are both required (#448, #475).
+    file_name_template: '{{ replace .ConventionalFileName "~" "." }}'
     formats: [deb]
     bindir: /usr/bin
     vendor: piperbox
