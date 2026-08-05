@@ -427,6 +427,7 @@ func TestServeWrapsPublicListenersWhenProxyProtocolEnabled(t *testing.T) {
 		}
 	})
 }
+
 func captureRelayLog(t *testing.T) *syncLogBuffer {
 	t.Helper()
 	var logged syncLogBuffer
