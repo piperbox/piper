@@ -77,6 +77,14 @@ PIPER_RELAY_GITHUB_CLIENT_SECRET=...
 # Shared-domain TLS termination — omit for passthrough-only
 PIPER_RELAY_TLS_CERT=/var/lib/piper-relay/wildcard.crt
 PIPER_RELAY_TLS_KEY=/var/lib/piper-relay/wildcard.key
+
+# PROXY protocol v2 on :443/:80/:7000 (#485) — set ONLY when a trusted L4 load
+# balancer / TCP reverse proxy is the sole path to those ports. With it on,
+# every connection must open with a PROXY v2 header (missing or malformed ⇒
+# the connection is dropped), and rate limiting + logs see the real client IP.
+# Left off, or on with the ports reachable directly, anyone can spoof their
+# source IP.
+#PIPER_RELAY_PROXY_PROTOCOL=1
 ```
 
 The wildcard pair is re-read when it changes on disk, so a renewal — a certbot
