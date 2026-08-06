@@ -196,6 +196,16 @@ func main() {
 	apiAddr := env("PIPER_RELAY_API_ADDR", ":8080")
 	tunnelPublic := env("PIPER_RELAY_TUNNEL_PUBLIC", "")
 
+	// Opt-in PROXY protocol v2 on the public listeners (#485), for a relay
+	// behind an L4 load balancer / TCP reverse proxy. Off by default and must
+	// stay off unless such a proxy is the only path to the ports: a listener
+	// that trusts PROXY headers from arbitrary peers lets anyone spoof their
+	// source IP.
+	proxyProto := os.Getenv("PIPER_RELAY_PROXY_PROTOCOL") == "1"
+	if proxyProto {
+		log.Print("piper-relay: PIPER_RELAY_PROXY_PROTOCOL=1 — :443/:80/:7000 require a PROXY v2 header (trusted L4 proxy in front)")
+	}
+
 	// Self-service login needs a GitHub OAuth app; without one the relay runs
 	// operator-enroll-only (existing behaviour) and login completes only via
 	// test approval.
@@ -318,5 +328,5 @@ func main() {
 	}
 
 	log.Printf("piper-relay: TLS %s, HTTP %s, tunnel %s", tlsAddr, httpAddr, tunnelAddr)
-	log.Fatal(relay.Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, ghApp, delivery, metrics))
+	log.Fatal(relay.Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, ghApp, delivery, metrics, proxyProto))
 }
