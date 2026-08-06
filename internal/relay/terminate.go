@@ -264,6 +264,13 @@ func (p *prefixConn) Read(b []byte) (int, error) {
 func terminate(conn net.Conn, buffered []byte, sess *tunnel.Session, tlsCfg *tls.Config, m *Metrics) {
 	tlsConn := tls.Server(&prefixConn{Conn: conn, prefix: buffered}, tlsCfg)
 	if err := tlsConn.Handshake(); err != nil {
+		// Logged, not just dropped: an expired/mismatched cert, a bad SNI, or
+		// a truncated ClientHello is otherwise invisible server-side — the
+		// ALPN solver's #242 rationale. Rate-limited (see
+		// terminateHandshakeLogInterval): this path fronts the public
+		// listener, so a scanner could otherwise make it a line per
+		// connection (#496). The happy path stays quiet.
+		logTerminateHandshakeFailure(conn.RemoteAddr(), err)
 		return
 	}
 	stream, err := sess.OpenKind(tunnel.KindHTTP)
