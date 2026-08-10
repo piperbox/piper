@@ -209,10 +209,15 @@ type Installation struct {
 // newest first. Empty (not an error) when the account has none. This is
 // ownership, not visibility — see InstallationsVisibleTo for what a user may
 // actually see and use.
+//
+// Ordered by rowid, not created_at: that column is written with
+// time.RFC3339Nano, which trims trailing fractional zeros, so ".1Z" sorts
+// after the later ".15Z" as text. Rowid is insertion order, and the upsert
+// above leaves created_at untouched on conflict, so it stays creation order.
 func (s *Store) InstallationsForAccount(accountID string) ([]Installation, error) {
 	return s.installations(
 		`SELECT installation_id, target_type, target_login FROM github_installations
-		  WHERE account_id=? ORDER BY created_at DESC, rowid DESC`, accountID)
+		  WHERE account_id=? ORDER BY rowid DESC`, accountID)
 }
 
 // InstallationsVisibleTo lists the installations accountID may use: its own,

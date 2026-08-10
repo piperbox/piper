@@ -501,7 +501,7 @@ func (s *Store) AuthenticateToken(tok string) (Token, error) {
 // ListTokens returns all tokens (metadata only; never the plaintext or hash).
 func (s *Store) ListTokens() ([]Token, error) {
 	rows, err := s.db.Query(
-		`SELECT id, label, scope, created_at, revoked_at FROM tokens ORDER BY created_at`)
+		`SELECT id, label, scope, created_at, revoked_at FROM tokens ORDER BY rowid`)
 	if err != nil {
 		return nil, err
 	}
