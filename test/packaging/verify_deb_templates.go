@@ -42,18 +42,26 @@ func main() {
 		fail("parse config: %v", err)
 	}
 
-	for _, packageName := range []string{"piperd", "piper"} {
-		templateText := ""
-		for _, nfpm := range parsed.NFPMs {
-			if nfpm.ID == packageName {
-				templateText = nfpm.FileNameTemplate
-				break
-			}
+	templates := make(map[string]string, 2)
+	counts := make(map[string]int, 2)
+	for _, nfpm := range parsed.NFPMs {
+		if nfpm.ID != "piperd" && nfpm.ID != "piper" {
+			continue
 		}
-		if templateText == "" {
-			fail("nfpms %s template is missing", packageName)
+		counts[nfpm.ID]++
+		if counts[nfpm.ID] == 1 {
+			templates[nfpm.ID] = nfpm.FileNameTemplate
 		}
+	}
 
+	for _, packageName := range []string{"piperd", "piper"} {
+		if counts[packageName] != 1 {
+			fail("nfpms %s has %d entries; want exactly one", packageName, counts[packageName])
+		}
+	}
+
+	for _, packageName := range []string{"piperd", "piper"} {
+		templateText := templates[packageName]
 		got, err := render(templateText, packageName+"_"+conventionalFileName+"_amd64.deb")
 		if err != nil {
 			fail("render nfpms %s template: %v", packageName, err)
