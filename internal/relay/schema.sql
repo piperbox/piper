@@ -1,3 +1,8 @@
+-- Most created_at values use time.RFC3339Nano; trimmed fractional zeros make
+-- lexical ordering unsafe, so creation-order queries must use rowid. The
+-- pending_events exception is written with fixed-width pendingTimeLayout, so
+-- its documented text comparisons remain chronological.
+
 CREATE TABLE IF NOT EXISTS agents (
     name           TEXT PRIMARY KEY,
     token_hash     TEXT NOT NULL UNIQUE,
