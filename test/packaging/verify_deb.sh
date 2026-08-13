@@ -62,8 +62,8 @@ if dpkg-deb -c "$cli" | grep -q 'systemd'; then fail "piper (CLI) deb must not s
 for deb in "$dist"/piperd_*_amd64.deb "$dist"/piper_*_amd64.deb; do
 	version="$(dpkg-deb -f "$deb" Version)"
 	case "$version" in
-		*~*) ;;
-		*) fail "Debian Version lost prerelease separator in ${deb##*/}: $version" ;;
+		*'~'*|*'+'*) ;;
+		*) fail "Debian Version lost prerelease/build separator in ${deb##*/}: $version" ;;
 	esac
 done
 
