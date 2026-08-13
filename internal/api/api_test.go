@@ -1156,14 +1156,22 @@ func TestPutDomainInvalidServeIs400(t *testing.T) {
 	}
 }
 
-func TestDomainEndpointsWithoutRelay(t *testing.T) {
+// A box with no domain manager still answers every /v1/domain call, with a 409
+// that has to say what would give it one. "Connect to a relay" stopped being
+// the whole answer when a never-enrolled box could serve its own domain
+// directly (#507), and a reason that omits the route the operator has is worse
+// than no reason.
+func TestDomainEndpointsWithoutADomainManager(t *testing.T) {
 	s := newTestStore(t)
 	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})
 	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(m, "/v1/domain", strings.NewReader(`{}`)))
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("%s without relay = %d, want 409", m, rec.Code)
+			t.Fatalf("%s without a domain manager = %d, want 409", m, rec.Code)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, "relay") || !strings.Contains(body, "direct") {
+			t.Errorf("%s reason = %q, want both routes named", m, strings.TrimSpace(body))
 		}
 	}
 }
@@ -1652,6 +1660,56 @@ func TestAppEnvRejects(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
 		if rec.Code != tc.want {
 			t.Errorf("%s: code = %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
+// Only the daemon knows whether its apps answer on TLS: the relay terminates
+// for a free-tier box, the box itself terminates for a BYO relay box and for a
+// never-enrolled direct box (#507). A client guessing from how it dialled gets
+// the last case backwards — it reaches a direct box over the LAN, so "not
+// remote" and "not HTTPS" stopped being the same question. So the daemon
+// states the scheme on every app it reports.
+func TestAppsReportTheSchemeTheyAreServedOn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		https bool
+		want  string
+	}{
+		{"apps on TLS", true, "https"},
+		{"LAN-only box", false, "http"},
+	} {
+		s := newTestStore(t)
+		h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil,
+			AgentInfo{AppsOverHTTPS: tc.https})
+		if _, err := s.CreateApp("blog", 8080); err != nil {
+			t.Fatalf("%s: CreateApp: %v", tc.name, err)
+		}
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: list status = %d, body = %s", tc.name, rec.Code, rec.Body.String())
+		}
+		var list []struct{ Scheme string }
+		if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
+			t.Fatalf("%s: decode list: %v", tc.name, err)
+		}
+		if len(list) != 1 || list[0].Scheme != tc.want {
+			t.Errorf("%s: list scheme = %+v, want %q", tc.name, list, tc.want)
+		}
+
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/blog", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: get status = %d, body = %s", tc.name, rec.Code, rec.Body.String())
+		}
+		var one struct{ Scheme string }
+		if err := json.NewDecoder(rec.Body).Decode(&one); err != nil {
+			t.Fatalf("%s: decode get: %v", tc.name, err)
+		}
+		if one.Scheme != tc.want {
+			t.Errorf("%s: get scheme = %q, want %q", tc.name, one.Scheme, tc.want)
 		}
 	}
 }
