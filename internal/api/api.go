@@ -68,7 +68,7 @@ func latestStatus(s *store.Store, app string) (string, error) {
 // (#102) and the per-app domains collection (#231). Nil when the box has no
 // relay configured: the endpoints then answer 409.
 type DomainManager interface {
-	Set(domain, provider, token string) (domain.Status, error)
+	Set(domain, provider, token, serve string) (domain.Status, error)
 	Status() (domain.Status, error)
 	Remove() error
 	AddAppDomain(app, domain string) (store.AppDomain, error)
@@ -520,7 +520,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
-		st, err := dom.Set(in.Domain, in.DNSProvider, in.DNSToken)
+		st, err := dom.Set(in.Domain, in.DNSProvider, in.DNSToken, "")
 		switch {
 		case errors.Is(err, domain.ErrEnvManaged):
 			http.Error(w, err.Error(), http.StatusConflict)

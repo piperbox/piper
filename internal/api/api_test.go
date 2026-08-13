@@ -1013,7 +1013,7 @@ type fakeDomainManager struct {
 	removedDomains []string
 }
 
-func (f *fakeDomainManager) Set(d, p, tok string) (domain.Status, error) {
+func (f *fakeDomainManager) Set(d, p, tok, serve string) (domain.Status, error) {
 	f.gotSet = []string{d, p, tok}
 	if f.setErr != nil {
 		return domain.Status{}, f.setErr

@@ -104,7 +104,7 @@ func TestBoxWideRecordsTargetBaseDomain(t *testing.T) {
 	const base = "ab12-alice.public.getpiper.co"
 	m, _ := newDNSTargetManager(t, base, "127.0.0.1")
 
-	recs := m.dnsRecords("example.com")
+	recs := m.dnsRecords("example.com", ServeRelay)
 	if len(recs) != 2 {
 		t.Fatalf("dnsRecords = %+v, want two", recs)
 	}
@@ -175,7 +175,7 @@ func TestDNSTargetFallsBackToRelayHostWithoutBaseDomain(t *testing.T) {
 	if !got.DNSOK {
 		t.Error("dns_ok = false, want true: the domain resolves to the relay host's address")
 	}
-	for _, r := range m.dnsRecords("example.com") {
+	for _, r := range m.dnsRecords("example.com", ServeRelay) {
 		if r.Value != "relay.example.net" {
 			t.Errorf("box-wide record %+v value = %q, want relay.example.net", r, r.Value)
 		}

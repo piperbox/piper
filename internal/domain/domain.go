@@ -37,6 +37,17 @@ const (
 	StatusFailed  = "failed"
 )
 
+// Serve modes: which path the public reaches the domain by. Relay is the
+// default (CNAME at the relay, SNI-spliced down the tunnel); direct means the
+// user's DNS points straight at this box and its Caddy answers :443 itself.
+const (
+	ServeRelay  = "relay"
+	ServeDirect = "direct"
+)
+
+// noteNoPublicIP explains empty-value direct-mode records.
+const noteNoPublicIP = "box public IP not yet known — connect to the relay once or set PIPER_PUBLIC_IP"
+
 // boxWideKey is the box-wide domain's slot in the keyed maps (loop generations,
 // loaded certs). "*" cannot collide with a stored domain (domainRE rejects it)
 // and reads as what the instance is: the wildcard-shaped one.
@@ -47,6 +58,7 @@ var (
 	ErrInvalidDomain       = errors.New("invalid domain")
 	ErrUnsupportedProvider = errors.New("unsupported dns provider")
 	ErrTokenRequired       = errors.New("dns_token required")
+	ErrInvalidServe        = errors.New(`invalid serve mode (want "relay" or "direct")`)
 )
 
 // errStaleConfig aborts an issuance/renewal run whose config snapshot no
@@ -111,6 +123,11 @@ type Options struct {
 	RelayHost   string
 	HTTPSListen string // e.g. ":443"
 	EnvDomain   string
+	// EnvServe pins the env-managed domain's serve mode ("" ⇒ relay).
+	EnvServe string
+	// PublicIP reports the box's best-known public IP for direct mode's DNS
+	// guidance ("" ⇒ unknown). Nil tolerated: always unknown.
+	PublicIP func() string
 	// Resolve overrides the DNS lookup behind dns_ok and the per-app DNS
 	// gate; nil uses net.DefaultResolver. E2E seam: the test domains have no
 	// real DNS (see PIPER_TEST_ISSUER in cmd/piperd).
@@ -133,6 +150,8 @@ type Manager struct {
 	dnsTarget   string // what the user's records must point at (see Options.BaseDomain)
 	httpsListen string
 	envDomain   string
+	envServe    string
+	publicIP    func() string
 
 	relayMu sync.Mutex
 	relay   RelayNotifier
@@ -200,11 +219,20 @@ func New(o Options) *Manager {
 			return net.DefaultResolver.LookupIP(ctx, "ip", host)
 		}
 	}
+	envServe := o.EnvServe
+	if envServe == "" {
+		envServe = ServeRelay
+	}
+	publicIP := o.PublicIP
+	if publicIP == nil {
+		publicIP = func() string { return "" }
+	}
 	return &Manager{
 		st: o.Store, newIssuer: o.Issuer, appIssuer: o.AppIssuer,
 		proxy: o.Proxy, router: o.Router,
 		dataDir: o.DataDir, dnsTarget: dnsTarget,
 		httpsListen: o.HTTPSListen, envDomain: o.EnvDomain,
+		envServe: envServe, publicIP: publicIP,
 		appMu:      map[string]*sync.Mutex{},
 		gens:       map[string]int{},
 		loaded:     map[string]caddy.CertPair{},
@@ -371,14 +399,23 @@ func (m *Manager) notifier() RelayNotifier {
 var domainRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$`)
 
 // Set validates and persists a new custom-domain config, then starts issuance
-// asynchronously. The returned Status is the freshly-kicked "issuing" state.
-func (m *Manager) Set(domainName, provider, token string) (Status, error) {
+// asynchronously. The returned Status is the freshly-kicked "issuing" state —
+// unless the change is a serve-only flip on an active, otherwise-identical
+// config, in which case the row is updated in place and the returned Status
+// is the (still active) current state.
+func (m *Manager) Set(domainName, provider, token, serve string) (Status, error) {
 	if m.envDomain != "" {
 		return Status{}, ErrEnvManaged
 	}
 	d := strings.ToLower(strings.TrimSpace(domainName))
 	if !domainRE.MatchString(d) {
 		return Status{}, ErrInvalidDomain
+	}
+	if serve == "" {
+		serve = ServeRelay
+	}
+	if serve != ServeRelay && serve != ServeDirect {
+		return Status{}, ErrInvalidServe
 	}
 	if provider != "cloudflare" {
 		return Status{}, ErrUnsupportedProvider
@@ -392,11 +429,24 @@ func (m *Manager) Set(domainName, provider, token string) (Status, error) {
 	// for the duration of an in-flight ACME Obtain (minutes, bounded) — a
 	// deliberate trade: correctness of the state machine over PUT latency.
 	m.issueMu.Lock()
+	prev, prevErr := m.st.GetDomainConfig()
+	// Serve-only flip on an active, otherwise-identical config: the cert is
+	// the same either way, so update the row in place — no status reset, no
+	// generation bump, no ACME order.
+	if prevErr == nil && prev.Domain == d && prev.DNSProvider == provider &&
+		prev.DNSToken == token && prev.Status == StatusActive && prev.Serve != serve {
+		if err := m.st.UpdateDomainServe(d, serve); err != nil {
+			m.issueMu.Unlock()
+			return Status{}, err
+		}
+		m.issueMu.Unlock()
+		return m.Status()
+	}
 	// Replacing a different domain tears the old one down first.
-	if prev, err := m.st.GetDomainConfig(); err == nil && prev.Domain != d {
+	if prevErr == nil && prev.Domain != d {
 		m.teardown(prev)
 	}
-	if err := m.st.SetDomainConfig(d, provider, token, "relay"); err != nil {
+	if err := m.st.SetDomainConfig(d, provider, token, serve); err != nil {
 		m.issueMu.Unlock()
 		return Status{}, err
 	}
@@ -634,15 +684,27 @@ func (m *Manager) Status() (Status, error) {
 	if m.envDomain != "" {
 		m.envMu.Lock()
 		st := Status{
-			Domain: m.envDomain, Source: "env",
+			Domain: m.envDomain, Source: "env", Serve: m.envServe,
 			Status: m.envStatus, Error: m.envError,
-			DNSRecords: m.dnsRecords(m.envDomain),
+			DNSRecords: m.dnsRecords(m.envDomain, m.envServe),
 		}
 		if !m.envNotAfter.IsZero() {
 			t := m.envNotAfter
 			st.CertNotAfter = &t
 		}
 		m.envMu.Unlock()
+		// envServe/envDomain/publicIP are immutable after New, so the
+		// serve-direct enrichment (a blocking DNS lookup on cache miss) runs
+		// outside envMu — otherwise it would serialize the env issuance
+		// loop's status writes and every concurrent Status() call behind a
+		// network round trip, the #114 pathology reintroduced on this lock.
+		if m.envServe == ServeDirect {
+			if ip := m.publicIP(); ip == "" {
+				st.Note = noteNoPublicIP
+			} else {
+				st.DNSOK = m.cachedDNSResolvesTo("piper-probe."+m.envDomain, ip)
+			}
+		}
 		return st, nil
 	}
 	dc, err := m.st.GetDomainConfig()
@@ -654,14 +716,21 @@ func (m *Manager) Status() (Status, error) {
 	}
 	st := Status{
 		Domain: dc.Domain, DNSProvider: dc.DNSProvider,
-		DNSTokenSet: dc.DNSToken != "", Source: "api",
+		DNSTokenSet: dc.DNSToken != "", Source: "api", Serve: dc.Serve,
 		Status: dc.Status, Error: dc.Error,
-		DNSRecords: m.dnsRecords(dc.Domain),
+		DNSRecords: m.dnsRecords(dc.Domain, dc.Serve),
 	}
-	// piper-probe.<domain>: any label matches the user's wildcard record, so a
-	// hit means wildcard traffic reaches the relay — readiness independent of
-	// issuance, which needs only the DNS API token.
-	st.DNSOK = m.cachedDNSPointsAt("piper-probe." + dc.Domain)
+	// piper-probe.<domain>: any label matches the user's wildcard record. Relay
+	// mode checks it lands on the relay; direct mode checks it lands on the box.
+	if dc.Serve == ServeDirect {
+		if ip := m.publicIP(); ip == "" {
+			st.Note = noteNoPublicIP
+		} else {
+			st.DNSOK = m.cachedDNSResolvesTo("piper-probe."+dc.Domain, ip)
+		}
+	} else {
+		st.DNSOK = m.cachedDNSPointsAt("piper-probe." + dc.Domain)
+	}
 	if !dc.CertNotAfter.IsZero() {
 		t := dc.CertNotAfter
 		st.CertNotAfter = &t
@@ -679,21 +748,39 @@ type DNSRecord struct {
 // Status is the wire state of the box's custom-domain config. The DNS token
 // never appears; DNSTokenSet signals presence.
 type Status struct {
-	Domain       string      `json:"domain"`
-	DNSProvider  string      `json:"dns_provider"`
-	DNSTokenSet  bool        `json:"dns_token_set"`
-	Source       string      `json:"source"` // "api" | "env"
-	Status       string      `json:"status"` // "" | "issuing" | "active" | "failed"
-	Error        string      `json:"error"`
+	Domain      string `json:"domain"`
+	DNSProvider string `json:"dns_provider"`
+	DNSTokenSet bool   `json:"dns_token_set"`
+	Source      string `json:"source"` // "api" | "env"
+	Serve       string `json:"serve"`  // "relay" | "direct"
+	Status      string `json:"status"` // "" | "issuing" | "active" | "failed"
+	Error       string `json:"error"`
+	// Note is a human-readable hint when guidance is incomplete (e.g. direct
+	// mode before the box knows its public IP). Not an error.
+	Note         string      `json:"note,omitempty"`
 	CertNotAfter *time.Time  `json:"cert_not_after,omitempty"`
 	DNSRecords   []DNSRecord `json:"dns_records"`
 	DNSOK        bool        `json:"dns_ok"`
 }
 
-func (m *Manager) dnsRecords(domain string) []DNSRecord {
+// dnsRecords renders the records the user must create: CNAMEs at the relay in
+// relay mode, A/AAAA at the box's public IP in direct mode. An unknown IP
+// yields empty-value records — Status attaches the explanatory note.
+func (m *Manager) dnsRecords(domain, serve string) []DNSRecord {
+	if serve != ServeDirect {
+		return []DNSRecord{
+			{Type: "CNAME", Name: "*." + domain, Value: m.dnsTarget},
+			{Type: "CNAME", Name: domain, Value: m.dnsTarget},
+		}
+	}
+	ip := m.publicIP()
+	typ := "A"
+	if p := net.ParseIP(ip); p != nil && p.To4() == nil {
+		typ = "AAAA"
+	}
 	return []DNSRecord{
-		{Type: "CNAME", Name: "*." + domain, Value: m.dnsTarget},
-		{Type: "CNAME", Name: domain, Value: m.dnsTarget},
+		{Type: typ, Name: "*." + domain, Value: ip},
+		{Type: typ, Name: domain, Value: ip},
 	}
 }
 
@@ -712,6 +799,39 @@ func (m *Manager) cachedDNSPointsAt(host string) bool {
 
 	m.dnsMu.Lock()
 	m.dnsCache[host] = dnsCacheEntry{ok: ok, at: m.now()}
+	m.dnsMu.Unlock()
+	return ok
+}
+
+// cachedDNSResolvesTo serves "does host resolve to ip" from the same short
+// TTL cache as cachedDNSPointsAt (keyed with the target ip so a serve-mode
+// flip never reads the other mode's cached verdict).
+func (m *Manager) cachedDNSResolvesTo(host, ip string) bool {
+	key := host + "→" + ip
+	m.dnsMu.Lock()
+	if e, ok := m.dnsCache[key]; ok && m.now().Sub(e.at) < dnsOKTTL {
+		m.dnsMu.Unlock()
+		return e.ok
+	}
+	m.dnsMu.Unlock()
+
+	want := net.ParseIP(ip)
+	ok := false
+	if want != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if ips, err := m.resolve(ctx, host); err == nil {
+			for _, p := range ips {
+				if p.Equal(want) {
+					ok = true
+					break
+				}
+			}
+		}
+		cancel()
+	}
+
+	m.dnsMu.Lock()
+	m.dnsCache[key] = dnsCacheEntry{ok: ok, at: m.now()}
 	m.dnsMu.Unlock()
 	return ok
 }

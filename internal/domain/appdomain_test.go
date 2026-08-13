@@ -664,7 +664,7 @@ func TestBoxWideAndAppCertsCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := m.Set("wild.example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("wild.example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)
