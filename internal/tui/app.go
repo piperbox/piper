@@ -128,7 +128,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.refresh()
 			case "t":
 				if _, ok := m.top().(boxesView); !ok {
-					return m, func() tea.Msg { return pushMsg{newBoxesView(m.dial)} }
+					return m, func() tea.Msg {
+						boxes := newBoxesView(m.dial)
+						boxes.relay = m.relay
+						return pushMsg{boxes}
+					}
 				}
 				return m, nil
 			case "g":

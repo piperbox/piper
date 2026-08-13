@@ -21,6 +21,8 @@ type fakeRelay struct {
 	stErr        error
 	repos        []relayclient.Repo
 	reposErr     error
+	agents       []relayclient.Agent
+	agentsErr    error
 }
 
 func (f fakeRelay) CLILoginStart(context.Context) (string, string, error) {
@@ -34,6 +36,9 @@ func (f fakeRelay) GitHubStatus(context.Context, string) (relayclient.Status, er
 }
 func (f fakeRelay) GitHubRepos(context.Context, string, string) ([]relayclient.Repo, error) {
 	return f.repos, f.reposErr
+}
+func (f fakeRelay) Agents(context.Context, string) ([]relayclient.Agent, error) {
+	return f.agents, f.agentsErr
 }
 
 func relayFor(f fakeRelay) RelayDialer { return func(string) RelayAPI { return f } }

@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 )
 
 type Config struct {
@@ -159,22 +162,26 @@ func SystemManaged() bool {
 }
 
 // ClientConfig is the piper CLI's saved credentials/target. Addr/Token are the
-// LAN path (bearer to piperd); RelayAPI/AccountCredential are the relay path
-// (device-flow login), written by `piper login` and read by every other
-// relay-backed command (e.g. `piper github repos`, remote `piper box`).
+// LAN path (bearer to piperd); BaseDomain is the stable relay agent identity;
+// RelayAPI/AccountCredential are the relay path (device-flow login), written by
+// `piper login` and read by every other relay-backed command (e.g. `piper
+// github repos`, remote `piper box`).
 type ClientConfig struct {
 	Addr              string `json:"addr"`
 	Token             string `json:"token"`
+	BaseDomain        string `json:"base_domain,omitempty"`
 	RelayAPI          string `json:"relay_api,omitempty"`
 	AccountCredential string `json:"account_credential,omitempty"`
 }
 
 // Box is one named piperd target in the piper CLI's config file. Addr/Token
-// are the LAN path; RelayAPI/AccountCredential the relay path (wizard-managed).
+// are the LAN path; BaseDomain is the stable relay agent identity;
+// RelayAPI/AccountCredential are the relay path (wizard-managed).
 type Box struct {
 	Name              string `json:"name"`
 	Addr              string `json:"addr"`
 	Token             string `json:"token"`
+	BaseDomain        string `json:"base_domain,omitempty"`
 	RelayAPI          string `json:"relay_api,omitempty"`
 	AccountCredential string `json:"account_credential,omitempty"`
 }
@@ -202,11 +209,15 @@ func (cf ClientFile) CurrentBox() (Box, bool) {
 // LoadClientFile reads ~/.piper/piper/config.json. A missing file is not an
 // error.
 func LoadClientFile() (ClientFile, error) {
-	var cf ClientFile
 	path, err := clientConfigPath()
 	if err != nil {
-		return cf, err
+		return ClientFile{}, err
 	}
+	return loadClientFile(path)
+}
+
+func loadClientFile(path string) (ClientFile, error) {
+	var cf ClientFile
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cf, nil
@@ -222,22 +233,58 @@ func LoadClientFile() (ClientFile, error) {
 }
 
 // SaveClientFile writes cf to ~/.piper/piper/config.json with 0600 perms,
-// creating the directory if needed. The write is atomic: bytes are staged to a
-// temp file in the same directory, fsync'd, and renamed over the real path so a
-// crash mid-write cannot leave the config truncated or half-written.
+// creating the directory if needed. The lock serializes all writers using the
+// client-config API, and atomicWriteFile keeps replacement atomic.
 func SaveClientFile(cf ClientFile) error {
+	return withClientConfigLock(func(path string) error {
+		data, err := json.MarshalIndent(cf, "", "  ")
+		if err != nil {
+			return err
+		}
+		return atomicWriteFile(path, data)
+	})
+}
+
+// UpdateClientFile loads the current config, applies update, and atomically
+// writes it while the client-config lock is held. Returning changed=false
+// skips the write.
+func UpdateClientFile(update func(*ClientFile) (changed bool, err error)) error {
+	return withClientConfigLock(func(path string) error {
+		cf, err := loadClientFile(path)
+		if err != nil {
+			return err
+		}
+		changed, err := update(&cf)
+		if err != nil || !changed {
+			return err
+		}
+		data, err := json.MarshalIndent(cf, "", "  ")
+		if err != nil {
+			return err
+		}
+		return atomicWriteFile(path, data)
+	})
+}
+
+func withClientConfigLock(fn func(string) error) error {
 	path, err := clientConfigPath()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(cf, "", "  ")
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, data)
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	return fn(path)
 }
 
 // atomicWriteFile writes data to path atomically: bytes are staged to a temp
@@ -296,7 +343,13 @@ func LoadClient() (ClientConfig, error) {
 		return cc, err
 	}
 	if b, ok := cf.CurrentBox(); ok {
-		cc = ClientConfig{Addr: b.Addr, Token: b.Token, RelayAPI: b.RelayAPI, AccountCredential: b.AccountCredential}
+		cc = ClientConfig{
+			Addr:              b.Addr,
+			Token:             b.Token,
+			BaseDomain:        b.BaseDomain,
+			RelayAPI:          b.RelayAPI,
+			AccountCredential: b.AccountCredential,
+		}
 	}
 	if v := os.Getenv("PIPER_ADDR"); v != "" {
 		cc.Addr = v
@@ -313,33 +366,93 @@ func LoadClient() (ClientConfig, error) {
 // SaveClient writes cc into the current box of ~/.piper/piper/config.json
 // (creating a "default" box if none exists), preserving all other boxes.
 func SaveClient(cc ClientConfig) error {
-	cf, err := LoadClientFile()
-	if err != nil {
-		return err
-	}
-	name := cf.Current
-	if name == "" {
-		name = "default"
-	}
-	if b, ok := cf.CurrentBox(); ok {
-		name = b.Name
-	}
-	updated := false
-	for i := range cf.Boxes {
-		if cf.Boxes[i].Name == name {
-			cf.Boxes[i].Addr = cc.Addr
-			cf.Boxes[i].Token = cc.Token
-			cf.Boxes[i].RelayAPI = cc.RelayAPI
-			cf.Boxes[i].AccountCredential = cc.AccountCredential
-			updated = true
-			break
+	return UpdateClientFile(func(cf *ClientFile) (bool, error) {
+		name := cf.Current
+		if name == "" {
+			name = "default"
 		}
+		if b, ok := cf.CurrentBox(); ok {
+			name = b.Name
+		}
+		updated := false
+		for i := range cf.Boxes {
+			if cf.Boxes[i].Name == name {
+				cf.Boxes[i].Addr = cc.Addr
+				cf.Boxes[i].Token = cc.Token
+				cf.Boxes[i].BaseDomain = cc.BaseDomain
+				cf.Boxes[i].RelayAPI = cc.RelayAPI
+				cf.Boxes[i].AccountCredential = cc.AccountCredential
+				updated = true
+				break
+			}
+		}
+		if !updated {
+			cf.Boxes = append(cf.Boxes, Box{
+				Name:              name,
+				Addr:              cc.Addr,
+				Token:             cc.Token,
+				BaseDomain:        cc.BaseDomain,
+				RelayAPI:          cc.RelayAPI,
+				AccountCredential: cc.AccountCredential,
+			})
+		}
+		cf.Current = name
+		return true, nil
+	})
+}
+
+// SaveCurrentBoxBaseDomain records the relay's stable identity on the box whose
+// address is the local piperd address. Current is only a display selection and
+// may point at another box. Any other box carrying the same identity is
+// cleared, so one local daemon cannot be represented by multiple rows.
+func SaveCurrentBoxBaseDomain(baseDomain string) error {
+	baseDomain = strings.TrimSpace(baseDomain)
+	if baseDomain == "" {
+		return nil
 	}
-	if !updated {
-		cf.Boxes = append(cf.Boxes, Box{Name: name, Addr: cc.Addr, Token: cc.Token, RelayAPI: cc.RelayAPI, AccountCredential: cc.AccountCredential})
+	localAddr := clientAddrKey(ClientAddr())
+	return UpdateClientFile(func(cf *ClientFile) (bool, error) {
+		target := -1
+		for i, box := range cf.Boxes {
+			if clientAddrKey(box.Addr) == localAddr && localAddr != "" {
+				target = i
+				break
+			}
+		}
+		if target < 0 {
+			return false, nil
+		}
+		changed := false
+		for i := range cf.Boxes {
+			if i == target {
+				if cf.Boxes[i].BaseDomain != baseDomain {
+					cf.Boxes[i].BaseDomain = baseDomain
+					changed = true
+				}
+				continue
+			}
+			if cf.Boxes[i].BaseDomain == baseDomain {
+				cf.Boxes[i].BaseDomain = ""
+				changed = true
+			}
+		}
+		return changed, nil
+	})
+}
+
+func clientAddrKey(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
 	}
-	cf.Current = name
-	return SaveClientFile(cf)
+	parsed, err := url.Parse(addr)
+	if err != nil || parsed.Host == "" {
+		parsed, err = url.Parse("http://" + addr)
+	}
+	if err == nil && parsed.Host != "" {
+		return strings.ToLower(strings.TrimSuffix(parsed.Host, "."))
+	}
+	return strings.ToLower(strings.TrimRight(addr, "/"))
 }
 
 // RelayFile is the persisted relay enrollment written by piperd (applying a

@@ -102,6 +102,9 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 				return 1
 			}
 		}
+		if !persistAgentIdentity(st.BaseDomain, stderr) {
+			return 1
+		}
 		fmt.Fprintf(stdout, "already enrolled as %s\n", st.BaseDomain)
 		return waitConnected(ctx, o.dataDir, st.BaseDomain, stdout, stderr)
 	}
@@ -116,6 +119,9 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 		return 0
 	case errors.As(err, &already):
 		// Raced with another login; treat like the enrolled path.
+		if !persistAgentIdentity(already.BaseDomain, stderr) {
+			return 1
+		}
 		fmt.Fprintf(stdout, "already enrolled as %s\n", already.BaseDomain)
 		return waitConnected(ctx, o.dataDir, already.BaseDomain, stdout, stderr)
 	case errors.Is(err, client.ErrEnrollQuota):
@@ -134,8 +140,22 @@ func enrollAfterLogin(ctx context.Context, o enrollFlowOpts, cred string, stdout
 		fmt.Fprintf(stderr, "note: enrollment response lost (%v); checking whether it applied…\n", err)
 		return waitConnected(ctx, o.dataDir, "", stdout, stderr)
 	}
+	if !persistAgentIdentity(resp.BaseDomain, stderr) {
+		return 1
+	}
 	fmt.Fprintf(stdout, "enrolled as %s\napplying…\n", resp.BaseDomain)
 	return waitConnected(ctx, o.dataDir, resp.BaseDomain, stdout, stderr)
+}
+
+func persistAgentIdentity(baseDomain string, stderr io.Writer) bool {
+	if baseDomain == "" {
+		return true
+	}
+	if err := config.SaveCurrentBoxBaseDomain(baseDomain); err != nil {
+		fmt.Fprintln(stderr, "error: cannot save this box's relay identity:", err)
+		return false
+	}
+	return true
 }
 
 // waitConnected polls the enrollment socket (re-finding it: the re-exec
@@ -151,6 +171,7 @@ func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stde
 	deadline := time.Now().Add(enrollApplyTimeout)
 	sawStatus := false
 	enrolled := false
+	identitySaved := baseDomain != ""
 	for ctx.Err() == nil && time.Now().Before(deadline) {
 		if c, ok := findEnrollSocket(dataDir); ok {
 			if st, err := c.RelayStatus(); err == nil {
@@ -158,6 +179,12 @@ func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stde
 				enrolled = enrolled || st.Enrolled
 				if st.BaseDomain != "" {
 					baseDomain = st.BaseDomain
+					if !identitySaved {
+						if !persistAgentIdentity(baseDomain, stderr) {
+							return 1
+						}
+						identitySaved = true
+					}
 				}
 				if st.Tunnel == "connected" {
 					fmt.Fprintf(stdout, "piperd connected — this box is live (apps at https://<app>.%s)\n", baseDomain)

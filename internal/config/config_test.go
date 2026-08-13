@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -150,6 +152,53 @@ func TestClientConfigRoundTripsRelayFields(t *testing.T) {
 	}
 	if cc.RelayAPI != "https://api.public.getpiper.co" || cc.AccountCredential != "cred-xyz" {
 		t.Fatalf("cc = %+v", cc)
+	}
+}
+
+func TestSaveClientPreservesPersistedAgentIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	path := filepath.Join(home, ".piper", "piper", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"boxes":[{"name":"living-room","addr":"http://box:8088","base_domain":"cloud.example"}],"current":"living-room"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cc, err := LoadClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientData, err := json.Marshal(cc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clientRaw map[string]any
+	if err := json.Unmarshal(clientData, &clientRaw); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := clientRaw["base_domain"].(string); got != "cloud.example" {
+		t.Fatalf("LoadClient dropped persisted agent identity: %q", got)
+	}
+	if err := SaveClient(cc); err != nil {
+		t.Fatal(err)
+	}
+	cf, err := LoadClientFile()
+	if err != nil || len(cf.Boxes) != 1 {
+		t.Fatalf("saved config = %+v (%v)", cf, err)
+	}
+	data, err := json.Marshal(cf.Boxes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := raw["base_domain"].(string); got != "cloud.example" {
+		t.Fatalf("SaveClient dropped persisted agent identity: %q", got)
 	}
 }
 
@@ -448,6 +497,72 @@ func TestSaveClientFileRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveCurrentBoxBaseDomainTargetsLocalDaemonAndClearsDuplicates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "http://127.0.0.1:8088")
+	if err := SaveClientFile(ClientFile{
+		Boxes: []Box{
+			{Name: "remote", Addr: "http://192.168.1.6:8088", BaseDomain: "local.example"},
+			{Name: "local", Addr: "127.0.0.1:8088"},
+			{Name: "duplicate", Addr: "http://192.168.1.9:8088", BaseDomain: "local.example"},
+			{Name: "other", Addr: "http://192.168.1.10:8088", BaseDomain: "other.example"},
+		},
+		Current: "remote",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveCurrentBoxBaseDomain(" local.example "); err != nil {
+		t.Fatal(err)
+	}
+
+	cf, err := LoadClientFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cf.Current != "remote" {
+		t.Fatalf("identity persistence changed Current: %+v", cf)
+	}
+	if got := cf.Boxes[1].BaseDomain; got != "local.example" {
+		t.Fatalf("local daemon box BaseDomain = %q, want local.example: %+v", got, cf.Boxes)
+	}
+	if cf.Boxes[0].BaseDomain != "" || cf.Boxes[2].BaseDomain != "" {
+		t.Fatalf("duplicate BaseDomain identities were not cleared: %+v", cf.Boxes)
+	}
+	if got := cf.Boxes[3].BaseDomain; got != "other.example" {
+		t.Fatalf("unrelated BaseDomain was cleared: %q", got)
+	}
+}
+
+func TestSaveCurrentBoxBaseDomainNoOpDoesNotRewrite(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "http://127.0.0.1:8088")
+	if err := SaveClientFile(ClientFile{
+		Boxes:   []Box{{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: "local.example"}},
+		Current: "local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := clientConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if err := SaveCurrentBoxBaseDomain("local.example"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("no-op identity persistence rewrote config: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}
+
 func TestSaveClientFileSetsRestrictedMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -485,7 +600,7 @@ func TestSaveClientFileLeavesNoTempFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() != "config.json" {
+		if e.Name() != "config.json" && e.Name() != "config.json.lock" {
 			t.Fatalf("unexpected leftover file in config dir: %s", e.Name())
 		}
 	}
