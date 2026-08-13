@@ -1001,10 +1001,11 @@ func TestDeploymentLogsEndpoint(t *testing.T) {
 }
 
 type fakeDomainManager struct {
-	status  domain.Status
-	setErr  error
-	gotSet  []string
-	removed bool
+	status   domain.Status
+	setErr   error
+	gotSet   []string
+	gotServe string
+	removed  bool
 
 	appStatuses    []domain.AppDomainStatus
 	addErr         error
@@ -1013,8 +1014,9 @@ type fakeDomainManager struct {
 	removedDomains []string
 }
 
-func (f *fakeDomainManager) Set(d, p, tok string) (domain.Status, error) {
+func (f *fakeDomainManager) Set(d, p, tok, serve string) (domain.Status, error) {
 	f.gotSet = []string{d, p, tok}
+	f.gotServe = serve
 	if f.setErr != nil {
 		return domain.Status{}, f.setErr
 	}
@@ -1119,6 +1121,38 @@ func TestDomainEndpointErrors(t *testing.T) {
 				t.Fatalf("status = %d, want %d", rec.Code, tc.want)
 			}
 		})
+	}
+}
+
+func TestPutDomainThreadsServe(t *testing.T) {
+	f := &fakeDomainManager{status: domain.Status{Domain: "shop.example.com", Serve: "direct"}}
+	s := newTestStore(t)
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, f, nil, nil, nil, AgentInfo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/domain",
+		strings.NewReader(`{"domain":"shop.example.com","dns_provider":"cloudflare","dns_token":"tok","serve":"direct"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", rec.Code, rec.Body)
+	}
+	if f.gotServe != "direct" {
+		t.Fatalf("serve passed to manager = %q, want direct", f.gotServe)
+	}
+	if !strings.Contains(rec.Body.String(), `"serve":"direct"`) {
+		t.Fatalf("response missing serve: %s", rec.Body)
+	}
+}
+
+func TestPutDomainInvalidServeIs400(t *testing.T) {
+	f := &fakeDomainManager{setErr: domain.ErrInvalidServe}
+	s := newTestStore(t)
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, f, nil, nil, nil, AgentInfo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/domain",
+		strings.NewReader(`{"domain":"shop.example.com","dns_provider":"cloudflare","dns_token":"tok","serve":"bogus"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT invalid serve = %d, want 400", rec.Code)
 	}
 }
 

@@ -679,3 +679,15 @@ func TestEnrollSocketCandidatesOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadPublicIPAndServe(t *testing.T) {
+	t.Setenv("PIPER_PUBLIC_IP", "203.0.113.7")
+	t.Setenv("PIPER_SERVE", "direct")
+	c := Load()
+	if c.PublicIP != "203.0.113.7" {
+		t.Errorf("PublicIP = %q", c.PublicIP)
+	}
+	if c.Serve != "direct" {
+		t.Errorf("Serve = %q", c.Serve)
+	}
+}

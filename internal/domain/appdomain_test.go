@@ -195,7 +195,7 @@ func TestAddAppDomainValidation(t *testing.T) {
 	// The box-wide domain must not double as a per-app domain: the relay
 	// no-ops an add for the agent's own active row, so only this local check
 	// stops two lifecycles from managing the same name.
-	if err := st.SetDomainConfig("wild.example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("wild.example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := m.AddAppDomain("blog", "wild.example.com"); !errors.Is(err, ErrBoxWideDomain) {
@@ -664,7 +664,7 @@ func TestBoxWideAndAppCertsCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := m.Set("wild.example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("wild.example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)

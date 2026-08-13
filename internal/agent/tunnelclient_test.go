@@ -679,6 +679,53 @@ func TestTunnelClientRepoOps(t *testing.T) {
 	}
 }
 
+// ObservedIP surfaces the relay-reported source host and survives disconnects:
+// direct mode's DNS guidance must not blank out whenever the tunnel drops.
+func TestObservedIPStickyAcrossDisconnect(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			sess, err := tunnel.Serve(conn, func(string, string) error { return nil })
+			if err != nil {
+				conn.Close()
+				continue
+			}
+			sess.Close() // immediate close: the client sees a disconnect
+		}
+	}()
+
+	c := &TunnelClient{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go c.Run(ctx, ln.Addr().String(), "tok", "alice.example.com",
+		func(kind byte, stream net.Conn) (net.Conn, error) { return nil, errors.New("no backend") })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.ObservedIP() == "127.0.0.1" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := c.ObservedIP(); got != "127.0.0.1" {
+		t.Fatalf("ObservedIP = %q, want 127.0.0.1", got)
+	}
+
+	cancel() // Run exits; the value must survive the session teardown
+	time.Sleep(50 * time.Millisecond)
+	if got := c.ObservedIP(); got != "127.0.0.1" {
+		t.Fatalf("ObservedIP after disconnect = %q, want 127.0.0.1", got)
+	}
+}
+
 func TestStatusReportsRetryingWithLastError(t *testing.T) {
 	c := &TunnelClient{}
 	if state, _ := c.Status(); state != "off" {

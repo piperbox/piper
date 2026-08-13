@@ -454,3 +454,41 @@ func TestServeClearsTheSuccessAckWriteDeadline(t *testing.T) {
 		t.Fatalf("write on the established connection failed (ack write deadline not cleared): %v", err)
 	}
 }
+
+// The relay tells the agent the source address it accepted the tunnel from
+// (host only): the box's best guess at its own public IP for direct serve
+// mode's DNS guidance. Advisory — dns_ok stays the truth signal.
+func TestDialCarriesObservedAddr(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+
+	srvCh := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			srvCh <- err
+			return
+		}
+		_, err = Serve(conn, func(string, string) error { return nil })
+		srvCh <- err
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	sess, err := Dial(conn, "tok", "alice.example.com")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if err := <-srvCh; err != nil {
+		t.Fatalf("Serve: %v", err)
+	}
+	if sess.ObservedAddr != "127.0.0.1" {
+		t.Fatalf("ObservedAddr = %q, want 127.0.0.1", sess.ObservedAddr)
+	}
+}

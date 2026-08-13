@@ -353,7 +353,7 @@ func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte
 // whose base domain is still the built-in default — nobody has told that box
 // what it is publicly called, and config.DefaultBaseDomain resolves nowhere, so
 // passing it on would swap the reported bug for the same bug one name over.
-func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string) domain.Options {
+func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string, publicIP func() string) domain.Options {
 	baseDomain := cfg.BaseDomain
 	if baseDomain == config.DefaultBaseDomain {
 		baseDomain = ""
@@ -361,7 +361,7 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	opts := domain.Options{
 		Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
 		DataDir: cfg.DataDir, BaseDomain: baseDomain, RelayHost: relayHost,
-		HTTPSListen: cfg.HTTPSAddr,
+		HTTPSListen: cfg.HTTPSAddr, PublicIP: publicIP,
 		Issuer: func(provider, token string) (domain.Issuer, error) {
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 				return testSelfSignedIssuer{}, nil
@@ -388,6 +388,7 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	}
 	if !cfg.Terminated {
 		opts.EnvDomain = cfg.BaseDomain // env-managed BYO: API writes are 409
+		opts.EnvServe = envServe(cfg)
 	}
 	if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 		// E2E: the fake issuer implies the test domains have no real DNS
@@ -398,6 +399,40 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 		}
 	}
 	return opts
+}
+
+// publicIPFunc resolves the box's public IP for direct serve mode:
+// PIPER_PUBLIC_IP pins it; otherwise the relay-observed address, read lazily
+// because it only exists after the first tunnel handshake — well after the
+// domain manager is constructed.
+func publicIPFunc(cfg config.Config, tc *agent.TunnelClient) func() string {
+	return func() string {
+		if cfg.PublicIP != "" {
+			if net.ParseIP(cfg.PublicIP) == nil {
+				log.Printf("piper: ignoring invalid PIPER_PUBLIC_IP=%q (not an IP)", cfg.PublicIP)
+			} else {
+				return cfg.PublicIP
+			}
+		}
+		if tc != nil {
+			return tc.ObservedIP()
+		}
+		return ""
+	}
+}
+
+// envServe validates PIPER_SERVE for the env-managed domain path. Junk logs
+// and degrades to relay: a typo must not change where user traffic flows.
+func envServe(cfg config.Config) string {
+	switch cfg.Serve {
+	case "", domain.ServeRelay:
+		return ""
+	case domain.ServeDirect:
+		return domain.ServeDirect
+	default:
+		log.Printf("piper: ignoring invalid PIPER_SERVE=%q (want relay|direct)", cfg.Serve)
+		return ""
+	}
 }
 
 // runTokenCmd implements `piperd token <create|list|revoke>`, writing directly
@@ -518,6 +553,14 @@ func main() {
 
 	dep := deploy.New(st, rt, caddy.NewClient(cfg.CaddyAdmin), cfg.BaseDomain)
 
+	// Created before the domain manager so its DNS guidance can consult the
+	// relay-observed public IP; Run and the rest of its wiring still start in
+	// the relay block below.
+	var tc *agent.TunnelClient
+	if cfg.RelayAddr != "" {
+		tc = &agent.TunnelClient{}
+	}
+
 	var domMgr *domain.Manager
 	var alpnSolver *certs.ALPNSolver
 	if cfg.RelayAddr != "" {
@@ -533,7 +576,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("alpn solver: %v", err)
 		}
-		domMgr = domain.New(newDomainOptions(cfg, st, dep, alpnSolver, relayHost))
+		domMgr = domain.New(newDomainOptions(cfg, st, dep, alpnSolver, relayHost, publicIPFunc(cfg, tc)))
 	}
 
 	// The control API mux, shared by both listeners. wh is assigned below in
@@ -544,17 +587,13 @@ func main() {
 	if domMgr != nil {
 		dm = domMgr
 	}
-	// The tunnel client is created here, ahead of api.New, so the link handler
-	// can push repo bindings to the relay; Run and the rest of its wiring still
-	// start later, in the relay block below. binder is declared as the
-	// api.RepoBinder interface (not a *agent.TunnelClient) so that on a
-	// LAN-only box it stays genuinely nil — a nil *agent.TunnelClient boxed into
-	// the interface would be a non-nil interface value and would defeat the
-	// "binder != nil" guard in the link handler.
+	// binder is declared as the api.RepoBinder interface (not a
+	// *agent.TunnelClient) so that on a LAN-only box it stays genuinely nil — a
+	// nil *agent.TunnelClient boxed into the interface would be a non-nil
+	// interface value and would defeat the "binder != nil" guard in the link
+	// handler.
 	var binder api.RepoBinder
-	var tc *agent.TunnelClient
-	if cfg.RelayAddr != "" {
-		tc = &agent.TunnelClient{}
+	if tc != nil {
 		binder = tc
 	}
 	var ghTokenFn func(repo string) (string, error)

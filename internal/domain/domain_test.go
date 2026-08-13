@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -323,7 +324,7 @@ func TestSetIssuesAndActivates(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status, err := m.Set("Example.COM", "cloudflare", "cf-token")
+	status, err := m.Set("Example.COM", "cloudflare", "cf-token", "")
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
@@ -374,7 +375,7 @@ func TestSetReturnsIssuingSnapshot(t *testing.T) {
 		}
 	}
 
-	status, err := m.Set("example.com", "cloudflare", "tok")
+	status, err := m.Set("example.com", "cloudflare", "tok", "")
 	if err != nil {
 		t.Fatalf("Set: %v", err)
 	}
@@ -388,13 +389,13 @@ func TestSetReturnsIssuingSnapshot(t *testing.T) {
 
 func TestSetValidation(t *testing.T) {
 	m, _, _, _, _ := newTestManager(t, &fakeIssuer{})
-	if _, err := m.Set("not a domain", "cloudflare", "tok"); !errors.Is(err, ErrInvalidDomain) {
+	if _, err := m.Set("not a domain", "cloudflare", "tok", ""); !errors.Is(err, ErrInvalidDomain) {
 		t.Fatalf("bad domain: %v", err)
 	}
-	if _, err := m.Set("ok.example.com", "route53", "tok"); !errors.Is(err, ErrUnsupportedProvider) {
+	if _, err := m.Set("ok.example.com", "route53", "tok", ""); !errors.Is(err, ErrUnsupportedProvider) {
 		t.Fatalf("bad provider: %v", err)
 	}
-	if _, err := m.Set("ok.example.com", "cloudflare", ""); !errors.Is(err, ErrTokenRequired) {
+	if _, err := m.Set("ok.example.com", "cloudflare", "", ""); !errors.Is(err, ErrTokenRequired) {
 		t.Fatalf("empty token: %v", err)
 	}
 }
@@ -402,7 +403,7 @@ func TestSetValidation(t *testing.T) {
 func TestIssueFailureRecordsFailedThenRetriesToActive(t *testing.T) {
 	iss := &fakeIssuer{failures: 2}
 	m, st, _, _, _ := newTestManager(t, iss)
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dc := waitStatus(t, st, StatusActive)
@@ -421,7 +422,7 @@ func TestRelayRejectionSurfacesAsFailed(t *testing.T) {
 	attempts := &attemptCountingNotifier{}
 	attempts.failAdd = errors.New("domain already in use")
 	m.SetRelay(attempts)
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dc := waitStatus(t, st, StatusFailed)
@@ -465,7 +466,7 @@ func TestRelayConfirmFailureReusesDiskCert(t *testing.T) {
 	attempts := &attemptCountingNotifier{}
 	attempts.failConfirm = errors.New("tunnel down")
 	m.SetRelay(attempts)
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -510,7 +511,7 @@ func TestSetEnvManaged(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	m := New(Options{Store: st, Proxy: &fakeProxy{}, EnvDomain: "env.example.com",
 		Issuer: func(string, string) (Issuer, error) { return nil, errors.New("unused") }})
-	if _, err := m.Set("x.dev", "cloudflare", "tok"); !errors.Is(err, ErrEnvManaged) {
+	if _, err := m.Set("x.dev", "cloudflare", "tok", ""); !errors.Is(err, ErrEnvManaged) {
 		t.Fatalf("Set on env-managed: %v", err)
 	}
 	if err := m.Remove(); !errors.Is(err, ErrEnvManaged) {
@@ -531,7 +532,7 @@ func TestStatusDNSOK(t *testing.T) {
 		}
 		return nil, errors.New("nxdomain")
 	}
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)
@@ -587,7 +588,7 @@ func TestRemoveTearsDown(t *testing.T) {
 	if _, err := st.CreateDeployment("blog", "img", "ctr", 40001, "running", ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)
@@ -634,7 +635,7 @@ func TestResumeActiveReloadsWithoutReissuing(t *testing.T) {
 	if err := m.writeCert(certPEM, keyPEM); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateDomainStatus("example.com", StatusActive, "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -660,7 +661,7 @@ func TestResumeActiveReloadsWithoutReissuing(t *testing.T) {
 func TestResumeDamagedCertReissues(t *testing.T) {
 	iss := &fakeIssuer{}
 	m, st, _, _, _ := newTestManager(t, iss)
-	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateDomainStatus("example.com", StatusActive, "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -681,7 +682,7 @@ func TestResumeDamagedCertReissues(t *testing.T) {
 func TestRenewCheckReissuesNearExpiry(t *testing.T) {
 	iss := &fakeIssuer{}
 	m, st, proxy, _, _ := newTestManager(t, iss)
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dcBefore := waitStatus(t, st, StatusActive)
@@ -716,7 +717,7 @@ func TestRenewCheckReissuesNearExpiry(t *testing.T) {
 func TestRenewFailureKeepsServing(t *testing.T) {
 	iss := &fakeIssuer{}
 	m, st, _, _, _ := newTestManager(t, iss)
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dc := waitStatus(t, st, StatusActive)
@@ -763,7 +764,7 @@ func TestRenewStatusWriteFailureIsLogged(t *testing.T) {
 	t.Cleanup(m.Close)
 
 	notAfter := time.Now().Add(25 * 24 * time.Hour) // inside the renewal window
-	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateDomainStatus("example.com", StatusActive, "", notAfter); err != nil {
@@ -818,14 +819,14 @@ func TestSetReplaceDuringInFlightIssuance(t *testing.T) {
 	m, st, _, relay, _ := newTestManagerWith(t, bi)
 	t.Cleanup(bi.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 
-	if _, err := m.Set("old.dev", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("old.dev", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	<-bi.entered // old.dev Obtain is in flight
 
 	setDone := make(chan error, 1)
 	go func() {
-		_, err := m.Set("new.dev", "cloudflare", "tok")
+		_, err := m.Set("new.dev", "cloudflare", "tok", "")
 		setDone <- err
 	}()
 	bi.release <- struct{}{} // let the old Obtain finish
@@ -871,7 +872,7 @@ func TestRemoveDuringInFlightIssuance(t *testing.T) {
 	m, st, _, relay, dataDir := newTestManagerWith(t, bi)
 	t.Cleanup(bi.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 
-	if _, err := m.Set("gone.dev", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("gone.dev", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	<-bi.entered // gone.dev Obtain is in flight
@@ -902,7 +903,7 @@ func TestRemoveDuringRenewalKeepsCertDirDeleted(t *testing.T) {
 	m, st, _, _, dataDir := newTestManagerWith(t, bi)
 	t.Cleanup(bi.releaseAll) // runs before m.Close (LIFO): unblocks a parked Obtain
 
-	if _, err := m.Set("shop.dev", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("shop.dev", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	<-bi.entered
@@ -934,7 +935,7 @@ func TestRemoveDuringRenewalKeepsCertDirDeleted(t *testing.T) {
 // deleting the row first would leave the relay splicing the domain forever.
 func TestRemoveFailsWhenRelayClearFails(t *testing.T) {
 	m, st, _, relay, _ := newTestManager(t, &fakeIssuer{})
-	if _, err := m.Set("shop.dev", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("shop.dev", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)
@@ -970,7 +971,7 @@ func TestIssueLoopExitsWhenSuperseded(t *testing.T) {
 	iss := &fakeIssuer{failures: 1 << 30} // every Obtain fails → loop retries forever
 	m, st, _, _, _ := newTestManager(t, iss)
 	m.retryDelay = func(int) time.Duration { return time.Millisecond }
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusFailed) // the loop is actively retrying
@@ -993,7 +994,7 @@ func TestIssueLoopExitsWhenSuperseded(t *testing.T) {
 func TestNotConnectedKeepsIssuing(t *testing.T) {
 	m, st, _, relay, _ := newTestManager(t, &fakeIssuer{})
 	relay.failAdd = agent.ErrNotConnected
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dc := waitError(t, st)
@@ -1011,7 +1012,7 @@ func TestNotConnectedKeepsIssuing(t *testing.T) {
 func TestGenericRelayErrorStillFails(t *testing.T) {
 	m, st, _, relay, _ := newTestManager(t, &fakeIssuer{})
 	relay.failAdd = errors.New("relay tunnel not connected") // same text, not the sentinel
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dc := waitError(t, st)
@@ -1032,7 +1033,7 @@ func TestOnRelayConnectKicksIssuance(t *testing.T) {
 	m, st, _, relay, _ := newTestManager(t, iss)
 	m.retryDelay = func(int) time.Duration { return time.Hour } // the sleeping loop's timer can never fire in-test
 	relay.failAdd = agent.ErrNotConnected
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	dc := waitError(t, st) // first attempt hit the not-connected wait and is now asleep
@@ -1060,7 +1061,7 @@ func TestOnRelayConnectKicksIssuance(t *testing.T) {
 func TestOnRelayConnectSkipsActive(t *testing.T) {
 	iss := &fakeIssuer{}
 	m, st, _, relay, _ := newTestManager(t, iss)
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)
@@ -1097,7 +1098,7 @@ func TestOnRelayConnectDoesNotStrandReplacement(t *testing.T) {
 	// Every relay claim waits on the tunnel, so no issuance can complete on
 	// its own; loops park in the not-connected wait and retry.
 	relay.failAdd = agent.ErrNotConnected
-	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1119,7 +1120,7 @@ func TestOnRelayConnectDoesNotStrandReplacement(t *testing.T) {
 	var setErr error
 	setDone := make(chan struct{})
 	go func() {
-		_, setErr = m.Set("b.dev", "cloudflare", "tok")
+		_, setErr = m.Set("b.dev", "cloudflare", "tok", "")
 		close(setDone)
 	}()
 	// Without the fix the replace completes while the kick is parked; with it
@@ -1163,7 +1164,7 @@ func TestResumeDoesNotStrandReplacement(t *testing.T) {
 	// Every relay claim waits on the tunnel, so no issuance can complete on
 	// its own; loops park in the not-connected wait and retry.
 	relay.failAdd = agent.ErrNotConnected
-	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1185,7 +1186,7 @@ func TestResumeDoesNotStrandReplacement(t *testing.T) {
 	var setErr error
 	setDone := make(chan struct{})
 	go func() {
-		_, setErr = m.Set("b.dev", "cloudflare", "tok")
+		_, setErr = m.Set("b.dev", "cloudflare", "tok", "")
 		close(setDone)
 	}()
 	// Without the fix the replace completes while Resume is parked; with it
@@ -1223,7 +1224,7 @@ func TestStatusDNSOKCachedWithinTTL(t *testing.T) {
 		atomic.AddInt64(&resolves, 1)
 		return []net.IP{net.ParseIP("203.0.113.7")}, nil // probe == relay → ok
 	}
-	if _, err := m.Set("example.com", "cloudflare", "tok"); err != nil {
+	if _, err := m.Set("example.com", "cloudflare", "tok", ""); err != nil {
 		t.Fatal(err)
 	}
 	waitStatus(t, st, StatusActive)
@@ -1305,5 +1306,167 @@ func TestDefaultRetryDelayShortFirstRetry(t *testing.T) {
 		if got := defaultRetryDelay(attempt); got != want {
 			t.Errorf("defaultRetryDelay(%d) = %v, want %v", attempt, got, want)
 		}
+	}
+}
+
+// openDomainTestStore opens a fresh test store the way the manual
+// New(Options{...}) tests below do, without newTestManagerWith's
+// proxy/notifier scaffolding.
+func openDomainTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+func TestSetInvalidServeRejected(t *testing.T) {
+	m, _, _, _, _ := newTestManager(t, &fakeIssuer{})
+	if _, err := m.Set("shop.example.com", "cloudflare", "tok", "bogus"); !errors.Is(err, ErrInvalidServe) {
+		t.Fatalf("err = %v, want ErrInvalidServe", err)
+	}
+}
+
+func TestSetServeDirectPersistsAndReports(t *testing.T) {
+	m, st, _, _, _ := newTestManager(t, &fakeIssuer{})
+	if _, err := m.Set("shop.example.com", "cloudflare", "tok", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, st, StatusActive)
+	got, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Serve != ServeDirect {
+		t.Fatalf("Serve = %q, want direct", got.Serve)
+	}
+}
+
+// A serve-only flip on an active config must not burn an ACME order or leave
+// "active": the cert is identical either way (spec: "must not re-issue").
+func TestServeOnlyFlipDoesNotReissue(t *testing.T) {
+	iss := &fakeIssuer{}
+	m, st, _, _, _ := newTestManager(t, iss)
+	if _, err := m.Set("shop.example.com", "cloudflare", "tok", "relay"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, st, StatusActive)
+	calls := iss.obtainCalls()
+
+	got, err := m.Set("shop.example.com", "cloudflare", "tok", "direct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusActive || got.Serve != ServeDirect {
+		t.Fatalf("after flip: status=%q serve=%q, want active/direct", got.Status, got.Serve)
+	}
+	if gotCalls := iss.obtainCalls(); gotCalls != calls {
+		t.Fatalf("obtain calls %d -> %d: serve flip re-issued", calls, gotCalls)
+	}
+}
+
+func TestDirectDNSRecordsAndDNSOK(t *testing.T) {
+	// Manager with a known public IP and a resolver that agrees with it.
+	st := openDomainTestStore(t)
+	m := New(Options{
+		Store: st, Proxy: &fakeProxy{}, DataDir: t.TempDir(),
+		Issuer:      func(string, string) (Issuer, error) { return &fakeIssuer{}, nil },
+		HTTPSListen: ":443",
+		PublicIP:    func() string { return "203.0.113.7" },
+		Resolve: func(ctx context.Context, host string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("203.0.113.7")}, nil
+		},
+	})
+	t.Cleanup(m.Close)
+	if _, err := m.Set("shop.example.com", "cloudflare", "tok", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, st, StatusActive)
+
+	got, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []DNSRecord{
+		{Type: "A", Name: "*.shop.example.com", Value: "203.0.113.7"},
+		{Type: "A", Name: "shop.example.com", Value: "203.0.113.7"},
+	}
+	if !reflect.DeepEqual(got.DNSRecords, want) {
+		t.Fatalf("DNSRecords = %+v, want %+v", got.DNSRecords, want)
+	}
+	if !got.DNSOK {
+		t.Fatal("dns_ok = false with matching resolver")
+	}
+	if got.Note != "" {
+		t.Fatalf("Note = %q, want empty with known IP", got.Note)
+	}
+}
+
+func TestDirectUnknownIPCarriesNote(t *testing.T) {
+	st := openDomainTestStore(t)
+	m := New(Options{
+		Store: st, Proxy: &fakeProxy{}, DataDir: t.TempDir(),
+		Issuer:      func(string, string) (Issuer, error) { return &fakeIssuer{}, nil },
+		HTTPSListen: ":443",
+		// PublicIP nil: never enrolled, no override — IP unknown.
+	})
+	t.Cleanup(m.Close)
+	if _, err := m.Set("shop.example.com", "cloudflare", "tok", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Note == "" {
+		t.Fatal("want a human-readable note when the public IP is unknown")
+	}
+	if got.DNSOK {
+		t.Fatal("dns_ok must stay false with no IP to check against")
+	}
+	for _, r := range got.DNSRecords {
+		if r.Type != "A" || r.Value != "" {
+			t.Fatalf("record = %+v, want empty-value A record", r)
+		}
+	}
+}
+
+func TestEnvServeDirect(t *testing.T) {
+	st := openDomainTestStore(t)
+	m := New(Options{
+		Store: st, Proxy: &fakeProxy{}, EnvDomain: "env.example.com",
+		EnvServe: "direct",
+		PublicIP: func() string { return "203.0.113.7" },
+	})
+	t.Cleanup(m.Close)
+	got, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Serve != ServeDirect {
+		t.Fatalf("env Serve = %q, want direct", got.Serve)
+	}
+	if got.DNSRecords[0].Type != "A" || got.DNSRecords[0].Value != "203.0.113.7" {
+		t.Fatalf("env direct records = %+v", got.DNSRecords)
+	}
+}
+
+// A junk EnvServe value (should have been caught upstream, but New must not
+// trust it) behaves as relay rather than being stored and reported verbatim.
+func TestEnvServeJunkNormalizesToRelay(t *testing.T) {
+	st := openDomainTestStore(t)
+	m := New(Options{
+		Store: st, Proxy: &fakeProxy{}, EnvDomain: "env.example.com",
+		EnvServe: "bogus",
+	})
+	t.Cleanup(m.Close)
+	got, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Serve != ServeRelay {
+		t.Fatalf("env Serve = %q, want relay", got.Serve)
 	}
 }

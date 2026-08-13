@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS domain_config (
     domain         TEXT NOT NULL,
     dns_provider   TEXT NOT NULL,
     dns_token      TEXT NOT NULL,
+    serve          TEXT NOT NULL DEFAULT 'relay',
     status         TEXT NOT NULL,
     error          TEXT NOT NULL DEFAULT '',
     cert_not_after TEXT NOT NULL DEFAULT '',
