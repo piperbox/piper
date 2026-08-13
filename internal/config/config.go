@@ -32,6 +32,13 @@ type Config struct {
 	DNSProvider    string // lego DNS provider name (e.g. "cloudflare")
 	TLSCertFile    string // static cert path; set ⇒ skip ACME (tests / BYO cert)
 	TLSKeyFile     string // static key path
+
+	// PublicIP overrides the relay-observed public IP used by direct serve
+	// mode's DNS guidance (split-horizon setups, never-enrolled boxes).
+	PublicIP string
+	// Serve pins the env-managed BYO domain's serve mode: "" (relay) | "direct".
+	// API-managed domains carry serve in the store instead.
+	Serve string
 }
 
 // DefaultBaseDomain is BaseDomain's built-in default: the LAN-only name apps
@@ -79,6 +86,8 @@ func Load() Config {
 		DNSProvider:    env("PIPER_DNS_PROVIDER", ""),
 		TLSCertFile:    env("PIPER_TLS_CERT_FILE", ""),
 		TLSKeyFile:     env("PIPER_TLS_KEY_FILE", ""),
+		PublicIP:       env("PIPER_PUBLIC_IP", ""),
+		Serve:          env("PIPER_SERVE", ""),
 	}
 }
 
