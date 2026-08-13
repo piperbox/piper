@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piperbox/piper/internal/agent"
 	"github.com/piperbox/piper/internal/api"
 	"github.com/piperbox/piper/internal/config"
 	"github.com/piperbox/piper/internal/domain"
@@ -929,7 +930,7 @@ func TestDialAddrRewritesListenAddrToLoopback(t *testing.T) {
 // fine and then failed arming with "address already in use" (#435).
 func TestDomainOptionsHTTPSListenFollowsConfig(t *testing.T) {
 	cfg := config.Config{HTTPSAddr: "127.0.0.1:8444"}
-	opts := newDomainOptions(cfg, nil, nil, nil, "relay.example")
+	opts := newDomainOptions(cfg, nil, nil, nil, "relay.example", func() string { return "" })
 	if opts.HTTPSListen != cfg.HTTPSAddr {
 		t.Errorf("HTTPSListen = %q, want cfg.HTTPSAddr %q", opts.HTTPSListen, cfg.HTTPSAddr)
 	}
@@ -943,7 +944,7 @@ func TestDomainOptionsHTTPSListenFollowsConfig(t *testing.T) {
 // as the fallback for a box that has no base domain.
 func TestDomainOptionsDNSTargetFollowsBaseDomain(t *testing.T) {
 	cfg := config.Config{BaseDomain: "ab12-alice.public.getpiper.co", RelayAddr: "127.0.0.1:7000"}
-	opts := newDomainOptions(cfg, nil, nil, nil, "127.0.0.1")
+	opts := newDomainOptions(cfg, nil, nil, nil, "127.0.0.1", func() string { return "" })
 	if opts.BaseDomain != cfg.BaseDomain {
 		t.Errorf("BaseDomain = %q, want cfg.BaseDomain %q", opts.BaseDomain, cfg.BaseDomain)
 	}
@@ -973,7 +974,7 @@ func TestDefaultBaseDomainIsNotADNSTarget(t *testing.T) {
 	}
 
 	cfg := config.Config{BaseDomain: config.DefaultBaseDomain, DataDir: dir, RelayAddr: "relay.example.net:7000"}
-	opts := newDomainOptions(cfg, st, nil, nil, "relay.example.net")
+	opts := newDomainOptions(cfg, st, nil, nil, "relay.example.net", func() string { return "" })
 	if opts.BaseDomain != "" {
 		t.Errorf("Options.BaseDomain = %q, want empty: the built-in default is not a public name", opts.BaseDomain)
 	}
@@ -1085,5 +1086,35 @@ func TestRepushRelayAppsSkipsEmptyPreviewHostnames(t *testing.T) {
 
 	if len(st.previewHostnames) != 0 {
 		t.Fatalf("persisted %v, want nothing written for an unnamed slot", st.previewHostnames)
+	}
+}
+
+// PIPER_PUBLIC_IP beats the relay-observed address; with neither, unknown.
+func TestPublicIPFuncPrecedence(t *testing.T) {
+	if got := publicIPFunc(config.Config{PublicIP: "203.0.113.7"}, nil)(); got != "203.0.113.7" {
+		t.Fatalf("override = %q", got)
+	}
+	if got := publicIPFunc(config.Config{}, nil)(); got != "" {
+		t.Fatalf("no sources = %q, want empty", got)
+	}
+	// With a tunnel client the func must consult it lazily (the observed IP
+	// arrives after the domain manager is constructed).
+	tc := &agent.TunnelClient{}
+	if got := publicIPFunc(config.Config{}, tc)(); got != "" {
+		t.Fatalf("unconnected tunnel = %q, want empty", got)
+	}
+}
+
+// PIPER_SERVE reaches the env-managed manager only when valid; junk degrades
+// to relay (empty) rather than wedging boot.
+func TestEnvServeValidation(t *testing.T) {
+	if got := envServe(config.Config{Serve: "direct"}); got != "direct" {
+		t.Fatalf("direct = %q", got)
+	}
+	if got := envServe(config.Config{Serve: "bogus"}); got != "" {
+		t.Fatalf("bogus = %q, want empty (relay)", got)
+	}
+	if got := envServe(config.Config{}); got != "" {
+		t.Fatalf("unset = %q, want empty", got)
 	}
 }
