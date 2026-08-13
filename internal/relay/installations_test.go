@@ -172,10 +172,10 @@ func TestInstallationsForAccountReturnsAllNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
+	if err := st.LinkInstallation("66", "1001", "org", "getpiper"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.LinkInstallation("66", "1001", "org", "getpiper"); err != nil {
+	if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,8 +184,8 @@ func TestInstallationsForAccountReturnsAllNewestFirst(t *testing.T) {
 		t.Fatalf("InstallationsForAccount: %v", err)
 	}
 	want := []Installation{
-		{ID: "66", TargetType: "org", TargetLogin: "getpiper"},
 		{ID: "55", TargetType: "user", TargetLogin: "alice"},
+		{ID: "66", TargetType: "org", TargetLogin: "getpiper"},
 	}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Fatalf("installations = %+v, want %+v", got, want)
@@ -197,10 +197,18 @@ func TestInstallationsForAccountReturnsAllNewestFirst(t *testing.T) {
 // timestamps is to write them behind those helpers.
 func stampInstallation(t *testing.T, st *Store, installationID, created string) {
 	t.Helper()
-	if _, err := st.db.Exec(
+	res, err := st.db.Exec(
 		`UPDATE github_installations SET created_at=? WHERE installation_id=?`,
-		created, installationID); err != nil {
+		created, installationID)
+	if err != nil {
 		t.Fatalf("stamp %s: %v", installationID, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("stamp %s rows affected: %v", installationID, err)
+	}
+	if n != 1 {
+		t.Fatalf("stamp %s: matched %d rows, want 1", installationID, n)
 	}
 }
 
@@ -217,22 +225,22 @@ func TestInstallationsForAccountNewestFirstAcrossTrimmedFractions(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
-		t.Fatal(err)
-	}
 	if err := st.LinkInstallation("66", "1001", "org", "piperbox"); err != nil {
 		t.Fatal(err)
 	}
-	stampInstallation(t, st, "55", "2026-01-01T00:00:00.1Z")
-	stampInstallation(t, st, "66", "2026-01-01T00:00:00.15Z")
+	if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	stampInstallation(t, st, "66", "2026-01-01T00:00:00.1Z")
+	stampInstallation(t, st, "55", "2026-01-01T00:00:00.15Z")
 
 	got, err := st.InstallationsForAccount(acc.ID)
 	if err != nil {
 		t.Fatalf("InstallationsForAccount: %v", err)
 	}
 	want := []Installation{
-		{ID: "66", TargetType: "org", TargetLogin: "piperbox"},
 		{ID: "55", TargetType: "user", TargetLogin: "alice"},
+		{ID: "66", TargetType: "org", TargetLogin: "piperbox"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("installations = %+v, want %+v (newest first)", got, want)
@@ -273,22 +281,22 @@ func TestInstallationsVisibleToNewestFirstAcrossTrimmedFractions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateOrg: %v", err)
 	}
-	if err := st.LinkInstallationForAccount("55", acc.ID, "user", "alice"); err != nil {
-		t.Fatal(err)
-	}
 	if err := st.LinkInstallationForAccount("66", org.ID, "org", "acme"); err != nil {
 		t.Fatal(err)
 	}
-	stampInstallation(t, st, "55", "2026-01-01T00:00:00.1Z")
-	stampInstallation(t, st, "66", "2026-01-01T00:00:00.15Z")
+	if err := st.LinkInstallationForAccount("55", acc.ID, "user", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	stampInstallation(t, st, "66", "2026-01-01T00:00:00.1Z")
+	stampInstallation(t, st, "55", "2026-01-01T00:00:00.15Z")
 
 	got, err := st.InstallationsVisibleTo(acc.ID)
 	if err != nil {
 		t.Fatalf("InstallationsVisibleTo: %v", err)
 	}
 	want := []Installation{
-		{ID: "66", TargetType: "org", TargetLogin: "acme"},
 		{ID: "55", TargetType: "user", TargetLogin: "alice"},
+		{ID: "66", TargetType: "org", TargetLogin: "acme"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("installations = %+v, want %+v (newest first)", got, want)
