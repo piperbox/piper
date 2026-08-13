@@ -66,7 +66,7 @@ func TestRunDeploySupportsNameFirstFlags(t *testing.T) {
 		case r.URL.Path == "/v1/apps/blog/deployments":
 			_ = json.NewEncoder(w).Encode([]store.Deployment{{ID: "dep1", App: "blog", Status: "running"}})
 		case r.URL.Path == "/v1/apps/blog":
-			_ = json.NewEncoder(w).Encode(api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost"}, Status: "running"})
+			_ = json.NewEncoder(w).Encode(api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost"}, Status: "running", Scheme: "http"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -125,7 +125,7 @@ func TestDeployLinkedAppWithoutPathDeploysFromRepo(t *testing.T) {
 		case r.URL.Path == "/v1/apps/web":
 			_ = json.NewEncoder(w).Encode(api.App{App: store.App{
 				Name: "web", Hostname: "web.piper.localhost", Repo: "me/web", Branch: "main",
-			}, Status: "running"})
+			}, Status: "running", Scheme: "http"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -160,7 +160,7 @@ func TestDeployStreamsProgressAndReportsURL(t *testing.T) {
 		case r.URL.Path == "/v1/apps/web/deployments":
 			json.NewEncoder(w).Encode([]store.Deployment{{ID: "dep1", App: "web", Status: "running"}})
 		case r.URL.Path == "/v1/apps/web":
-			json.NewEncoder(w).Encode(api.App{App: store.App{Name: "web", Hostname: "web.piper.localhost"}, Status: "running"})
+			json.NewEncoder(w).Encode(api.App{App: store.App{Name: "web", Hostname: "web.piper.localhost"}, Status: "running", Scheme: "http"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}

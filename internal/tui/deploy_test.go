@@ -94,7 +94,7 @@ func TestRootDeployMsgKicksOffAndRecords(t *testing.T) {
 func TestRootDeployStartedReplacesConfirmWithLogs(t *testing.T) {
 	m := NewModel("b", "a", false, fakeAPI{})
 	// stack: apps -> detail -> deploy
-	m2, _ := m.Update(pushMsg{newAppDetailView("blog", false)})
+	m2, _ := m.Update(pushMsg{newAppDetailView("blog")})
 	m = m2.(Model)
 	m2, _ = m.Update(pushMsg{newDeployView("blog", "/x", true)})
 	m = m2.(Model)

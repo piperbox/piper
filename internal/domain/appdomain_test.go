@@ -778,3 +778,68 @@ func TestAppDomainStatusSingle(t *testing.T) {
 		t.Fatalf("status = %+v, want shop.example.com/blog with dns_ok false", got)
 	}
 }
+
+// Where a per-app domain stops on a box with no relay, and that it stops
+// before the ACME issuer factory is ever asked for an issuer.
+//
+// #507 gave a never-enrolled box a live domain manager, so POST
+// /v1/apps/{app}/domains now reaches this lifecycle instead of 409-ing. It
+// still cannot finish: the TLS-ALPN-01 challenge only arrives spliced down a
+// tunnel this box does not have (#506). The refusal is the relay check at the
+// top of the run — the operator sees "relay not connected", not an ACME
+// failure — which is what cmd/piperd's nil-solver guard is a second line
+// behind rather than the line that fires.
+func TestAppIssuanceWithoutARelayStopsBeforeTheIssuer(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	var mu sync.Mutex
+	issuerCalls := 0
+	m := New(Options{
+		Store: st,
+		AppIssuer: func() (Issuer, error) {
+			mu.Lock()
+			issuerCalls++
+			mu.Unlock()
+			return &fakeIssuer{}, nil
+		},
+		Proxy: &fakeProxy{}, Router: &fakeRouter{}, DataDir: dataDir,
+		BaseDomain: "example.dev", HTTPSListen: ":8443",
+	})
+	// No SetRelay: a never-enrolled box has no notifier to hand it. Every
+	// other gate is open, so the relay check is the only thing that can stop
+	// this run — DNS resolves to the box, and the issuer would succeed.
+	t.Cleanup(m.Close)
+	m.resolve = func(context.Context, string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddAppDomain("shop.example.com", "blog"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateAppDomainStatus("shop.example.com", StatusPending, "", time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	row, err := st.GetAppDomain("shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = m.appIssueOnce(row)
+
+	if err == nil || err.Error() != "relay not connected" {
+		t.Errorf("appIssueOnce = %v, want %q", err, "relay not connected")
+	}
+	mu.Lock()
+	calls := issuerCalls
+	mu.Unlock()
+	if calls != 0 {
+		t.Errorf("AppIssuer called %d time(s); the run must refuse at the relay check, "+
+			"before anything can hand certs.New a nil solver", calls)
+	}
+}

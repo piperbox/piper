@@ -70,7 +70,7 @@ func TestLinkAppRootRunsClientAndPops(t *testing.T) {
 	rec := &apiCalls{}
 	m := NewModel("pi4", "a", false, fakeAPI{rec: rec})
 	// push app detail then the link form so a successful link pops back to detail
-	m, _ = pushView(t, m, newAppDetailView("blog", false))
+	m, _ = pushView(t, m, newAppDetailView("blog"))
 	m, _ = pushView(t, m, newLinkForm("blog"))
 	depth := len(m.stack)
 	next, cmd := m.Update(linkAppMsg{name: "blog", repo: "octo/blog", branch: "main", rootDir: "apps/web"})
@@ -89,7 +89,7 @@ func TestLinkAppRootRunsClientAndPops(t *testing.T) {
 
 func TestLKeyLowercaseOpensLinkFromDetail(t *testing.T) {
 	m := NewModel("pi4", "a", false, fakeAPI{})
-	m, _ = pushView(t, m, newAppDetailView("blog", false))
+	m, _ = pushView(t, m, newAppDetailView("blog"))
 	next, cmd := m.top().Update(keyRunes('l'))
 	m.stack[len(m.stack)-1] = next.(view)
 	m = pump(t, m, cmd)

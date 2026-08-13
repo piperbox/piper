@@ -377,9 +377,15 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 				return testSelfSignedIssuer{}, nil
 			}
 			// No solver means no relay to splice acme-tls/1 down, which is
-			// every directly-served box: refuse with the reason rather than
-			// hand certs a nil solver and fail the ACME order minutes later
-			// (#506 is what lifts this).
+			// every directly-served box (#506 is what lifts this). This is
+			// the second line, not the one that fires: the per-app lifecycle
+			// checks the relay notifier before it ever asks for an issuer, so
+			// a direct box's domain already fails with "relay not connected"
+			// (internal/domain pins that ordering). What the guard buys is
+			// the reason for anything that does reach it — certs.New rejects
+			// the typed-nil solver immediately, but as "exactly one of
+			// DNSProvider or ALPNSolver must be set" (internal/certs pins
+			// that, #242), which names neither the relay nor the domain.
 			if alpnSolver == nil {
 				return nil, fmt.Errorf("per-app custom domains need a relay connection: their TLS-ALPN-01 challenge is spliced down the tunnel to this box")
 			}
@@ -623,8 +629,9 @@ func main() {
 	// down the tunnel to it (see newDialLocal); the per-app domain
 	// lifecycle drives issuance against it. It stays gated on the relay even
 	// though the domain manager no longer is: nothing splices challenges to a
-	// directly-served box, which is why its per-app domains wait on DNS-01
-	// issuance of their own (#506).
+	// directly-served box, so its per-app domains cannot be issued there at
+	// all — they fail with "relay not connected" until #506 gives them an
+	// issuance path of their own.
 	var alpnSolver *certs.ALPNSolver
 	if cfg.RelayAddr != "" {
 		alpnSolver, err = certs.NewALPNSolver("127.0.0.1:0")

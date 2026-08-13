@@ -34,8 +34,9 @@ domain.
 (default, above) or `"direct"`. In direct mode the box terminates traffic
 itself — point `<domain>` and `*.<domain>` A/AAAA records straight at the
 box's public IP, which `GET /v1/domain` fills in from the relay-observed
-address (override with `PIPER_PUBLIC_IP` for split-horizon or NAT setups).
-The relay claim is kept regardless, so both paths serve the same cert while
+address (override with `PIPER_PUBLIC_IP` for split-horizon or NAT setups, and
+the only source on a box that was never enrolled). On an enrolled box the
+relay claim is kept regardless, so both paths serve the same cert while
 your DNS still points at the relay — the flip to direct is gradual and
 reversible, not a cutover. A box behind CGNAT will never show `dns_ok: true`
 in direct mode (nothing can dial it); port-forwarded boxes should confirm
