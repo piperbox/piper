@@ -42,8 +42,9 @@ type handshake struct {
 // Session is a live multiplexed link. Open (server→agent) and Accept (agent
 // side) yield net.Conn streams.
 type Session struct {
-	BaseDomain string
-	mux        *yamux.Session
+	BaseDomain   string
+	ObservedAddr string // host the relay saw this connection from; "" if unknown
+	mux          *yamux.Session
 }
 
 func (s *Session) Open() (net.Conn, error)    { return s.mux.Open() }
@@ -102,9 +103,12 @@ func readFrame(r io.Reader) ([]byte, error) {
 const rejectedReason = "unknown or revoked enrollment"
 
 // handshakeAck is the relay's verdict on a handshake, sent before yamux starts.
-// An empty Error means accepted.
+// An empty Error means accepted. ObservedAddr is the source host (no port) the
+// relay accepted the connection from — the agent's best guess at its own
+// public IP for direct serve mode; advisory, since it can be a NAT egress.
 type handshakeAck struct {
-	Error string `json:"error,omitempty"`
+	Error        string `json:"error,omitempty"`
+	ObservedAddr string `json:"observed_addr,omitempty"`
 }
 
 // Dial performs the client handshake over conn, waits for the relay's verdict,
@@ -148,7 +152,7 @@ func Dial(conn net.Conn, token, baseDomain string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{BaseDomain: baseDomain, mux: mux}, nil
+	return &Session{BaseDomain: baseDomain, ObservedAddr: ack.ObservedAddr, mux: mux}, nil
 }
 
 // Stream kinds: every stream opens with a single kind byte so each end can
@@ -277,7 +281,11 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 	// yamux.Server is ever reached. Cleared once the frame is out, or it would
 	// later expire mid-session and kill a healthy connection.
 	_ = conn.SetWriteDeadline(time.Now().Add(handshakeWriteTimeout))
-	ackPayload, _ := json.Marshal(handshakeAck{})
+	observed := ""
+	if host, _, err := net.SplitHostPort(conn.RemoteAddr().String()); err == nil {
+		observed = host
+	}
+	ackPayload, _ := json.Marshal(handshakeAck{ObservedAddr: observed})
 	writeErr := writeFrame(conn, ackPayload)
 	_ = conn.SetWriteDeadline(time.Time{})
 	if writeErr != nil {
@@ -287,5 +295,5 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{BaseDomain: hs.BaseDomain, mux: mux}, nil
+	return &Session{BaseDomain: hs.BaseDomain, ObservedAddr: observed, mux: mux}, nil
 }
