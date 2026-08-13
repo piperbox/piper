@@ -8,6 +8,14 @@ command -v dpkg-deb >/dev/null 2>&1 || { echo "verify_deb: skip (no dpkg-deb)"; 
 dist="${1:-dist}"
 fail() { echo "verify_deb: $*" >&2; exit 1; }
 
+for deb in "$dist"/*.deb; do
+	[ -e "$deb" ] || continue
+	case "${deb##*/}" in
+		*~*) fail "deb filename contains '~': ${deb##*/}" ;;
+		*+*) fail "deb filename contains '+': ${deb##*/}" ;;
+	esac
+done
+
 for pkg in piperd piper; do
 	for arch in amd64 arm64 armhf; do
 		set -- "$dist"/${pkg}_*_"$arch".deb
