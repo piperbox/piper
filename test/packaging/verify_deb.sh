@@ -7,6 +7,25 @@ set -eu
 command -v dpkg-deb >/dev/null 2>&1 || { echo "verify_deb: skip (no dpkg-deb)"; exit 0; }
 dist="${1:-dist}"
 fail() { echo "verify_deb: $*" >&2; exit 1; }
+script_dir=$(CDPATH='' command cd -- "$(dirname -- "$0")" && pwd)
+config="${GORELEASER_CONFIG:-$script_dir/../../.goreleaser.yaml}"
+[ -f "$config" ] || fail "missing GoReleaser config: $config"
+
+for pkg in piperd piper; do
+	template="$(awk -v wanted="$pkg" '
+		/^nfpms:/ { in_nfpms=1; current=""; next }
+		in_nfpms && /^[^[:space:]]/ { in_nfpms=0; current="" }
+		in_nfpms && /^  - id: / { current=$3 }
+		in_nfpms && current == wanted && /^[[:space:]]+file_name_template:/ {
+			print
+			exit
+		}
+	' "$config")"
+	case "$template" in
+		*'replace (replace .ConventionalFileName "~" ".") "+" "."'*) ;;
+		*) fail "nfpms $pkg template does not sanitize '+': ${template:-<missing>}" ;;
+	esac
+done
 
 for deb in "$dist"/*.deb; do
 	[ -e "$deb" ] || continue
@@ -39,5 +58,13 @@ rm -rf "$ctrl"
 set -- "$dist"/piper_*_amd64.deb; cli="$1"
 dpkg-deb -c "$cli" | grep -q '\./usr/bin/piper$' || fail "piper binary not in /usr/bin"
 if dpkg-deb -c "$cli" | grep -q 'systemd'; then fail "piper (CLI) deb must not ship a unit"; fi
+
+for deb in "$dist"/piperd_*_amd64.deb "$dist"/piper_*_amd64.deb; do
+	version="$(dpkg-deb -f "$deb" Version)"
+	case "$version" in
+		*~*) ;;
+		*) fail "Debian Version lost prerelease separator in ${deb##*/}: $version" ;;
+	esac
+done
 
 echo "verify_deb: ok"
