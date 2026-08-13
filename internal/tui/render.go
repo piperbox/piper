@@ -8,21 +8,13 @@ import (
 )
 
 // appURL renders the URL a box serves an app on from its stored hostname and
-// the scheme the daemon reports for it. The daemon is the authority: a box
-// that terminates TLS for its own domain with no relay at all serves HTTPS
-// while the TUI reaches it over the LAN (#507), so remote — how this client
-// dialled — cannot answer it. remote stays the fallback for a daemon that
-// predates the reported scheme, which is the shape it always got right:
-// relay-backed means HTTPS. Empty hostname (never deployed) yields "".
-func appURL(hostname, scheme string, remote bool) string {
+// the scheme the daemon reports for it (api.App.Scheme). The daemon is the
+// authority: a box that terminates TLS for its own domain with no relay at all
+// serves HTTPS while the TUI reaches it over the LAN (#507), so how this
+// client dialled cannot answer it. Empty hostname (never deployed) yields "".
+func appURL(hostname, scheme string) string {
 	if hostname == "" {
 		return ""
-	}
-	if scheme == "" {
-		scheme = "http"
-		if remote {
-			scheme = "https"
-		}
 	}
 	return scheme + "://" + hostname
 }

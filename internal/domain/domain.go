@@ -45,8 +45,12 @@ const (
 	ServeDirect = "direct"
 )
 
-// noteNoPublicIP explains empty-value direct-mode records.
-const noteNoPublicIP = "box public IP not yet known — connect to the relay once or set PIPER_PUBLIC_IP"
+// noteNoPublicIP explains empty-value direct-mode records. It names
+// PIPER_PUBLIC_IP as the instruction because that is the one every box in this
+// mode can follow: a never-enrolled box serving its own domain directly (#507)
+// has no relay to connect to, and telling it to connect to one would be
+// guidance it cannot act on at all.
+const noteNoPublicIP = "box public IP not yet known — set PIPER_PUBLIC_IP (a relay-connected box also learns it from the relay)"
 
 // boxWideKey is the box-wide domain's slot in the keyed maps (loop generations,
 // loaded certs). "*" cannot collide with a stored domain (domainRE rejects it)

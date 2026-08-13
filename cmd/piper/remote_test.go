@@ -162,7 +162,7 @@ func TestRunRemoteDeployPrintsAssignedURL(t *testing.T) {
 		case r.URL.Path == prefix+"/v1/apps/blog/deployments":
 			_ = json.NewEncoder(w).Encode([]store.Deployment{{ID: "dep1", App: "blog", Status: "running"}})
 		case r.URL.Path == prefix+"/v1/apps/blog":
-			_ = json.NewEncoder(w).Encode(api.App{App: store.App{Name: "blog", Hostname: "ab12-alice.public.getpiper.co"}, Status: "running"})
+			_ = json.NewEncoder(w).Encode(api.App{App: store.App{Name: "blog", Hostname: "ab12-alice.public.getpiper.co"}, Status: "running", Scheme: "https"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}

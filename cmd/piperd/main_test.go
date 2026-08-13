@@ -1229,8 +1229,13 @@ func TestRelayDialHost(t *testing.T) {
 // /v1/apps/<app>/domains reaches its per-app lifecycle — which issues over
 // TLS-ALPN-01, and the challenge for that only arrives spliced down a tunnel
 // this box does not have (#506). Without a solver the issuer factory must say
-// so; handing certs a nil solver instead fails the ACME order minutes later
-// with nothing pointing at the cause.
+// so in terms of the relay. It is not what a direct box hits first: the
+// lifecycle refuses at the relay notifier before asking for an issuer at all
+// (internal/domain's TestAppIssuanceWithoutARelayStopsBeforeTheIssuer). Nor is
+// the alternative a slow failure — certs.New rejects a typed-nil solver
+// immediately (internal/certs' TestNewRejectsTypedNilProviders, #242) — but it
+// rejects it as "exactly one of DNSProvider or ALPNSolver must be set", which
+// names neither the relay nor the domain that could not be issued.
 func TestAppIssuerRefusesWithoutAnALPNSolver(t *testing.T) {
 	t.Setenv("PIPER_TEST_ISSUER", "")
 	cfg := config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect, DataDir: t.TempDir()}

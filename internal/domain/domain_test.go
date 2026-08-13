@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1468,5 +1469,78 @@ func TestEnvServeJunkNormalizesToRelay(t *testing.T) {
 	}
 	if got.Serve != ServeRelay {
 		t.Fatalf("env Serve = %q, want relay", got.Serve)
+	}
+}
+
+// relayInstruction matches guidance that tells the operator to connect this
+// box to a relay. It is deliberately about the instruction, not the word:
+// naming what a relay-connected box additionally gets is fine, telling a box
+// with no relay to go and connect to one is not.
+var relayInstruction = regexp.MustCompile(`(?i)connect\w*\s+(this box\s+)?to\s+(the|a)\s+relay`)
+
+// A box serving its own domain directly has no relay, and #507 is what made
+// that configuration reachable — so every guidance string it can surface must
+// name only actions it can actually take. The note on empty-value direct
+// records read "connect to the relay once or set PIPER_PUBLIC_IP", which on a
+// never-enrolled box is an instruction to do the one thing it cannot.
+//
+// Both direct paths are swept, not just the reported one: the API-managed
+// config and the env-managed (PIPER_BASE_DOMAIN + PIPER_SERVE=direct) config
+// reach the same note through different branches of Status.
+func TestDirectServeGuidanceNamesOnlyActionsARelaylessBoxCanTake(t *testing.T) {
+	apiManaged := func(t *testing.T) Status {
+		t.Helper()
+		st := openDomainTestStore(t)
+		m := New(Options{
+			Store: st, Proxy: &fakeProxy{}, DataDir: t.TempDir(),
+			Issuer:      func(string, string) (Issuer, error) { return &fakeIssuer{}, nil },
+			HTTPSListen: ":443",
+			// PublicIP nil: never enrolled, no override — IP unknown.
+		})
+		t.Cleanup(m.Close)
+		if _, err := m.Set("shop.example.com", "cloudflare", "tok", "direct"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := m.Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	envManaged := func(t *testing.T) Status {
+		t.Helper()
+		m := New(Options{
+			Store: openDomainTestStore(t), Proxy: &fakeProxy{}, DataDir: t.TempDir(),
+			EnvDomain: "env.example.com", EnvServe: ServeDirect,
+		})
+		t.Cleanup(m.Close)
+		got, err := m.Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, tc := range []struct {
+		name string
+		get  func(*testing.T) Status
+	}{
+		{"api-managed", apiManaged},
+		{"env-managed", envManaged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.get(t)
+			if got.Note == "" {
+				t.Fatal("want a human-readable note when the public IP is unknown")
+			}
+			if relayInstruction.MatchString(got.Note) {
+				t.Errorf("note = %q: a directly-served box has no relay to connect to", got.Note)
+			}
+			if !strings.Contains(got.Note, "PIPER_PUBLIC_IP") {
+				t.Errorf("note = %q: must name the one setting that works with no relay", got.Note)
+			}
+			if relayInstruction.MatchString(got.Error) {
+				t.Errorf("error = %q: a directly-served box has no relay to connect to", got.Error)
+			}
+		})
 	}
 }

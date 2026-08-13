@@ -234,7 +234,7 @@ func TestModelQuitKeys(t *testing.T) {
 }
 
 func TestModelBreadcrumbAndRelayBar(t *testing.T) {
-	f := fakeAPI{apps: []api.App{{App: store.App{Name: "blog", Hostname: "blog.example.dev"}, Status: "running"}}}
+	f := fakeAPI{apps: []api.App{{App: store.App{Name: "blog", Hostname: "blog.example.dev"}, Status: "running", Scheme: "https"}}}
 	m := NewModel("pi4", "pi4.example.dev", true, f)
 	m = pump(t, m, m.refresh())
 	out := m.View()
@@ -281,9 +281,9 @@ func TestRootRunsCreateStopDeleteIntents(t *testing.T) {
 func TestRootActionResultSuccessPopsAndErrorBanners(t *testing.T) {
 	m := NewModel("b", "a", false, fakeAPI{})
 	// stack: apps -> detail -> detail (simulate depth 3)
-	m2, _ := m.Update(pushMsg{newAppDetailView("blog", false)})
+	m2, _ := m.Update(pushMsg{newAppDetailView("blog")})
 	m = m2.(Model)
-	m2, _ = m.Update(pushMsg{newAppDetailView("blog", false)})
+	m2, _ = m.Update(pushMsg{newAppDetailView("blog")})
 	m = m2.(Model)
 	if len(m.stack) != 3 {
 		t.Fatalf("setup: want depth 3, got %d", len(m.stack))
@@ -297,7 +297,7 @@ func TestRootActionResultSuccessPopsAndErrorBanners(t *testing.T) {
 	}
 
 	// error keeps the stack and banners the top view
-	m2, _ = m.Update(pushMsg{newAppDetailView("blog", false)})
+	m2, _ = m.Update(pushMsg{newAppDetailView("blog")})
 	m = m2.(Model)
 	m2, _ = m.Update(actionResultMsg{err: errors.New("name taken")})
 	m = m2.(Model)
@@ -311,7 +311,7 @@ func TestRootActionResultSuccessPopsAndErrorBanners(t *testing.T) {
 
 func TestRootPopMsg(t *testing.T) {
 	m := NewModel("b", "a", false, fakeAPI{})
-	m2, _ := m.Update(pushMsg{newAppDetailView("blog", false)})
+	m2, _ := m.Update(pushMsg{newAppDetailView("blog")})
 	m = m2.(Model)
 	m2, _ = m.Update(popMsg{1})
 	m = m2.(Model)
@@ -336,7 +336,7 @@ func TestNavViewsRenderFooterLegend(t *testing.T) {
 	}
 
 	// app detail footer
-	m2, _ := m.Update(pushMsg{newAppDetailView("blog", false)})
+	m2, _ := m.Update(pushMsg{newAppDetailView("blog")})
 	m = m2.(Model)
 	m = pump(t, m, m.refresh())
 	out := m.View()
@@ -366,7 +366,7 @@ func TestNoHelpOverlay(t *testing.T) {
 
 	for _, v := range []view{
 		m.top(),
-		newAppDetailView("blog", false),
+		newAppDetailView("blog"),
 		newBoxesView(nil),
 		newLogsView("blog", "dep-1", "building"),
 		newDomainForm("blog"),
@@ -396,7 +396,7 @@ func TestModalViewsRenderNoFooterLegend(t *testing.T) {
 func TestRootRemoveDomainCallsClientAndPops(t *testing.T) {
 	rec := &apiCalls{}
 	m := NewModel("b", "a", false, fakeAPI{rec: rec})
-	m.stack = append(m.stack, newAppDetailView("blog", false), newRemoveDomainConfirm("blog", "blog.example.com"))
+	m.stack = append(m.stack, newAppDetailView("blog"), newRemoveDomainConfirm("blog", "blog.example.com"))
 	_, cmd := m.Update(removeDomainMsg{app: "blog", domain: "blog.example.com"})
 	res, ok := cmd().(actionResultMsg)
 	if !ok || res.err != nil || res.popLevels != 1 {
@@ -422,7 +422,7 @@ func TestRootAddDomainCallsClient(t *testing.T) {
 
 func TestRootDomainAddedReplacesFormWithDetail(t *testing.T) {
 	m := NewModel("b", "a", false, fakeAPI{})
-	m.stack = append(m.stack, newAppDetailView("blog", false), newDomainForm("blog"))
+	m.stack = append(m.stack, newAppDetailView("blog"), newDomainForm("blog"))
 	next, _ := m.Update(domainAddedMsg{app: "blog", st: fixtureDomains()[0]})
 	nm := next.(Model)
 	if nm.top().title() != "domain" {
@@ -435,7 +435,7 @@ func TestRootDomainAddedReplacesFormWithDetail(t *testing.T) {
 
 func TestRootDomainAddedErrorBannersForm(t *testing.T) {
 	m := NewModel("b", "a", false, fakeAPI{})
-	m.stack = append(m.stack, newAppDetailView("blog", false), newDomainForm("blog"))
+	m.stack = append(m.stack, newAppDetailView("blog"), newDomainForm("blog"))
 	next, _ := m.Update(domainAddedMsg{app: "blog", err: errors.New("invalid domain")})
 	nm := next.(Model)
 	if nm.top().title() != "add domain" || !strings.Contains(nm.top().View(), "invalid domain") {
@@ -464,7 +464,7 @@ func TestNoLegendAdvertisesRefreshKey(t *testing.T) {
 	withDomain := appDetailView{name: "blog", domains: []domain.AppDomainStatus{{Domain: "blog.example.com"}}}
 	legends := map[string]string{
 		"apps":          appsView{}.footer(),
-		"app detail":    newAppDetailView("blog", false).footer(),
+		"app detail":    newAppDetailView("blog").footer(),
 		"domain row":    withDomain.footer(),
 		"domain detail": domainDetailView{}.footer(),
 		"logs":          newLogsView("blog", "dep-1", "building").footer(),

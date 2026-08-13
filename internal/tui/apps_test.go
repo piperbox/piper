@@ -11,8 +11,8 @@ import (
 
 func fixtureApps() []api.App {
 	return []api.App{
-		{App: store.App{Name: "blog", Hostname: "blog.piper.localhost"}, Status: "running"},
-		{App: store.App{Name: "shop", Hostname: "shop.piper.localhost"}, Status: "building"},
+		{App: store.App{Name: "blog", Hostname: "blog.piper.localhost"}, Status: "running", Scheme: "http"},
+		{App: store.App{Name: "shop", Hostname: "shop.piper.localhost"}, Status: "building", Scheme: "http"},
 		{App: store.App{Name: "new"}, Status: ""},
 	}
 }
