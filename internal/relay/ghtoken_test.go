@@ -108,6 +108,49 @@ func TestGitHubTokenForPicksInstallationByRepoOwner(t *testing.T) {
 	}
 }
 
+// TestGitHubTokenForDuplicateTargetLoginUsesNewestInstallation proves the
+// precedence GitHubTokenFor inherits from InstallationsForAccount: duplicate
+// target_login rows are allowed, and the newest installation must win.
+func TestGitHubTokenForDuplicateTargetLoginUsesNewestInstallation(t *testing.T) {
+	var hit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"token":"ghs_ok","expires_at":"2026-07-20T12:00:00Z"}`))
+	}))
+	defer srv.Close()
+
+	st := openTestStore(t)
+	_, agent := enrolledAgent(t, st, "1001", "alice")
+	if err := st.LinkInstallation("66", "1001", "user", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LinkInstallation("55", "1001", "user", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	// Make the text timestamps sort opposite to insertion order. The rowid
+	// order must still select the later-linked installation, 55.
+	stampInstallation(t, st, "66", "2026-01-01T00:00:00.1Z")
+	stampInstallation(t, st, "55", "2026-01-01T00:00:00.15Z")
+	if err := st.BindRepo(agent, "blog", "alice/blog", "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", APIBase: srv.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := st.GitHubTokenFor(context.Background(), app, agent, "alice/blog"); err != nil {
+		t.Fatalf("GitHubTokenFor: %v", err)
+	}
+	if hit != "/app/installations/55/access_tokens" {
+		t.Fatalf("minted from %q, want newest installation 55", hit)
+	}
+}
+
 // TestGitHubTokenForNoInstallationForRepoOwner: bound repo whose owner has no
 // linked installation → ErrNoInstallation. The stub answers 404 to the
 // miss-path installation re-fetch, so the test stays hermetic.

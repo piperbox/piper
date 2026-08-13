@@ -46,6 +46,8 @@ func (s *Store) GitHubTokenFor(ctx context.Context, app *GitHubApp, agentName, r
 	if err != nil {
 		return "", time.Time{}, err
 	}
+	// InstallationsForAccount is newest-first, so duplicate target_login rows
+	// deliberately resolve to the most recently linked installation.
 	owner, _, _ := strings.Cut(normalizeRepo(repo), "/")
 	for _, in := range insts {
 		if strings.EqualFold(in.TargetLogin, owner) {
