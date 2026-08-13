@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/piperbox/piper/internal/api"
@@ -42,6 +41,26 @@ func listAppsServer(t *testing.T, scheme string) *httptest.Server {
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
+	}))
+}
+
+// relayListAppsServer answers GET /v1/apps for one relay-connected box whose
+// single app carries scheme, mirroring the relay harness in remote_test.go:
+// the relay's control plane prefixes that box's routes with /agents/<box> and
+// takes the account credential `piper login` stored, not the box token.
+func relayListAppsServer(t *testing.T, box, scheme string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/agents/"+box+"/v1/apps" {
+			t.Errorf("path = %s", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer cred-xyz" {
+			t.Errorf("Authorization = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode([]api.App{{
+			App:    store.App{Name: "blog", Port: 8080, Hostname: "blog." + box},
+			Status: "running", Scheme: scheme,
+		}})
 	}))
 }
 
@@ -116,19 +135,39 @@ func TestDeployPrintsTheSchemeTheDaemonReports(t *testing.T) {
 	}
 }
 
-// A relay-backed box reports "https" the same way, so a `--remote` dial is not
-// what makes the URL secure either — dropping the dial-based inference must
-// not quietly change what a relay box prints.
-func TestListOverARelayStillFollowsTheReportedScheme(t *testing.T) {
-	srv := listAppsServer(t, "https")
-	defer srv.Close()
-	t.Setenv("PIPER_ADDR", srv.URL)
+// `list` over a relay prints the scheme the daemon reports, both ways. The
+// inference this replaced read the dial — a --remote target printed https, a
+// local one http — so its two halves fail independently, and every test above
+// dials locally and can only reach one of them. Nothing reached the other:
+// the relay `list` test in remote_test.go serves apps with no hostname, so no
+// URL was rendered through the relay path at all.
+//
+// The http row is the half that needs a stub to exist, because no piperd we
+// ship answers "http" behind a relay: publicHTTPS in cmd/piperd is true
+// whenever a relay address is configured. That coupling lives in the daemon
+// and can move there, which is the reason the CLI takes the daemon's word
+// rather than re-deriving the scheme from how it dialled (#507).
+func TestListOverARelayFollowsTheSchemeTheDaemonReports(t *testing.T) {
+	const box = "ab12-alice.public.getpiper.co"
+	for _, scheme := range []string{"https", "http"} {
+		t.Run(scheme, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("PIPER_ADDR", "")
+			t.Setenv("PIPER_TOKEN", "")
+			srv := relayListAppsServer(t, box, scheme)
+			defer srv.Close()
+			if err := config.SaveClient(config.ClientConfig{RelayAPI: srv.URL, AccountCredential: "cred-xyz"}); err != nil {
+				t.Fatalf("SaveClient: %v", err)
+			}
 
-	var stdout, stderr bytes.Buffer
-	if code := run([]string{"list"}, &stdout, &stderr); code != 0 {
-		t.Fatalf("code = %d, stderr = %s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "https://blog.example.dev") {
-		t.Errorf("stdout = %q, want the https URL", stdout.String())
+			var stdout, stderr bytes.Buffer
+			if code := run([]string{"--remote", box, "list"}, &stdout, &stderr); code != 0 {
+				t.Fatalf("code = %d, stderr = %s", code, stderr.String())
+			}
+			want := "blog\tport=8080\t" + scheme + "://blog." + box + "\n"
+			if got := stdout.String(); got != want {
+				t.Errorf("stdout = %q, want %q", got, want)
+			}
+		})
 	}
 }
