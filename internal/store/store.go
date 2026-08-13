@@ -499,6 +499,8 @@ func (s *Store) AuthenticateToken(tok string) (Token, error) {
 }
 
 // ListTokens returns all tokens (metadata only; never the plaintext or hash).
+// rowid preserves creation order because created_at is RFC3339Nano text whose
+// trimmed fractional seconds do not sort chronologically as text.
 func (s *Store) ListTokens() ([]Token, error) {
 	rows, err := s.db.Query(
 		`SELECT id, label, scope, created_at, revoked_at FROM tokens ORDER BY rowid`)
