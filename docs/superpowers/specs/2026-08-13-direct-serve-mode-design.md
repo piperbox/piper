@@ -68,9 +68,11 @@ supported.
   an active config must **not** re-issue: the cert is the same either way, so
   the handler updates the row and refreshes status without bumping the
   issuance generation.
-- **TUI**: the domain form (`internal/tui/domainform.go`) gains a serve-mode
-  toggle; the domain detail view (`domaindetail.go`) shows the mode and the
-  mode-appropriate DNS records.
+- **No TUI/CLI surface in this change**: the TUI domain views
+  (`internal/tui/domainform.go`, `domaindetail.go`) cover *per-app* domains
+  only; the box-wide domain has no TUI/CLI client today (the e2e drives the
+  API raw). `serve` lands in the API and store; any future box-wide domain UX
+  inherits it.
 - **Env-managed shape** (`PIPER_BASE_DOMAIN` boxes, where API writes are 409
   `ErrEnvManaged`): `PIPER_SERVE=direct` in the environment is the equivalent
   pin. Same semantics: reporting only.
@@ -133,10 +135,10 @@ users to verify with a real request.
 - **Tunnel (fake relay)**: handshake ack carries `observed_addr`; the client
   exposes the last-seen value; reconnect updates it.
 - **E2E** (self-signed issuer seam, in-process relay): enroll, set a direct
-  domain, deploy an app, then `curl --resolve <app>.<domain>:443:<box-ip>`
-  straight at the box — asserting the response arrives without traversing the
-  tunnel (relay's stream counters stay flat) — and the same request through
-  the relay path still serves (migration property).
+  domain, deploy an app, then TLS-dial the box's `:443` directly (SNI
+  `<app>.<domain>`) — a path that by construction never touches the relay —
+  and assert the same request through the relay's public port still serves
+  (migration property).
 
 ## Out of scope (follow-up issues)
 
