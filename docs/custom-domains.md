@@ -57,12 +57,25 @@ vars, e.g. `CLOUDFLARE_DNS_API_TOKEN`), or a static `PIPER_TLS_CERT_FILE` /
 `PIPER_TLS_KEY_FILE` pair. Unchanged from before. Add `PIPER_SERVE=direct`
 alongside `PIPER_BASE_DOMAIN` for the env-managed equivalent of direct serve.
 
+**A box that has never been enrolled can do this too.** `PIPER_BASE_DOMAIN`
+(anything but the built-in `piper.localhost`) plus `PIPER_SERVE=direct` and a
+cert source is the whole configuration: the box obtains its own wildcard,
+serves `PIPER_HTTPS_ADDR` itself, and renews on its own schedule, with no
+relay anywhere. `PIPER_SERVE=direct` is the opt-in — a base domain alone keeps
+today's plain-HTTP behaviour, so nothing changes for a LAN box that just wanted
+a nicer hostname. Two things a never-enrolled box does not get: `dns_ok` and
+the filled-in A-record values, which come from the relay-observed public IP
+unless you set `PIPER_PUBLIC_IP` (serving is unaffected either way); and per-app
+domains, whose TLS-ALPN-01 challenges only arrive over a relay splice.
+
 ### Precedence
 
 **env > API > none.** A box whose base domain comes from the environment
 (non-terminated relay mode) reports `"source":"env"` on `GET /v1/domain` and
 answers `409` to `PUT`/`DELETE` — unset the env config to manage the domain
-remotely. LAN-only boxes (no relay) answer `409` to all `/v1/domain` calls.
+remotely. That includes a never-enrolled direct box, which is env-managed by
+construction. A box with neither a relay nor direct serve has no domain config
+at all and answers `409` to every `/v1/domain` call.
 
 ## Per-app domains (`piper domains`) — no DNS token
 

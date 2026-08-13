@@ -43,6 +43,20 @@ type Deployerer interface {
 type App struct {
 	store.App
 	Status string
+	// Scheme is the URL scheme this box serves the app on, "http" or "https".
+	// The daemon is the only party that can answer it: a client reaches a
+	// relay-backed box over the relay and a directly-served box over the LAN
+	// (#507), so how the client dialled stopped being a usable proxy for
+	// whether the app itself is on TLS.
+	Scheme string
+}
+
+// appScheme names the URL scheme this box's apps are served on.
+func appScheme(self AgentInfo) string {
+	if self.AppsOverHTTPS {
+		return "https"
+	}
+	return "http"
 }
 
 // latestStatus resolves the App.Status for one app; never-deployed is "".
@@ -100,6 +114,10 @@ type AgentInfo struct {
 	HTTPAddr  string
 	HTTPSAddr string
 	DataDir   string
+	// AppsOverHTTPS records that the public reaches this box's apps on TLS —
+	// terminated by the relay on a free-tier box, by the box itself on a BYO
+	// relay box or a never-enrolled direct one (#507). It sets App.Scheme.
+	AppsOverHTTPS bool
 }
 
 // onGitHubApp, if non-nil, is invoked after a GitHub App is configured via the
@@ -141,7 +159,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, App{App: app})
+		writeJSON(w, http.StatusCreated, App{App: app, Scheme: appScheme(self)})
 	})
 	// The running daemon's own build. Nothing else can answer this: the piperd
 	// binary on disk may already have been replaced by an upgrade that has not
@@ -170,7 +188,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 				serverError(w, r, err)
 				return
 			}
-			out = append(out, App{App: a, Status: status})
+			out = append(out, App{App: a, Status: status, Scheme: appScheme(self)})
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
@@ -189,7 +207,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, App{App: app, Status: status})
+		writeJSON(w, http.StatusOK, App{App: app, Status: status, Scheme: appScheme(self)})
 	})
 	mux.HandleFunc("GET /v1/apps/{name}/deployments", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -491,7 +509,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 
 	noRelay := func(w http.ResponseWriter) bool {
 		if dom == nil {
-			http.Error(w, "domain config requires a relay: connect this box to a relay first", http.StatusConflict)
+			http.Error(w, "domain config requires a relay connection, or direct serve (PIPER_BASE_DOMAIN with PIPER_SERVE=direct)", http.StatusConflict)
 			return true
 		}
 		return false

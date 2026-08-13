@@ -1123,3 +1123,123 @@ func TestEnvServeValidation(t *testing.T) {
 		t.Fatalf("unset = %q, want empty", got)
 	}
 }
+
+// A box that was never enrolled can still be told what it is publicly called
+// and to serve that name itself (PIPER_BASE_DOMAIN + PIPER_SERVE=direct).
+// Keying the domain manager, caddy.WithHTTPS and the cert bootstrap on
+// cfg.RelayAddr left every such box on plain HTTP with no cert lifecycle at
+// all — it could not serve HTTPS, and nothing on it ever tried (#507).
+func TestDirectServeBoxTerminatesTLSWithoutARelay(t *testing.T) {
+	cfg := config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect}
+	if !directServe(cfg) {
+		t.Error("directServe = false for a never-enrolled box told to serve its own domain")
+	}
+	if !publicHTTPS(cfg) {
+		t.Error("publicHTTPS = false: the public reaches this box's apps over TLS")
+	}
+	if !terminatesTLS(cfg) {
+		t.Error("terminatesTLS = false: this box holds the cert and answers :443 itself")
+	}
+}
+
+// directServe is an opt-in, and every clause of it is load-bearing: a box that
+// has not been told a public name, or has not asked to serve it, must keep
+// today's behaviour exactly. Relaxing any of these turns a working LAN-only
+// box into one that binds :443 and fails ACME at boot.
+func TestDirectServeRequiresAnExplicitPublicNameAndOptIn(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+	}{
+		{"no serve mode", config.Config{BaseDomain: "example.dev"}},
+		{"serve relay", config.Config{BaseDomain: "example.dev", Serve: domain.ServeRelay}},
+		{"invalid serve mode", config.Config{BaseDomain: "example.dev", Serve: "bogus"}},
+		{"built-in default base domain", config.Config{BaseDomain: config.DefaultBaseDomain, Serve: domain.ServeDirect}},
+		{"no base domain", config.Config{Serve: domain.ServeDirect}},
+		{"relay mode owns the decision", config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect, RelayAddr: "relay.example.net:7000"}},
+		{"terminated", config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect, Terminated: true}},
+	} {
+		if directServe(tc.cfg) {
+			t.Errorf("%s: directServe = true", tc.name)
+		}
+	}
+	// The LAN-only box is the one that must not move: no domain manager, no
+	// TLS listener, no cert bootstrap — exactly what it ships today.
+	lan := config.Config{BaseDomain: config.DefaultBaseDomain}
+	if publicHTTPS(lan) || terminatesTLS(lan) {
+		t.Errorf("LAN-only box: publicHTTPS=%v terminatesTLS=%v, want both false",
+			publicHTTPS(lan), terminatesTLS(lan))
+	}
+}
+
+// The hoist must not move either relay mode. Terminated (free tier) keeps its
+// apps on HTTPS while holding no cert of its own — the relay terminates — and
+// BYO relay mode keeps terminating TLS on the box.
+func TestRelayModesKeepTodaysTLSDecision(t *testing.T) {
+	terminated := config.Config{RelayAddr: "relay.example.net:7000", Terminated: true,
+		BaseDomain: "ab12-alice.public.getpiper.co"}
+	if !publicHTTPS(terminated) {
+		t.Error("terminated: publicHTTPS = false, but the relay serves its apps over TLS")
+	}
+	if terminatesTLS(terminated) {
+		t.Error("terminated: terminatesTLS = true, but the relay holds the cert (no WithHTTPS, no bootstrap)")
+	}
+	byo := config.Config{RelayAddr: "relay.example.net:7000", BaseDomain: "example.dev"}
+	if !publicHTTPS(byo) || !terminatesTLS(byo) {
+		t.Errorf("BYO relay: publicHTTPS=%v terminatesTLS=%v, want both true",
+			publicHTTPS(byo), terminatesTLS(byo))
+	}
+}
+
+// A never-enrolled box has no relay dial address, so the DNS-record fallback
+// that #434 installed has nothing to fall back to. Passing anything else on —
+// a placeholder, the public IP, the built-in default — would swap the reported
+// bug for the same bug one name over, which is what that fallback exists to
+// avoid. The box's own base domain is the target, and directServe guarantees
+// it is set and is not the built-in default.
+func TestDomainOptionsWithoutARelayTargetTheBoxsOwnName(t *testing.T) {
+	cfg := config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect, HTTPSAddr: ":443"}
+	opts := newDomainOptions(cfg, nil, nil, nil, relayDialHost(cfg), publicIPFunc(cfg, nil))
+	if opts.RelayHost != "" {
+		t.Errorf("RelayHost = %q, want empty: there is no relay to dial", opts.RelayHost)
+	}
+	if opts.BaseDomain != "example.dev" {
+		t.Errorf("BaseDomain = %q, want the box's own name", opts.BaseDomain)
+	}
+	if opts.EnvServe != domain.ServeDirect {
+		t.Errorf("EnvServe = %q, want %q", opts.EnvServe, domain.ServeDirect)
+	}
+}
+
+// relayDialHost strips the port for the DNS-record fallback and answers empty
+// when there is no relay at all.
+func TestRelayDialHost(t *testing.T) {
+	if got := relayDialHost(config.Config{RelayAddr: "relay.example.net:7000"}); got != "relay.example.net" {
+		t.Errorf("host:port = %q, want relay.example.net", got)
+	}
+	if got := relayDialHost(config.Config{RelayAddr: "relay.example.net"}); got != "relay.example.net" {
+		t.Errorf("bare host = %q, want relay.example.net", got)
+	}
+	if got := relayDialHost(config.Config{}); got != "" {
+		t.Errorf("no relay = %q, want empty", got)
+	}
+}
+
+// A directly-served box now has a live domain manager, so POST
+// /v1/apps/<app>/domains reaches its per-app lifecycle — which issues over
+// TLS-ALPN-01, and the challenge for that only arrives spliced down a tunnel
+// this box does not have (#506). Without a solver the issuer factory must say
+// so; handing certs a nil solver instead fails the ACME order minutes later
+// with nothing pointing at the cause.
+func TestAppIssuerRefusesWithoutAnALPNSolver(t *testing.T) {
+	t.Setenv("PIPER_TEST_ISSUER", "")
+	cfg := config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect, DataDir: t.TempDir()}
+	opts := newDomainOptions(cfg, nil, nil, nil, relayDialHost(cfg), publicIPFunc(cfg, nil))
+	iss, err := opts.AppIssuer()
+	if err == nil {
+		t.Fatalf("AppIssuer() = %v, want an error naming the missing relay splice", iss)
+	}
+	if !strings.Contains(err.Error(), "relay") {
+		t.Errorf("AppIssuer error = %q, want it to name the relay splice", err)
+	}
+}
