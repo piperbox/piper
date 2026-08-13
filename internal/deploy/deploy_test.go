@@ -617,7 +617,7 @@ func TestDeployRoutesCustomDomainWhenActive(t *testing.T) {
 	routes := newFakeCaddy()
 	d := New(s, rt, routes, "piper.localhost")
 
-	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateDomainStatus("shop.dev", "active", "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -648,7 +648,7 @@ func TestDeploySkipsCustomDomainWhenNotActive(t *testing.T) {
 	d := New(s, rt, routes, "piper.localhost")
 
 	// Fresh config is "issuing": no cert is armed yet, so no TLS route.
-	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
@@ -924,7 +924,7 @@ func TestStopRemovesCustomDomainRoute(t *testing.T) {
 	}
 	routes := newFakeCaddy()
 	d := New(s, rt, routes, "piper.localhost")
-	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateDomainStatus("shop.dev", "active", "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -1094,7 +1094,7 @@ func TestStartRestoresCustomDomainRoute(t *testing.T) {
 	}
 	routes := newFakeCaddy()
 	d := New(s, rt, routes, "piper.localhost")
-	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateDomainStatus("shop.dev", "active", "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -1298,7 +1298,7 @@ func TestDeleteRemovesCustomDomainRoute(t *testing.T) {
 	}
 	routes := newFakeCaddy()
 	d := New(s, rt, routes, "piper.localhost")
-	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("shop.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateDomainStatus("shop.dev", "active", "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -1430,7 +1430,7 @@ func TestDeleteSerializesAgainstDeploy(t *testing.T) {
 // fail a deploy that already succeeded on its primary URL. #115.
 func TestDeployCustomDomainRouteFailureDoesNotAbort(t *testing.T) {
 	s, _ := newStore(t)
-	if err := s.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateDomainStatus("example.com", "active", "", time.Time{}); err != nil {

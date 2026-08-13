@@ -396,7 +396,7 @@ func (m *Manager) Set(domainName, provider, token string) (Status, error) {
 	if prev, err := m.st.GetDomainConfig(); err == nil && prev.Domain != d {
 		m.teardown(prev)
 	}
-	if err := m.st.SetDomainConfig(d, provider, token); err != nil {
+	if err := m.st.SetDomainConfig(d, provider, token, "relay"); err != nil {
 		m.issueMu.Unlock()
 		return Status{}, err
 	}

@@ -604,7 +604,7 @@ func TestDomainConfigRoundTrip(t *testing.T) {
 		t.Fatalf("GetDomainConfig on empty store: err = %v, want ErrNotFound", err)
 	}
 
-	if err := s.SetDomainConfig("example.com", "cloudflare", "cf-token"); err != nil {
+	if err := s.SetDomainConfig("example.com", "cloudflare", "cf-token", "relay"); err != nil {
 		t.Fatalf("SetDomainConfig: %v", err)
 	}
 	dc, err := s.GetDomainConfig()
@@ -636,7 +636,7 @@ func TestDomainConfigRoundTrip(t *testing.T) {
 	}
 
 	// Re-Set replaces the row and resets status/error.
-	if err := s.SetDomainConfig("other.dev", "cloudflare", "tok2"); err != nil {
+	if err := s.SetDomainConfig("other.dev", "cloudflare", "tok2", "relay"); err != nil {
 		t.Fatalf("re-SetDomainConfig: %v", err)
 	}
 	dc, _ = s.GetDomainConfig()
@@ -661,7 +661,7 @@ func TestUpdateDomainStatusWithoutRow(t *testing.T) {
 
 func TestUpdateDomainStatusWrongDomain(t *testing.T) {
 	s := openTemp(t)
-	if err := s.SetDomainConfig("new.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("new.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	// A run holding a snapshot of a replaced config must not stamp the new row.
@@ -1178,5 +1178,53 @@ func TestDeleteAppRemovesEnv(t *testing.T) {
 	}
 	if len(env) != 0 {
 		t.Errorf("app_env rows after DeleteApp = %v, want none", env)
+	}
+}
+
+func TestDomainConfigServeRoundTrip(t *testing.T) {
+	s := openTemp(t)
+
+	if err := s.SetDomainConfig("shop.example.com", "cloudflare", "tok", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	dc, err := s.GetDomainConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dc.Serve != "direct" {
+		t.Fatalf("Serve = %q, want direct", dc.Serve)
+	}
+
+	// Upsert replaces serve along with the rest.
+	if err := s.SetDomainConfig("shop.example.com", "cloudflare", "tok", "relay"); err != nil {
+		t.Fatal(err)
+	}
+	dc, _ = s.GetDomainConfig()
+	if dc.Serve != "relay" {
+		t.Fatalf("Serve after upsert = %q, want relay", dc.Serve)
+	}
+}
+
+func TestUpdateDomainServeFlipsWithoutTouchingStatus(t *testing.T) {
+	s := openTemp(t)
+	if err := s.SetDomainConfig("shop.example.com", "cloudflare", "tok", "relay"); err != nil {
+		t.Fatal(err)
+	}
+	na := time.Now().Add(60 * 24 * time.Hour)
+	if err := s.UpdateDomainStatus("shop.example.com", "active", "", na); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateDomainServe("shop.example.com", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	dc, _ := s.GetDomainConfig()
+	if dc.Serve != "direct" || dc.Status != "active" || dc.CertNotAfter.IsZero() {
+		t.Fatalf("after serve flip: serve=%q status=%q notAfter=%v", dc.Serve, dc.Status, dc.CertNotAfter)
+	}
+
+	// Stale-domain guard, same contract as UpdateDomainStatus.
+	if err := s.UpdateDomainServe("other.example.com", "relay"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mismatched domain = %v, want ErrNotFound", err)
 	}
 }

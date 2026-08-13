@@ -634,7 +634,7 @@ func TestResumeActiveReloadsWithoutReissuing(t *testing.T) {
 	if err := m.writeCert(certPEM, keyPEM); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateDomainStatus("example.com", StatusActive, "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -660,7 +660,7 @@ func TestResumeActiveReloadsWithoutReissuing(t *testing.T) {
 func TestResumeDamagedCertReissues(t *testing.T) {
 	iss := &fakeIssuer{}
 	m, st, _, _, _ := newTestManager(t, iss)
-	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateDomainStatus("example.com", StatusActive, "", time.Now().Add(60*24*time.Hour)); err != nil {
@@ -763,7 +763,7 @@ func TestRenewStatusWriteFailureIsLogged(t *testing.T) {
 	t.Cleanup(m.Close)
 
 	notAfter := time.Now().Add(25 * 24 * time.Hour) // inside the renewal window
-	if err := st.SetDomainConfig("example.com", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("example.com", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.UpdateDomainStatus("example.com", StatusActive, "", notAfter); err != nil {
@@ -1097,7 +1097,7 @@ func TestOnRelayConnectDoesNotStrandReplacement(t *testing.T) {
 	// Every relay claim waits on the tunnel, so no issuance can complete on
 	// its own; loops park in the not-connected wait and retry.
 	relay.failAdd = agent.ErrNotConnected
-	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1163,7 +1163,7 @@ func TestResumeDoesNotStrandReplacement(t *testing.T) {
 	// Every relay claim waits on the tunnel, so no issuance can complete on
 	// its own; loops park in the not-connected wait and retry.
 	relay.failAdd = agent.ErrNotConnected
-	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok"); err != nil {
+	if err := st.SetDomainConfig("a.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 

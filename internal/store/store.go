@@ -554,6 +554,7 @@ type DomainConfig struct {
 	Domain       string
 	DNSProvider  string
 	DNSToken     string
+	Serve        string // "relay" | "direct": which path the public reaches this domain by
 	Status       string // "issuing" | "active" | "failed"
 	Error        string
 	CertNotAfter time.Time
@@ -561,15 +562,16 @@ type DomainConfig struct {
 }
 
 // SetDomainConfig upserts the custom-domain config, resetting it to a fresh
-// "issuing" state.
-func (s *Store) SetDomainConfig(domain, provider, token string) error {
+// "issuing" state. serve is "relay" or "direct" (validated by the domain layer).
+func (s *Store) SetDomainConfig(domain, provider, token, serve string) error {
 	_, err := s.db.Exec(
-		`INSERT INTO domain_config(id, domain, dns_provider, dns_token, status, error, cert_not_after, updated_at)
-		 VALUES(1,?,?,?,'issuing','','',?)
+		`INSERT INTO domain_config(id, domain, dns_provider, dns_token, serve, status, error, cert_not_after, updated_at)
+		 VALUES(1,?,?,?,?,'issuing','','',?)
 		 ON CONFLICT(id) DO UPDATE SET domain=excluded.domain,
 		   dns_provider=excluded.dns_provider, dns_token=excluded.dns_token,
+		   serve=excluded.serve,
 		   status='issuing', error='', cert_not_after='', updated_at=excluded.updated_at`,
-		domain, provider, token, time.Now().UTC().Format(time.RFC3339Nano))
+		domain, provider, token, serve, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -578,9 +580,9 @@ func (s *Store) GetDomainConfig() (DomainConfig, error) {
 	var dc DomainConfig
 	var notAfter, updated string
 	err := s.db.QueryRow(
-		`SELECT domain, dns_provider, dns_token, status, error, cert_not_after, updated_at
+		`SELECT domain, dns_provider, dns_token, serve, status, error, cert_not_after, updated_at
 		 FROM domain_config WHERE id=1`).
-		Scan(&dc.Domain, &dc.DNSProvider, &dc.DNSToken, &dc.Status, &dc.Error, &notAfter, &updated)
+		Scan(&dc.Domain, &dc.DNSProvider, &dc.DNSToken, &dc.Serve, &dc.Status, &dc.Error, &notAfter, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DomainConfig{}, ErrNotFound
 	}
@@ -607,6 +609,23 @@ func (s *Store) UpdateDomainStatus(domain, status, errMsg string, notAfter time.
 	res, err := s.db.Exec(
 		`UPDATE domain_config SET status=?, error=?, cert_not_after=?, updated_at=? WHERE id=1 AND domain=?`,
 		status, errMsg, na, time.Now().UTC().Format(time.RFC3339Nano), domain)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateDomainServe flips the serve mode without touching issuance state —
+// the cert is identical either way, so a serve-only change must not re-enter
+// the issue loop. Conditional on the stored domain like UpdateDomainStatus:
+// ErrNotFound when no row matches.
+func (s *Store) UpdateDomainServe(domain, serve string) error {
+	res, err := s.db.Exec(
+		`UPDATE domain_config SET serve=?, updated_at=? WHERE id=1 AND domain=?`,
+		serve, time.Now().UTC().Format(time.RFC3339Nano), domain)
 	if err != nil {
 		return err
 	}
