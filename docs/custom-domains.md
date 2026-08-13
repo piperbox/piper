@@ -13,8 +13,8 @@ A box serves apps on a base domain. Two ways to configure it:
 
 ### Via the control API (dashboard / `curl`) — relay free-tier boxes
 
-    PUT /v1/domain          {"domain":"example.com","dns_provider":"cloudflare","dns_token":"<token>"}
-    GET /v1/domain          → status, DNS records to create, dns_ok, cert_not_after
+    PUT /v1/domain          {"domain":"example.com","dns_provider":"cloudflare","dns_token":"<token>","serve":"relay"}
+    GET /v1/domain          → status, DNS records to create, dns_ok, cert_not_after, serve
     DELETE /v1/domain       → remove the custom domain
 
 The box issues a wildcard cert via ACME DNS-01 (Let's Encrypt) using the
@@ -28,6 +28,24 @@ starts immediately — records are needed for traffic, not for the cert.
 `dns_ok` flips true once the wildcard resolves to the same address as the base
 domain.
 
+### Direct serve
+
+`"serve"` on `PUT /v1/domain` picks how traffic reaches the box: `"relay"`
+(default, above) or `"direct"`. In direct mode the box terminates traffic
+itself — point `<domain>` and `*.<domain>` A/AAAA records straight at the
+box's public IP, which `GET /v1/domain` fills in from the relay-observed
+address (override with `PIPER_PUBLIC_IP` for split-horizon or NAT setups).
+The relay claim is kept regardless, so both paths serve the same cert while
+your DNS still points at the relay — the flip to direct is gradual and
+reversible, not a cutover. A box behind CGNAT will never show `dns_ok: true`
+in direct mode (nothing can dial it); port-forwarded boxes should confirm
+with a real request to the domain rather than trust `dns_ok` alone.
+
+Flipping `serve` alone on an otherwise-unchanged config re-sends the same
+`domain`/`dns_provider`/`dns_token` — the row updates in place and issuance is
+left alone. Change the token too and it's treated as a config replacement:
+issuance restarts from scratch.
+
 Secrets never leave the box: the DNS token is write-only (`dns_token_set`
 signals presence), and the cert's private key and ACME account key live in
 piperd's data dir with 0600 permissions.
@@ -36,7 +54,8 @@ piperd's data dir with 0600 permissions.
 
 `PIPER_BASE_DOMAIN` + `PIPER_DNS_PROVIDER` (creds via the provider's own env
 vars, e.g. `CLOUDFLARE_DNS_API_TOKEN`), or a static `PIPER_TLS_CERT_FILE` /
-`PIPER_TLS_KEY_FILE` pair. Unchanged from before.
+`PIPER_TLS_KEY_FILE` pair. Unchanged from before. Add `PIPER_SERVE=direct`
+alongside `PIPER_BASE_DOMAIN` for the env-managed equivalent of direct serve.
 
 ### Precedence
 

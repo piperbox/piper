@@ -1103,6 +1103,11 @@ func TestPublicIPFuncPrecedence(t *testing.T) {
 	if got := publicIPFunc(config.Config{}, tc)(); got != "" {
 		t.Fatalf("unconnected tunnel = %q, want empty", got)
 	}
+	// A typo'd PIPER_PUBLIC_IP must not render verbatim into dns_records —
+	// it falls through to empty (no override, no tunnel client to consult).
+	if got := publicIPFunc(config.Config{PublicIP: "not-an-ip"}, nil)(); got != "" {
+		t.Fatalf("junk override = %q, want empty", got)
+	}
 }
 
 // PIPER_SERVE reaches the env-managed manager only when valid; junk degrades

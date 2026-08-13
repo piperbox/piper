@@ -408,7 +408,11 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 func publicIPFunc(cfg config.Config, tc *agent.TunnelClient) func() string {
 	return func() string {
 		if cfg.PublicIP != "" {
-			return cfg.PublicIP
+			if net.ParseIP(cfg.PublicIP) == nil {
+				log.Printf("piper: ignoring invalid PIPER_PUBLIC_IP=%q (not an IP)", cfg.PublicIP)
+			} else {
+				return cfg.PublicIP
+			}
 		}
 		if tc != nil {
 			return tc.ObservedIP()

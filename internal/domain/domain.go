@@ -220,7 +220,7 @@ func New(o Options) *Manager {
 		}
 	}
 	envServe := o.EnvServe
-	if envServe == "" {
+	if envServe != ServeDirect {
 		envServe = ServeRelay
 	}
 	publicIP := o.PublicIP

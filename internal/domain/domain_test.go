@@ -1452,3 +1452,21 @@ func TestEnvServeDirect(t *testing.T) {
 		t.Fatalf("env direct records = %+v", got.DNSRecords)
 	}
 }
+
+// A junk EnvServe value (should have been caught upstream, but New must not
+// trust it) behaves as relay rather than being stored and reported verbatim.
+func TestEnvServeJunkNormalizesToRelay(t *testing.T) {
+	st := openDomainTestStore(t)
+	m := New(Options{
+		Store: st, Proxy: &fakeProxy{}, EnvDomain: "env.example.com",
+		EnvServe: "bogus",
+	})
+	t.Cleanup(m.Close)
+	got, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Serve != ServeRelay {
+		t.Fatalf("env Serve = %q, want relay", got.Serve)
+	}
+}
