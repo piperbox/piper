@@ -151,7 +151,7 @@ func persistAgentIdentity(baseDomain string, stderr io.Writer) bool {
 	if baseDomain == "" {
 		return true
 	}
-	matched, err := config.SaveCurrentBoxBaseDomainResult(baseDomain)
+	matched, err := config.SaveCurrentBoxBaseDomain(baseDomain)
 	if err != nil {
 		fmt.Fprintln(stderr, "error: cannot save this box's relay identity:", err)
 		return false

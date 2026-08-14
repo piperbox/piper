@@ -626,6 +626,79 @@ func TestBoxesRefreshKeepsRelayErrorAndCapsRetries(t *testing.T) {
 	}
 }
 
+// v.err banners two unrelated failures: a relay fetch error, which must stay
+// visible until the next relay fetch resolves, and a transient local error —
+// a box switch that could not dial (app.go's switchBoxMsg) or a config read
+// that failed. A healthy local reload clears the transient one; only a
+// successful relay response clears the relay one.
+func TestBoxesLocalErrorClearsOnReloadWhileRelayErrorSurvives(t *testing.T) {
+	newView := func() boxesView {
+		v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
+		v.relay = relayFor(fakeRelay{})
+		return v
+	}
+	reload := func(t *testing.T, v boxesView, requestID uint64) (boxesView, tea.Cmd) {
+		t.Helper()
+		vv, cmd := v.Update(boxesLoadedMsg{
+			boxes: []config.Box{{Name: "local", Addr: "192.168.1.6:8088"}}, current: "local",
+			relayAPI: "https://relay.example", credential: "cred-xyz",
+			viewID: v.viewID, requestID: requestID,
+		})
+		return vv.(boxesView), cmd
+	}
+
+	t.Run("healthy reload clears a failed box switch", func(t *testing.T) {
+		v, cmd := reload(t, newView(), 1)
+		if cmd == nil {
+			t.Fatal("initial local load should start a relay fetch")
+		}
+		vv, _ := v.Update(relayAgentsLoadedMsg{agents: []relayclient.Agent{}, viewID: v.viewID, requestID: v.relayRequestID})
+		v = vv.(boxesView)
+		vv, _ = v.Update(errMsg{errors.New("dial box: connection refused")})
+		v = vv.(boxesView)
+		if v.err == nil {
+			t.Fatal("fixture did not banner the failed box switch")
+		}
+		// The relay fetch already succeeded, so no further relay response is
+		// coming; the 2s local poll is the only thing left to clear the banner.
+		for requestID := uint64(2); requestID <= 6; requestID++ {
+			v, _ = reload(t, v, requestID)
+		}
+		if v.err != nil {
+			t.Fatalf("failed box switch survived %d healthy local reloads: %v", 5, v.err)
+		}
+	})
+
+	t.Run("relay error survives reloads and a local error", func(t *testing.T) {
+		relayFailure := errors.New("temporary relay outage")
+		v, _ := reload(t, newView(), 1)
+		vv, _ := v.Update(relayAgentsLoadedMsg{err: relayFailure, viewID: v.viewID, requestID: v.relayRequestID})
+		v = vv.(boxesView)
+		if !errors.Is(v.err, relayFailure) {
+			t.Fatalf("fixture did not banner the relay failure: %v", v.err)
+		}
+		v, retry := reload(t, v, 2)
+		if !errors.Is(v.err, relayFailure) || retry == nil {
+			t.Fatalf("local reload must keep the relay error until the next fetch resolves: err=%v retry=%v", v.err, retry != nil)
+		}
+		vv, _ = v.Update(errMsg{errors.New("dial box: connection refused")})
+		v = vv.(boxesView)
+		v, _ = reload(t, v, 3)
+		if !errors.Is(v.err, relayFailure) {
+			t.Fatalf("relay error must return once the transient error clears: %v", v.err)
+		}
+		vv, _ = v.Update(relayAgentsLoadedMsg{agents: []relayclient.Agent{}, viewID: v.viewID, requestID: v.relayRequestID})
+		v = vv.(boxesView)
+		if v.err != nil {
+			t.Fatalf("successful relay fetch must clear the relay error: %v", v.err)
+		}
+		v, _ = reload(t, v, 4)
+		if v.err != nil {
+			t.Fatalf("cleared relay error must not come back on the next reload: %v", v.err)
+		}
+	})
+}
+
 func TestLiveRelayNameCannotGateLocalRowWithoutIdentity(t *testing.T) {
 	v := boxesView{relayRows: map[string]bool{"same": true}}
 	if v.liveRelayRow(config.Box{Name: "same", Addr: "192.168.1.6:8088"}) {

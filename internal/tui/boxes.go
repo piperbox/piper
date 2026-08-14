@@ -26,7 +26,13 @@ type boxesView struct {
 	loaded  bool
 	cursor  int
 	err     error
-	reach   map[string]bool // box name -> last LAN probe result; absent = probing
+	// relayErr holds the last relay fetch failure. It is banner state of its
+	// own because v.err also carries transient local errors (a box switch that
+	// could not dial, a failed config read) that a healthy reload clears,
+	// while a relay failure has to stay visible until the next relay fetch
+	// actually resolves.
+	relayErr error
+	reach    map[string]bool // box name -> last LAN probe result; absent = probing
 	// relayConnected is populated from the account's /agents listing for relay
 	// rows; those rows must never be probed through a LAN address. Keys are the
 	// persisted relay base domains, not display names.
@@ -239,6 +245,9 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		credentialsChanged := v.relayAPI != msg.relayAPI || v.credential != msg.credential
 		v.configBoxes, v.current, v.loaded = append([]config.Box(nil), msg.boxes...), msg.current, true
 		v.relayAPI, v.credential = msg.relayAPI, msg.credential
+		// The local config read succeeded, so any transient error it or a box
+		// switch left on the banner is stale. A pending relay failure is not.
+		v.err = v.relayErr
 		if credentialsChanged {
 			v.relayAgents = nil
 			v.relayLoaded = false
@@ -290,7 +299,7 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return v, nil
 		}
 		if msg.err != nil {
-			v.err = msg.err
+			v.err, v.relayErr = msg.err, msg.err
 			v.relayFetchStarted = false
 			v.relayRetryCount++
 			return v, nil
@@ -302,7 +311,7 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.relayAgents = append([]relayclient.Agent(nil), msg.agents...)
 		v.relayLoaded = true
 		v.boxes, v.relayConnected, v.relayRows = mergeBoxes(v.configBoxes, v.relayAgents, v.relayAPI, v.credential)
-		v.err = nil
+		v.err, v.relayErr = nil, nil
 		v.relayRetryCount = 0
 		if v.cursor >= len(v.boxes) {
 			v.cursor = max(0, len(v.boxes)-1)

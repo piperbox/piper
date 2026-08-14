@@ -35,17 +35,6 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 }
 
-func TestClientAddr(t *testing.T) {
-	t.Setenv("PIPER_ADDR", "")
-	if got := ClientAddr(); got != "http://127.0.0.1:8088" {
-		t.Errorf("default ClientAddr = %q", got)
-	}
-	t.Setenv("PIPER_ADDR", "http://piper.test:9000")
-	if got := ClientAddr(); got != "http://piper.test:9000" {
-		t.Errorf("configured ClientAddr = %q", got)
-	}
-}
-
 // Only "1" keeps the browser shut; every other value (including the common
 // "0") leaves the launch on, so a stray export can't silently disable it.
 func TestNoBrowser(t *testing.T) {
@@ -492,6 +481,7 @@ func TestSaveClientFileRoundTrip(t *testing.T) {
 func TestSaveCurrentBoxBaseDomainTargetsLocalDaemonAndClearsDuplicates(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "http://127.0.0.1:8088")
+	t.Setenv("PIPER_API_ADDR", "")
 	if err := SaveClientFile(ClientFile{
 		Boxes: []Box{
 			{Name: "remote", Addr: "http://192.168.1.6:8088", BaseDomain: "local.example"},
@@ -503,7 +493,7 @@ func TestSaveCurrentBoxBaseDomainTargetsLocalDaemonAndClearsDuplicates(t *testin
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := SaveCurrentBoxBaseDomain(" local.example "); err != nil {
+	if _, err := SaveCurrentBoxBaseDomain(" local.example "); err != nil {
 		t.Fatal(err)
 	}
 
@@ -528,6 +518,7 @@ func TestSaveCurrentBoxBaseDomainTargetsLocalDaemonAndClearsDuplicates(t *testin
 func TestSaveCurrentBoxBaseDomainNoOpDoesNotRewrite(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PIPER_ADDR", "http://127.0.0.1:8088")
+	t.Setenv("PIPER_API_ADDR", "")
 	if err := SaveClientFile(ClientFile{
 		Boxes:   []Box{{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: "local.example"}},
 		Current: "local",
@@ -543,7 +534,7 @@ func TestSaveCurrentBoxBaseDomainNoOpDoesNotRewrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(20 * time.Millisecond)
-	if err := SaveCurrentBoxBaseDomain("local.example"); err != nil {
+	if _, err := SaveCurrentBoxBaseDomain("local.example"); err != nil {
 		t.Fatal(err)
 	}
 	after, err := os.Stat(path)
@@ -552,6 +543,82 @@ func TestSaveCurrentBoxBaseDomainNoOpDoesNotRewrite(t *testing.T) {
 	}
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Fatalf("no-op identity persistence rewrote config: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}
+
+// Enrollment always applies to the piperd on this box, reached over its Unix
+// socket, so the row that receives the identity must be the one addressing
+// that local daemon for every documented PIPER_API_ADDR value. PIPER_API_ADDR
+// is a bind address: a wildcard or empty host means "all interfaces", which
+// includes loopback, and must not stop a loopback row matching.
+func TestSaveCurrentBoxBaseDomainMatchesLocalDaemonForEveryBindAddress(t *testing.T) {
+	const (
+		remoteRow = "remote"
+		localRow  = "local"
+	)
+	rows := func() []Box {
+		return []Box{
+			{Name: remoteRow, Addr: "http://192.168.1.6:8088"},
+			{Name: localRow, Addr: "http://127.0.0.1:8088"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		apiAddr string
+		boxes   []Box
+		want    string
+	}{
+		{name: "wildcard IPv4 bind", apiAddr: "0.0.0.0:8088", boxes: rows(), want: localRow},
+		{name: "port-only bind", apiAddr: ":8088", boxes: rows(), want: localRow},
+		{name: "wildcard IPv6 bind", apiAddr: "[::]:8088", boxes: rows(), want: localRow},
+		{name: "loopback bind", apiAddr: "127.0.0.1:8088", boxes: rows(), want: localRow},
+		{name: "localhost bind", apiAddr: "localhost:8088", boxes: rows(), want: localRow},
+		{name: "unset", apiAddr: "", boxes: rows(), want: localRow},
+		{name: "specific host bind", apiAddr: "192.168.1.6:8088", boxes: rows(), want: remoteRow},
+		{
+			name:    "wildcard bind with an IPv6 loopback row",
+			apiAddr: "0.0.0.0:8088",
+			boxes:   []Box{{Name: remoteRow, Addr: "http://192.168.1.6:8088"}, {Name: localRow, Addr: "http://[::1]:8088"}},
+			want:    localRow,
+		},
+		{
+			name:    "specific host bind with no row addressing it",
+			apiAddr: "192.168.1.7:8088",
+			boxes:   rows(),
+			want:    "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			// The identity follows the enrolled local daemon, never the
+			// client's remote-pinned dial address.
+			t.Setenv("PIPER_ADDR", "http://192.168.1.6:8088")
+			t.Setenv("PIPER_API_ADDR", tc.apiAddr)
+			if err := SaveClientFile(ClientFile{Boxes: tc.boxes, Current: remoteRow}); err != nil {
+				t.Fatal(err)
+			}
+			matched, err := SaveCurrentBoxBaseDomain("mine.example")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if matched != (tc.want != "") {
+				t.Fatalf("matched = %v, want %v for PIPER_API_ADDR=%q", matched, tc.want != "", tc.apiAddr)
+			}
+			cf, err := LoadClientFile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, box := range cf.Boxes {
+				want := ""
+				if box.Name == tc.want {
+					want = "mine.example"
+				}
+				if box.BaseDomain != want {
+					t.Fatalf("box %q BaseDomain = %q, want %q for PIPER_API_ADDR=%q: %+v",
+						box.Name, box.BaseDomain, want, tc.apiAddr, cf.Boxes)
+				}
+			}
+		})
 	}
 }
 

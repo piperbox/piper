@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -92,11 +93,6 @@ func Load() Config {
 		PublicIP:       env("PIPER_PUBLIC_IP", ""),
 		Serve:          env("PIPER_SERVE", ""),
 	}
-}
-
-// ClientAddr returns the piperd base URL used by the piper CLI.
-func ClientAddr() string {
-	return env("PIPER_ADDR", "http://127.0.0.1:8088")
 }
 
 // NoBrowser reports whether PIPER_NO_BROWSER=1 asks the CLI and TUI to keep the
@@ -401,36 +397,29 @@ func SaveClient(cc ClientConfig) error {
 	})
 }
 
-// SaveCurrentBoxBaseDomain records the relay's stable identity on the box whose
-// address is the local piperd address. Current is only a display selection and
-// may point at another box. Any other box carrying the same identity is
-// cleared, so one local daemon cannot be represented by multiple rows.
-func SaveCurrentBoxBaseDomain(baseDomain string) error {
-	_, err := SaveCurrentBoxBaseDomainResult(baseDomain)
-	return err
-}
-
-// SaveCurrentBoxBaseDomainResult records the relay identity on the box that
-// owns the local daemon's control address. The address is deliberately derived
-// from the daemon-side API setting, not PIPER_ADDR: the latter may point at a
-// different box while enrollment still happens through the local Unix socket.
+// SaveCurrentBoxBaseDomain records the relay's stable identity on the box that
+// addresses the local daemon, the one enrollment always reaches over the local
+// Unix socket. Current is only a display selection and may point at another
+// box. Any other box carrying the same identity is cleared, so one local
+// daemon cannot be represented by multiple rows.
+//
+// The row is resolved from the CLI process's own PIPER_API_ADDR rather than
+// from PIPER_ADDR, which may deliberately point at a different box.
+// PIPER_API_ADDR is piperd's bind address, not a dial address, so it is
+// normalized before comparison: an empty or wildcard host listens on every
+// interface, loopback included, and therefore resolves to the loopback rows.
+//
 // It reports whether a matching saved box was found so callers can make a
 // no-op visible without treating it as an error.
-func SaveCurrentBoxBaseDomainResult(baseDomain string) (bool, error) {
+func SaveCurrentBoxBaseDomain(baseDomain string) (bool, error) {
 	baseDomain = strings.TrimSpace(baseDomain)
 	if baseDomain == "" {
 		return true, nil
 	}
-	localAddr := clientAddrKey(localClientAddr())
+	localKeys := localDaemonAddrKeys()
 	matched := false
 	err := UpdateClientFile(func(cf *ClientFile) (bool, error) {
-		target := -1
-		for i, box := range cf.Boxes {
-			if clientAddrKey(box.Addr) == localAddr && localAddr != "" {
-				target = i
-				break
-			}
-		}
+		target := localBoxIndex(cf.Boxes, localKeys)
 		if target < 0 {
 			return false, nil
 		}
@@ -454,8 +443,70 @@ func SaveCurrentBoxBaseDomainResult(baseDomain string) (bool, error) {
 	return matched, err
 }
 
-func localClientAddr() string {
-	return env("PIPER_API_ADDR", "http://127.0.0.1:8088")
+// localDaemonAddrKeys returns the clientAddrKey values that address the piperd
+// running on this box, most specific first. A wildcard or empty bind host
+// yields the loopback dial addresses; it never yields another interface's
+// address, which could name a different box's row.
+func localDaemonAddrKeys() []string {
+	host, port := splitBindAddr(env("PIPER_API_ADDR", "127.0.0.1:8088"))
+	if !answersOnLoopback(host) {
+		return []string{joinAddrKey(host, port)}
+	}
+	keys := make([]string, 0, 3)
+	for _, loopback := range []string{"127.0.0.1", "::1", "localhost"} {
+		keys = append(keys, joinAddrKey(loopback, port))
+	}
+	return keys
+}
+
+// localBoxIndex reports the first saved box addressing one of keys, keys being
+// in priority order.
+func localBoxIndex(boxes []Box, keys []string) int {
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		for i, box := range boxes {
+			if clientAddrKey(box.Addr) == key {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// answersOnLoopback reports whether a daemon bound to host is reachable over
+// loopback: an unspecified host listens on every interface, and a loopback
+// host is one already.
+func answersOnLoopback(host string) bool {
+	if host == "" || host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsUnspecified() || ip.IsLoopback()
+	}
+	return false
+}
+
+// splitBindAddr normalizes a listen address (host:port, with or without a
+// scheme) into its host and port.
+func splitBindAddr(addr string) (host, port string) {
+	key := clientAddrKey(addr)
+	host, port, err := net.SplitHostPort(key)
+	if err != nil {
+		return key, ""
+	}
+	return host, port
+}
+
+func joinAddrKey(host, port string) string {
+	if host == "" {
+		return ""
+	}
+	if port == "" {
+		return host
+	}
+	return net.JoinHostPort(host, port)
 }
 
 func clientAddrKey(addr string) string {
