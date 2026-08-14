@@ -406,12 +406,24 @@ func SaveClient(cc ClientConfig) error {
 // may point at another box. Any other box carrying the same identity is
 // cleared, so one local daemon cannot be represented by multiple rows.
 func SaveCurrentBoxBaseDomain(baseDomain string) error {
+	_, err := SaveCurrentBoxBaseDomainResult(baseDomain)
+	return err
+}
+
+// SaveCurrentBoxBaseDomainResult records the relay identity on the box that
+// owns the local daemon's control address. The address is deliberately derived
+// from the daemon-side API setting, not PIPER_ADDR: the latter may point at a
+// different box while enrollment still happens through the local Unix socket.
+// It reports whether a matching saved box was found so callers can make a
+// no-op visible without treating it as an error.
+func SaveCurrentBoxBaseDomainResult(baseDomain string) (bool, error) {
 	baseDomain = strings.TrimSpace(baseDomain)
 	if baseDomain == "" {
-		return nil
+		return true, nil
 	}
-	localAddr := clientAddrKey(ClientAddr())
-	return UpdateClientFile(func(cf *ClientFile) (bool, error) {
+	localAddr := clientAddrKey(localClientAddr())
+	matched := false
+	err := UpdateClientFile(func(cf *ClientFile) (bool, error) {
 		target := -1
 		for i, box := range cf.Boxes {
 			if clientAddrKey(box.Addr) == localAddr && localAddr != "" {
@@ -422,6 +434,7 @@ func SaveCurrentBoxBaseDomain(baseDomain string) error {
 		if target < 0 {
 			return false, nil
 		}
+		matched = true
 		changed := false
 		for i := range cf.Boxes {
 			if i == target {
@@ -438,6 +451,11 @@ func SaveCurrentBoxBaseDomain(baseDomain string) error {
 		}
 		return changed, nil
 	})
+	return matched, err
+}
+
+func localClientAddr() string {
+	return env("PIPER_API_ADDR", "http://127.0.0.1:8088")
 }
 
 func clientAddrKey(addr string) string {

@@ -171,16 +171,8 @@ func TestSaveClientPreservesPersistedAgentIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	clientData, err := json.Marshal(cc)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var clientRaw map[string]any
-	if err := json.Unmarshal(clientData, &clientRaw); err != nil {
-		t.Fatal(err)
-	}
-	if got, _ := clientRaw["base_domain"].(string); got != "cloud.example" {
-		t.Fatalf("LoadClient dropped persisted agent identity: %q", got)
+	if cc.BaseDomain != "cloud.example" {
+		t.Fatalf("LoadClient dropped persisted agent identity: %q", cc.BaseDomain)
 	}
 	if err := SaveClient(cc); err != nil {
 		t.Fatal(err)

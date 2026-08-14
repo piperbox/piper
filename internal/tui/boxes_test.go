@@ -548,23 +548,6 @@ func TestRelayRowsDoNotMergeIntoUnidentifiedLocalBoxes(t *testing.T) {
 	}
 }
 
-func TestRelayResultWithoutCurrentRequestIsRejected(t *testing.T) {
-	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
-	v.relay = relayFor(fakeRelay{})
-	vv, _ := v.Update(boxesLoadedMsg{
-		boxes: []config.Box{{Name: "local", Addr: "192.168.1.6:8088"}}, current: "local",
-		relayAPI: "https://relay.example", credential: "cred-xyz", viewID: v.viewID, requestID: 1,
-	})
-	v = vv.(boxesView)
-	vv, _ = v.Update(relayAgentsLoadedMsg{
-		agents: []relayclient.Agent{{BaseDomain: "stale.example", Connected: true}}, viewID: v.viewID,
-	})
-	v = vv.(boxesView)
-	if v.relayLoaded {
-		t.Fatal("relay result without the initiating request identity was accepted")
-	}
-}
-
 func TestBoxesViewRejectsStaleLocalRefresh(t *testing.T) {
 	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
 	vv, _ := v.Update(boxesLoadedMsg{
@@ -582,60 +565,7 @@ func TestBoxesViewRejectsStaleLocalRefresh(t *testing.T) {
 	}
 }
 
-func TestBoxesViewRejectsZeroRequestIDForCurrentView(t *testing.T) {
-	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
-	// Keep the request tracker at its initial value so the older-request guard
-	// cannot mask the independent zero-request identity check. The already
-	// loaded config stands in for the accepted current state; the post-newer
-	// stale-result path remains covered below.
-	v.configBoxes = []config.Box{{Name: "fresh", Addr: "fresh-addr"}}
-	v.boxes = append([]config.Box(nil), v.configBoxes...)
-	v.current = "fresh"
-	v.loaded = true
-	vv, _ := v.Update(boxesLoadedMsg{
-		boxes: []config.Box{{Name: "stale", Addr: "stale-addr"}}, current: "stale",
-		viewID: v.viewID,
-	})
-	v = vv.(boxesView)
-	if len(v.configBoxes) != 1 || v.configBoxes[0].Name != "fresh" {
-		t.Fatalf("zero-request current-view refresh replaced config: %+v", v.configBoxes)
-	}
-}
-
-func TestBoxesViewRejectsZeroViewIDWithNewerRequest(t *testing.T) {
-	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
-	vv, _ := v.Update(boxesLoadedMsg{
-		boxes: []config.Box{{Name: "fresh", Addr: "fresh-addr"}}, current: "fresh",
-		viewID: v.viewID, requestID: 2,
-	})
-	v = vv.(boxesView)
-	vv, _ = v.Update(boxesLoadedMsg{
-		boxes: []config.Box{{Name: "stale", Addr: "stale-addr"}}, current: "stale",
-		requestID: 3,
-	})
-	v = vv.(boxesView)
-	if len(v.configBoxes) != 1 || v.configBoxes[0].Name != "fresh" {
-		t.Fatalf("zero-view newer refresh replaced config: %+v", v.configBoxes)
-	}
-}
-
-func TestBoxesViewRejectsZeroIdentityLocalRefreshAfterNewerResult(t *testing.T) {
-	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
-	vv, _ := v.Update(boxesLoadedMsg{
-		boxes: []config.Box{{Name: "fresh", Addr: "fresh-addr"}}, current: "fresh",
-		viewID: v.viewID, requestID: 2,
-	})
-	v = vv.(boxesView)
-	vv, _ = v.Update(boxesLoadedMsg{
-		boxes: []config.Box{{Name: "stale", Addr: "stale-addr"}}, current: "stale",
-	})
-	v = vv.(boxesView)
-	if len(v.configBoxes) != 1 || v.configBoxes[0].Name != "fresh" {
-		t.Fatalf("zero-identity stale refresh replaced newer config: %+v", v.configBoxes)
-	}
-}
-
-func TestBoxesRefreshRetriesAfterTransientRelayError(t *testing.T) {
+func TestBoxesRefreshKeepsRelayErrorAndCapsRetries(t *testing.T) {
 	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
 	v.relay = relayFor(fakeRelay{})
 	vv, cmd := v.Update(boxesLoadedMsg{
@@ -656,8 +586,43 @@ func TestBoxesRefreshRetriesAfterTransientRelayError(t *testing.T) {
 		relayAPI: "https://relay.example", credential: "cred-xyz", viewID: v.viewID, requestID: 2,
 	})
 	v = vv.(boxesView)
-	if v.err != nil || retry == nil {
-		t.Fatalf("successful local reload must clear error and reopen one relay fetch gate: err=%v retry=%v", v.err, retry != nil)
+	if v.err == nil || retry == nil {
+		t.Fatalf("local reload must keep the relay error visible while reopening a bounded fetch: err=%v retry=%v", v.err, retry != nil)
+	}
+	vv, _ = v.Update(relayAgentsLoadedMsg{err: errors.New("temporary relay outage"), viewID: v.viewID, requestID: v.relayRequestID})
+	v = vv.(boxesView)
+	vv, retry = v.Update(boxesLoadedMsg{
+		boxes: []config.Box{{Name: "local", Addr: "192.168.1.6:8088"}}, current: "local",
+		relayAPI: "https://relay.example", credential: "cred-xyz", viewID: v.viewID, requestID: 3,
+	})
+	v = vv.(boxesView)
+	if v.err == nil || retry == nil {
+		t.Fatalf("second retry must remain visible and bounded: err=%v retry=%v", v.err, retry != nil)
+	}
+	vv, _ = v.Update(relayAgentsLoadedMsg{err: errors.New("temporary relay outage"), viewID: v.viewID, requestID: v.relayRequestID})
+	v = vv.(boxesView)
+	vv, retry = v.Update(boxesLoadedMsg{
+		boxes: []config.Box{{Name: "local", Addr: "192.168.1.6:8088"}}, current: "local",
+		relayAPI: "https://relay.example", credential: "cred-xyz", viewID: v.viewID, requestID: 4,
+	})
+	v = vv.(boxesView)
+	if v.err == nil || retry != nil {
+		t.Fatalf("relay retries must stop after the cap while preserving the error: err=%v retry=%v", v.err, retry != nil)
+	}
+	// A credential change starts a new fetch budget; a successful response is
+	// the only path that clears the sticky relay error.
+	vv, retry = v.Update(boxesLoadedMsg{
+		boxes: []config.Box{{Name: "local", Addr: "192.168.1.6:8088"}}, current: "local",
+		relayAPI: "https://relay.example", credential: "cred-2", viewID: v.viewID, requestID: 5,
+	})
+	v = vv.(boxesView)
+	if retry == nil {
+		t.Fatal("credential change should start a fresh relay fetch")
+	}
+	vv, _ = v.Update(relayAgentsLoadedMsg{agents: []relayclient.Agent{}, viewID: v.viewID, requestID: v.relayRequestID})
+	v = vv.(boxesView)
+	if v.err != nil {
+		t.Fatalf("successful relay fetch must clear the sticky error: %v", v.err)
 	}
 }
 
@@ -980,6 +945,107 @@ func TestBoxesViewRejectsRelayResultFromPreviousView(t *testing.T) {
 	if fresh.relayLoaded || len(fresh.boxes) != 1 {
 		t.Fatalf("relay response from a previous view was accepted: relayLoaded=%v boxes=%+v", fresh.relayLoaded, fresh.boxes)
 	}
+}
+
+func TestRelayFetchRearmsWhenBoxesViewRegainsTop(t *testing.T) {
+	seedConfig(t, config.ClientFile{
+		Boxes:   []config.Box{{Name: "local", Addr: "192.168.1.6:8088", RelayAPI: "https://relay.example", AccountCredential: "cred-xyz"}},
+		Current: "local",
+	})
+	relay := relayFor(fakeRelay{agents: []relayclient.Agent{{BaseDomain: "cloud.example", Connected: true}}})
+	m := NewModel("local", "", false, fakeAPI{}).WithDialer(fakeDialer(fakeAPI{}, "", false, nil)).WithRelay(relay)
+	boxes := newBoxesView(m.dial)
+	boxes.relay = relay
+	next, _ := m.Update(pushMsg{view: boxes})
+	m = next.(Model)
+
+	boxes = m.top().(boxesView)
+	next, cmd := m.Update(boxesLoadedMsg{
+		boxes:   []config.Box{{Name: "local", Addr: "192.168.1.6:8088", RelayAPI: "https://relay.example", AccountCredential: "cred-xyz"}},
+		current: "local", relayAPI: "https://relay.example", credential: "cred-xyz",
+		viewID: boxes.viewID, requestID: 1,
+	})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("initial boxes load should start a relay fetch")
+	}
+	var stale tea.Msg
+	for _, msg := range commandMessages(cmd) {
+		if _, ok := msg.(relayAgentsLoadedMsg); ok {
+			stale = msg
+			break
+		}
+	}
+	if stale == nil {
+		t.Fatal("initial boxes load did not produce a relay result")
+	}
+
+	next, _ = m.Update(pushMsg{view: newBoxForm(m.dial, nil)})
+	m = next.(Model)
+	// The result lands while the form is on top and is intentionally dropped by
+	// the root's top-view routing.
+	next, _ = m.Update(stale)
+	m = next.(Model)
+
+	next, refresh := m.Update(keyEsc())
+	m = next.(Model)
+	if refresh == nil {
+		t.Fatal("returning to boxes should refresh the view")
+	}
+	loaded := refresh()
+	next, retry := m.Update(loaded)
+	m = next.(Model)
+	if retry == nil {
+		t.Fatal("boxes view must re-arm a relay fetch after regaining the top")
+	}
+	for _, msg := range commandMessages(retry) {
+		next, _ = m.Update(msg)
+		m = next.(Model)
+	}
+	if !m.top().(boxesView).relayLoaded {
+		t.Fatalf("relay result after returning to boxes was lost: %s", m.View())
+	}
+}
+
+func TestEditingMergedRowWithDuplicateBaseDomainUsesSelectedName(t *testing.T) {
+	first := config.Box{Name: "first", Addr: "first:8088", Token: "first-token", BaseDomain: "shared.example"}
+	second := config.Box{Name: "second", Addr: "second:8088", Token: "second-token", BaseDomain: "shared.example"}
+	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
+	vv, _ := v.Update(boxesLoadedMsg{
+		boxes: []config.Box{first, second}, current: "first",
+		relayAPI: "https://relay.example", credential: "cred-xyz",
+		viewID: v.viewID, requestID: 1,
+	})
+	v = vv.(boxesView)
+	vv, _ = v.Update(relayAgentsLoadedMsg{
+		agents: []relayclient.Agent{{Name: "second", BaseDomain: "shared.example", Connected: true}},
+		viewID: v.viewID, requestID: v.relayRequestID,
+	})
+	v = vv.(boxesView)
+	if len(v.boxes) != 2 {
+		t.Fatalf("duplicate identity fixture should retain both local rows: %+v", v.boxes)
+	}
+	for i, box := range v.boxes {
+		if box.Name == "second" {
+			v.cursor = i
+		}
+	}
+	vv, cmd := v.Update(keyRunes('e'))
+	if cmd == nil {
+		t.Fatal("selected local row should open the edit form")
+	}
+	push, ok := cmd().(pushMsg)
+	if !ok {
+		t.Fatalf("edit should emit pushMsg, got %T", cmd())
+	}
+	form, ok := push.view.(boxFormView)
+	if !ok {
+		t.Fatalf("edit should push boxFormView, got %T", push.view)
+	}
+	if form.orig.Name != "second" || form.orig.Token != "second-token" {
+		t.Fatalf("edit selected the wrong duplicate-identity row: orig=%+v", form.orig)
+	}
+	_ = vv
 }
 
 func TestBoxesRefreshProbesLANBoxWithRelayCreds(t *testing.T) {

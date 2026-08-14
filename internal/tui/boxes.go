@@ -43,6 +43,7 @@ type boxesView struct {
 	latestRequestID   uint64
 	relayRequestID    uint64
 	relayFetchStarted bool
+	relayRetryCount   int
 }
 
 var (
@@ -111,7 +112,10 @@ func (v boxesView) fetchRelay(requestID uint64) tea.Cmd {
 	}
 }
 
-const relayRequestTimeout = 5 * time.Second
+const (
+	relayRequestTimeout = 5 * time.Second
+	maxRelayRetries     = 3
+)
 
 func relayCredentials(cf config.ClientFile) (string, string) {
 	if current, ok := cf.CurrentBox(); ok && current.RelayAPI != "" && current.AccountCredential != "" {
@@ -221,7 +225,7 @@ func (v boxesView) probe(box config.Box) tea.Cmd {
 func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case boxesLoadedMsg:
-		if msg.viewID != v.viewID || msg.requestID == 0 || msg.requestID < v.latestRequestID {
+		if msg.viewID != v.viewID || msg.requestID < v.latestRequestID {
 			return v, nil
 		}
 		if msg.requestID > v.latestRequestID {
@@ -242,15 +246,14 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v.relayRows = map[string]bool{}
 			v.relayFetchStarted = false
 			v.relayRequestID = 0
+			v.relayRetryCount = 0
 		} else if configChanged && !v.relayLoaded {
 			// An in-flight result for the old config must be rejected; allow a
 			// replacement request for the new config to establish a fresh snapshot.
 			v.relayFetchStarted = false
 			v.relayRequestID = 0
+			v.relayRetryCount = 0
 		}
-		// A successful local reload is also the retry/reset gate after a
-		// transient relay failure.
-		v.err = nil
 		if v.relayLoaded {
 			v.boxes, v.relayConnected, v.relayRows = mergeBoxes(v.configBoxes, v.relayAgents, v.relayAPI, v.credential)
 		} else {
@@ -269,11 +272,8 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		var cmds []tea.Cmd
-		if !v.relayFetchStarted && v.relay != nil && msg.relayAPI != "" && msg.credential != "" {
+		if !v.relayFetchStarted && v.relayRetryCount < maxRelayRetries && v.relay != nil && msg.relayAPI != "" && msg.credential != "" {
 			requestID := msg.requestID
-			if requestID == 0 {
-				requestID = atomic.AddUint64(&boxesRefreshSequence, 1)
-			}
 			v.relayRequestID = requestID
 			v.relayFetchStarted = true
 			cmds = append(cmds, v.fetchRelay(requestID))
@@ -286,12 +286,13 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return v, tea.Batch(cmds...)
 	case relayAgentsLoadedMsg:
-		if msg.viewID == 0 || msg.viewID != v.viewID || msg.requestID == 0 || msg.requestID != v.relayRequestID {
+		if msg.viewID != v.viewID || msg.requestID != v.relayRequestID {
 			return v, nil
 		}
 		if msg.err != nil {
 			v.err = msg.err
 			v.relayFetchStarted = false
+			v.relayRetryCount++
 			return v, nil
 		}
 		selected := ""
@@ -302,6 +303,7 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		v.relayLoaded = true
 		v.boxes, v.relayConnected, v.relayRows = mergeBoxes(v.configBoxes, v.relayAgents, v.relayAPI, v.credential)
 		v.err = nil
+		v.relayRetryCount = 0
 		if v.cursor >= len(v.boxes) {
 			v.cursor = max(0, len(v.boxes)-1)
 		}
@@ -342,7 +344,7 @@ func (v boxesView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				boxes, orig := v.boxes, v.boxes[v.cursor]
 				if orig.BaseDomain != "" {
 					for _, persisted := range v.configBoxes {
-						if persisted.BaseDomain == orig.BaseDomain {
+						if persisted.Name == orig.Name {
 							orig = persisted
 							break
 						}

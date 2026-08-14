@@ -151,9 +151,13 @@ func persistAgentIdentity(baseDomain string, stderr io.Writer) bool {
 	if baseDomain == "" {
 		return true
 	}
-	if err := config.SaveCurrentBoxBaseDomain(baseDomain); err != nil {
+	matched, err := config.SaveCurrentBoxBaseDomainResult(baseDomain)
+	if err != nil {
 		fmt.Fprintln(stderr, "error: cannot save this box's relay identity:", err)
 		return false
+	}
+	if !matched {
+		fmt.Fprintln(stderr, "note: skipping relay identity persistence: no saved box matches this local daemon")
 	}
 	return true
 }
@@ -171,19 +175,15 @@ func waitConnected(ctx context.Context, dataDir, baseDomain string, stdout, stde
 	deadline := time.Now().Add(enrollApplyTimeout)
 	sawStatus := false
 	enrolled := false
-	identitySaved := baseDomain != ""
 	for ctx.Err() == nil && time.Now().Before(deadline) {
 		if c, ok := findEnrollSocket(dataDir); ok {
 			if st, err := c.RelayStatus(); err == nil {
 				sawStatus = true
 				enrolled = enrolled || st.Enrolled
-				if st.BaseDomain != "" {
+				if st.BaseDomain != "" && st.BaseDomain != baseDomain {
 					baseDomain = st.BaseDomain
-					if !identitySaved {
-						if !persistAgentIdentity(baseDomain, stderr) {
-							return 1
-						}
-						identitySaved = true
+					if !persistAgentIdentity(baseDomain, stderr) {
+						return 1
 					}
 				}
 				if st.Tunnel == "connected" {

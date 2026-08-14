@@ -629,24 +629,8 @@ func TestRunGithubResetAborts(t *testing.T) {
 
 func boxWithPersistedAgentIdentity(t *testing.T, box config.Box, baseDomain string) config.Box {
 	t.Helper()
-	data, err := json.Marshal(box)
-	if err != nil {
-		t.Fatalf("marshal box: %v", err)
-	}
-	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		t.Fatalf("decode box: %v", err)
-	}
-	raw["base_domain"] = baseDomain
-	data, err = json.Marshal(raw)
-	if err != nil {
-		t.Fatalf("marshal box with identity: %v", err)
-	}
-	var got config.Box
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("decode box with identity: %v", err)
-	}
-	return got
+	box.BaseDomain = baseDomain
+	return box
 }
 
 func TestDialBoxRelayOnlyUsesPersistedAgentIdentity(t *testing.T) {

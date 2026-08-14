@@ -98,6 +98,14 @@ func (m Model) popN(n int) Model {
 		n = len(m.stack) - 1
 	}
 	m.stack = m.stack[:len(m.stack)-n]
+	if boxes, ok := m.top().(boxesView); ok {
+		// A relay result can arrive while a child view is on top. Re-arm the
+		// visible boxes view so its next reload fetches a fresh snapshot.
+		boxes.relayFetchStarted = false
+		boxes.relayRequestID = 0
+		boxes.relayRetryCount = 0
+		m.stack[len(m.stack)-1] = boxes
+	}
 	return m
 }
 
@@ -113,7 +121,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.githubCancel()
 					m.githubCancel = nil
 				}
-				m.stack = m.stack[:len(m.stack)-1]
+				m = m.popN(1)
 				return m, m.refresh()
 			}
 			return m, nil
@@ -124,7 +132,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.stack) == 1 {
 					return m, tea.Quit
 				}
-				m.stack = m.stack[:len(m.stack)-1]
+				m = m.popN(1)
 				return m, m.refresh()
 			case "t":
 				if _, ok := m.top().(boxesView); !ok {

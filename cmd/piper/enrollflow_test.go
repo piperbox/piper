@@ -150,6 +150,110 @@ func TestEnrollFlowClaimsAndWaitsForConnect(t *testing.T) {
 	}
 }
 
+func TestEnrollFlowPersistsIdentityOnLocalRowDespiteRemoteClientAddr(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "http://192.168.1.6:8088")
+	t.Setenv("PIPER_API_ADDR", "")
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	if err := config.SaveClientFile(config.ClientFile{
+		Boxes: []config.Box{
+			{Name: "remote", Addr: "http://192.168.1.6:8088", BaseDomain: "remote.example"},
+			{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: "old-local.example"},
+		},
+		Current: "remote",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePiperd{}
+	f.status.Store(enrollapi.Status{Enrolled: false, Tunnel: "off"})
+	f.enroll = func(enrollapi.EnrollRequest) (int, any) {
+		f.status.Store(enrollapi.Status{Enrolled: true, BaseDomain: "new-local.example", Tunnel: "connected"})
+		return http.StatusOK, enrollapi.EnrollResponse{BaseDomain: "new-local.example", RelayAddr: "relay:7000"}
+	}
+	dataDir := startFakeEnrollSocket(t, f.mux())
+	var out, errb bytes.Buffer
+	if code := enrollAfterLogin(context.Background(), enrollFlowOpts{relayAPI: "a", dataDir: dataDir, reEnroll: true}, "cred", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+
+	cf, err := config.LoadClientFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cf.Boxes[1].BaseDomain; got != "new-local.example" {
+		t.Fatalf("enrolled daemon identity landed on the wrong row: local=%q remote=%q; config=%+v", got, cf.Boxes[0].BaseDomain, cf)
+	}
+	if got := cf.Boxes[0].BaseDomain; got != "remote.example" {
+		t.Fatalf("unrelated remote identity changed: %q", got)
+	}
+}
+
+func TestEnrollFlowReportsSkippedIdentityWhenNoLocalRowMatches(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_API_ADDR", "")
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	if err := config.SaveClientFile(config.ClientFile{
+		Boxes:   []config.Box{{Name: "remote", Addr: "192.168.1.6:8088"}},
+		Current: "remote",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakePiperd{}
+	f.status.Store(enrollapi.Status{Enrolled: false, Tunnel: "off"})
+	f.enroll = func(enrollapi.EnrollRequest) (int, any) {
+		f.status.Store(enrollapi.Status{Enrolled: true, BaseDomain: "new-local.example", Tunnel: "connected"})
+		return http.StatusOK, enrollapi.EnrollResponse{BaseDomain: "new-local.example", RelayAddr: "relay:7000"}
+	}
+	dataDir := startFakeEnrollSocket(t, f.mux())
+	var out, errb bytes.Buffer
+	if code := enrollAfterLogin(context.Background(), enrollFlowOpts{relayAPI: "a", dataDir: dataDir, reEnroll: true}, "cred", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "skipping relay identity") {
+		t.Fatalf("stderr = %q, want a visible no-match skip", errb.String())
+	}
+}
+
+func TestWaitConnectedPersistsIdentityWhenObservedBaseDomainChanges(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_API_ADDR", "")
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	if err := config.SaveClientFile(config.ClientFile{
+		Boxes:   []config.Box{{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: "old.example"}},
+		Current: "local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var statusCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": "test"})
+	})
+	mux.HandleFunc("GET "+enrollapi.PathStatus, func(w http.ResponseWriter, r *http.Request) {
+		if statusCalls.Add(1) == 1 {
+			_ = json.NewEncoder(w).Encode(enrollapi.Status{Enrolled: true, BaseDomain: "old.example", Tunnel: "retrying"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(enrollapi.Status{Enrolled: true, BaseDomain: "new.example", Tunnel: "connected"})
+	})
+	dataDir := startFakeEnrollSocket(t, mux)
+	var out, errb bytes.Buffer
+	if code := waitConnected(context.Background(), dataDir, "old.example", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	cf, err := config.LoadClientFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cf.Boxes[0].BaseDomain; got != "new.example" {
+		t.Fatalf("latest observed daemon identity was not persisted: got %q", got)
+	}
+}
+
 func TestEnrollFlowQuotaMessage(t *testing.T) {
 	stubNoLocalPiperd(t)
 	f := &fakePiperd{}
