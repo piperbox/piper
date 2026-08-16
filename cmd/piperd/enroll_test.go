@@ -416,25 +416,49 @@ func TestStatusServesIdentityFromTheSameSnapshotAsEnrolled(t *testing.T) {
 	}
 }
 
-// An operator-pinned enrollment lives in the environment, which config.Load
-// prefers over relay.json — so there the running config stays the authority.
-func TestStatusServesEnvManagedIdentityFromTheRunningConfig(t *testing.T) {
-	dir := t.TempDir()
-	s, _ := newTestEnrollServer(t, dir)
-	s.envManaged = func() bool { return true }
-	s.relayStatus = func() (string, string) { return "env-relay:7000", "env.example" }
-	// A pinned box normally still carries the relay.json it was enrolled with,
-	// so both authorities are present and only their ORDER decides the answer.
-	if err := config.SaveRelayFile(dir, config.RelayFile{RelayAddr: "file-relay:7000",
-		RelayToken: "enr-file", BaseDomain: "file.example", Terminated: true}); err != nil {
-		t.Fatal(err)
-	}
-	st := getStatus(t, s)
-	if !st.Enrolled || !st.EnvManaged {
-		t.Fatalf("status = %+v, want an env-managed enrollment", st)
-	}
-	if st.BaseDomain != "env.example" || st.RelayAddr != "env-relay:7000" {
-		t.Fatalf("status = %+v, want the environment's identity to win over the relay file's", st)
+// Two authorities can enroll a box: the PIPER_RELAY_* environment, which
+// config.Load prefers over relay.json, and relay.json itself. Either alone
+// enrolls it, the environment outranks the file, and EnvManaged names which one
+// answered. Walking every combination keeps each part of that rule observable
+// in a row of its own — an untested state is where a term silently stops
+// carrying its weight.
+func TestStatusReportsTheAuthorityThatEnrolledTheBox(t *testing.T) {
+	const envAddr, envDomain = "env-relay:7000", "env.example"
+	const fileAddr, fileDomain = "file-relay:7000", "file.example"
+	for _, tc := range []struct {
+		name                 string
+		env, file            bool
+		enrolled, envManaged bool
+		addr, domain         string
+	}{
+		{name: "neither authority"},
+		{name: "environment alone", env: true,
+			enrolled: true, envManaged: true, addr: envAddr, domain: envDomain},
+		{name: "relay file alone", file: true,
+			enrolled: true, addr: fileAddr, domain: fileDomain},
+		{name: "environment over a conflicting relay file", env: true, file: true,
+			enrolled: true, envManaged: true, addr: envAddr, domain: envDomain},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			s, _ := newTestEnrollServer(t, dir)
+			s.envManaged = func() bool { return tc.env }
+			s.relayStatus = func() (string, string) { return envAddr, envDomain }
+			if tc.file {
+				if err := config.SaveRelayFile(dir, config.RelayFile{RelayAddr: fileAddr,
+					RelayToken: "enr-file", BaseDomain: fileDomain, Terminated: true}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			st := getStatus(t, s)
+			if st.Enrolled != tc.enrolled || st.EnvManaged != tc.envManaged {
+				t.Fatalf("status = %+v, want Enrolled=%v EnvManaged=%v", st, tc.enrolled, tc.envManaged)
+			}
+			if st.RelayAddr != tc.addr || st.BaseDomain != tc.domain {
+				t.Fatalf("status = %+v, want the identity %q/%q of the authority in effect",
+					st, tc.addr, tc.domain)
+			}
+		})
 	}
 }
 
