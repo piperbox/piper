@@ -326,6 +326,31 @@ func TestWaitConnectedRejectsPreRestartTunnelError(t *testing.T) {
 	}
 }
 
+// The pre-restart process can outlive the whole apply window. Nothing it says
+// settles this enrollment — but the enrollment IS persisted (its own Enrolled
+// reads the new relay.json), so the wait must still end advisory, not exit 1.
+func TestWaitConnectedNeverSettlesOnAPersistentlyMismatchedDaemon(t *testing.T) {
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	saveLocalBox(t, "new.example")
+	stale := enrollapi.Status{Enrolled: true, BaseDomain: "old.example", RelayAddr: "old-relay:7000",
+		Tunnel: "connected", LastTunnelError: "relay rejected this box's enrollment"}
+	dataDir, calls := scriptedStatusSocket(t, stale, stale)
+	var out, errb bytes.Buffer
+	if code := waitConnected(context.Background(), dataDir, "new.example", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, stderr = %q: the enrollment persisted, so the wait stays advisory", code, errb.String())
+	}
+	if got := localBoxBaseDomain(t); got != "new.example" {
+		t.Fatalf("pre-restart identity was adopted: got %q", got)
+	}
+	if strings.Contains(out.String(), "old.example") || strings.Contains(errb.String(), "rejected") {
+		t.Fatalf("stdout = %q stderr = %q, want no verdict taken from the pre-restart process", out.String(), errb.String())
+	}
+	if n := calls.Load(); n < 2 {
+		t.Fatalf("status polls = %d, want the loop to keep polling past the mismatch", n)
+	}
+}
+
 func TestEnrollFlowQuotaMessage(t *testing.T) {
 	stubNoLocalPiperd(t)
 	f := &fakePiperd{}

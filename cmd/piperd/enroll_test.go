@@ -423,12 +423,18 @@ func TestStatusServesEnvManagedIdentityFromTheRunningConfig(t *testing.T) {
 	s, _ := newTestEnrollServer(t, dir)
 	s.envManaged = func() bool { return true }
 	s.relayStatus = func() (string, string) { return "env-relay:7000", "env.example" }
+	// A pinned box normally still carries the relay.json it was enrolled with,
+	// so both authorities are present and only their ORDER decides the answer.
+	if err := config.SaveRelayFile(dir, config.RelayFile{RelayAddr: "file-relay:7000",
+		RelayToken: "enr-file", BaseDomain: "file.example", Terminated: true}); err != nil {
+		t.Fatal(err)
+	}
 	st := getStatus(t, s)
 	if !st.Enrolled || !st.EnvManaged {
 		t.Fatalf("status = %+v, want an env-managed enrollment", st)
 	}
 	if st.BaseDomain != "env.example" || st.RelayAddr != "env-relay:7000" {
-		t.Fatalf("status = %+v, want the environment's identity even with no relay file", st)
+		t.Fatalf("status = %+v, want the environment's identity to win over the relay file's", st)
 	}
 }
 
