@@ -119,13 +119,21 @@ func (s *enrollServer) mux() *http.ServeMux {
 }
 
 // status is a fixed, secrets-free shape built field-by-field — never a marshal
-// of config.RelayFile.
+// of config.RelayFile. Enrolled and the identity it describes come from ONE
+// snapshot: an applied enrollment rewrites relay.json before this process
+// re-execs, so until then the in-memory config still names the box being
+// replaced — two sources answered a re-enroll under the old box's name.
 func (s *enrollServer) status(w http.ResponseWriter, r *http.Request) {
-	_, found, _ := config.LoadRelayFile(s.dataDir)
+	rf, found, _ := config.LoadRelayFile(s.dataDir)
 	env := s.envManaged()
 	st := enrollapi.Status{Enrolled: found || env, EnvManaged: env}
-	if st.Enrolled {
+	switch {
+	case env:
+		// PIPER_RELAY_* overrides relay.json (config.Load), so an
+		// operator-pinned enrollment is whatever this process is running with.
 		st.RelayAddr, st.BaseDomain = s.relayStatus()
+	case found:
+		st.RelayAddr, st.BaseDomain = rf.RelayAddr, rf.BaseDomain
 	}
 	st.Tunnel, st.LastTunnelError = s.tunnelStatus()
 	writeEnrollJSON(w, http.StatusOK, st)

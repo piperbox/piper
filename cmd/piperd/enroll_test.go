@@ -377,6 +377,61 @@ func TestStatusNeverLeaksSecrets(t *testing.T) {
 	}
 }
 
+func getStatus(t *testing.T, s *enrollServer) enrollapi.Status {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.mux().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, enrollapi.PathStatus, nil))
+	var st enrollapi.Status
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("decode status: %v (%s)", err, rec.Body.String())
+	}
+	return st
+}
+
+// A re-enroll rewrites relay.json and then re-execs; between those two the old
+// process still answers this socket. Enrolled has always been read fresh from
+// the file, so serving the identity from the old in-memory config produced a
+// snapshot that claimed the new enrollment under the old box's name.
+func TestStatusServesIdentityFromTheSameSnapshotAsEnrolled(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newTestEnrollServer(t, dir)
+	// The running config is the pre-re-enroll identity...
+	s.relayStatus = func() (string, string) { return "old-relay:7000", "old.example" }
+	s.tunnelStatus = func() (string, string) { return "connected", "" }
+	// ...while relay.json already carries the enrollment just applied.
+	if err := config.SaveRelayFile(dir, config.RelayFile{RelayAddr: "new-relay:7000",
+		RelayToken: "enr-2", BaseDomain: "new.example", Terminated: true}); err != nil {
+		t.Fatal(err)
+	}
+	st := getStatus(t, s)
+	if !st.Enrolled {
+		t.Fatalf("status = %+v, want enrolled from the saved relay file", st)
+	}
+	if st.BaseDomain != "new.example" || st.RelayAddr != "new-relay:7000" {
+		t.Fatalf("status = %+v, want the identity of the relay file that made Enrolled true", st)
+	}
+	// The tunnel fields come from the live controller and must survive.
+	if st.Tunnel != "connected" {
+		t.Fatalf("status = %+v, want the running tunnel controller's state", st)
+	}
+}
+
+// An operator-pinned enrollment lives in the environment, which config.Load
+// prefers over relay.json — so there the running config stays the authority.
+func TestStatusServesEnvManagedIdentityFromTheRunningConfig(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := newTestEnrollServer(t, dir)
+	s.envManaged = func() bool { return true }
+	s.relayStatus = func() (string, string) { return "env-relay:7000", "env.example" }
+	st := getStatus(t, s)
+	if !st.Enrolled || !st.EnvManaged {
+		t.Fatalf("status = %+v, want an env-managed enrollment", st)
+	}
+	if st.BaseDomain != "env.example" || st.RelayAddr != "env-relay:7000" {
+		t.Fatalf("status = %+v, want the environment's identity even with no relay file", st)
+	}
+}
+
 func TestEnrollSocketPathPrecedence(t *testing.T) {
 	t.Setenv("RUNTIME_DIRECTORY", "/run/piper")
 	if got := enrollSocketPath("/dd"); got != "/run/piper/piperd.sock" {

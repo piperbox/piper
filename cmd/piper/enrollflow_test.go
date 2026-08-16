@@ -217,40 +217,112 @@ func TestEnrollFlowReportsSkippedIdentityWhenNoLocalRowMatches(t *testing.T) {
 	}
 }
 
-func TestWaitConnectedPersistsIdentityWhenObservedBaseDomainChanges(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PIPER_API_ADDR", "")
-	stubNoLocalPiperd(t)
-	fastPoll(t)
-	if err := config.SaveClientFile(config.ClientFile{
-		Boxes:   []config.Box{{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: "old.example"}},
-		Current: "local",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	var statusCalls atomic.Int32
+// scriptedStatusSocket answers the first status poll with first and every later
+// one with rest — the shape of an apply, where the pre-restart process keeps
+// answering until the new one owns the socket. It returns the data dir that
+// finds the socket, plus the poll counter.
+func scriptedStatusSocket(t *testing.T, first, rest enrollapi.Status) (string, *atomic.Int32) {
+	t.Helper()
+	calls := new(atomic.Int32)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/version", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"version": "test"})
 	})
 	mux.HandleFunc("GET "+enrollapi.PathStatus, func(w http.ResponseWriter, r *http.Request) {
-		if statusCalls.Add(1) == 1 {
-			_ = json.NewEncoder(w).Encode(enrollapi.Status{Enrolled: true, BaseDomain: "old.example", Tunnel: "retrying"})
-			return
+		st := rest
+		if calls.Add(1) == 1 {
+			st = first
 		}
-		_ = json.NewEncoder(w).Encode(enrollapi.Status{Enrolled: true, BaseDomain: "new.example", Tunnel: "connected"})
+		_ = json.NewEncoder(w).Encode(st)
 	})
-	dataDir := startFakeEnrollSocket(t, mux)
-	var out, errb bytes.Buffer
-	if code := waitConnected(context.Background(), dataDir, "old.example", &out, &errb); code != 0 {
-		t.Fatalf("code = %d, err = %s", code, errb.String())
+	return startFakeEnrollSocket(t, mux), calls
+}
+
+// saveLocalBox points the client config at a fresh HOME holding one row for the
+// local daemon — the row waitConnected persists the relay identity onto.
+func saveLocalBox(t *testing.T, baseDomain string) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_API_ADDR", "")
+	if err := config.SaveClientFile(config.ClientFile{
+		Boxes:   []config.Box{{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: baseDomain}},
+		Current: "local",
+	}); err != nil {
+		t.Fatal(err)
 	}
+}
+
+func localBoxBaseDomain(t *testing.T) string {
+	t.Helper()
 	cf, err := config.LoadClientFile()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cf.Boxes[0].BaseDomain; got != "new.example" {
+	return cf.Boxes[0].BaseDomain
+}
+
+// The lost-response path has no expected identity, so the daemon's own answer
+// is the only source there and every change to it must land — a one-shot latch
+// would freeze the first (pre-restart) reading forever.
+func TestWaitConnectedPersistsChangedIdentityWithNoExpectedDomain(t *testing.T) {
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	saveLocalBox(t, "old.example")
+	dataDir, _ := scriptedStatusSocket(t,
+		enrollapi.Status{Enrolled: true, BaseDomain: "old.example", Tunnel: "retrying"},
+		enrollapi.Status{Enrolled: true, BaseDomain: "new.example", Tunnel: "connected"})
+	var out, errb bytes.Buffer
+	if code := waitConnected(context.Background(), dataDir, "", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if got := localBoxBaseDomain(t); got != "new.example" {
 		t.Fatalf("latest observed daemon identity was not persisted: got %q", got)
+	}
+}
+
+// During a --re-enroll apply the first poll can still reach the pre-restart
+// process, which answers with the OLD identity and an old tunnel that reports
+// "connected" until its session tears down. Taking that answer overwrites the
+// just-persisted new identity and exits 0 on a box that is about to disappear.
+func TestWaitConnectedRejectsPreRestartIdentitySnapshot(t *testing.T) {
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	// The enroll response already persisted the new identity on this row.
+	saveLocalBox(t, "new.example")
+	dataDir, calls := scriptedStatusSocket(t,
+		enrollapi.Status{Enrolled: true, BaseDomain: "old.example", RelayAddr: "old-relay:7000", Tunnel: "connected"},
+		enrollapi.Status{Enrolled: true, BaseDomain: "new.example", RelayAddr: "new-relay:7000", Tunnel: "connected"})
+	var out, errb bytes.Buffer
+	if code := waitConnected(context.Background(), dataDir, "new.example", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, err = %s", code, errb.String())
+	}
+	if got := localBoxBaseDomain(t); got != "new.example" {
+		t.Fatalf("pre-restart identity overwrote the enrolled one: got %q", got)
+	}
+	if !strings.Contains(out.String(), "new.example") || strings.Contains(out.String(), "old.example") {
+		t.Fatalf("stdout = %q, want the enrolled identity reported and the pre-restart one absent", out.String())
+	}
+	if n := calls.Load(); n < 2 {
+		t.Fatalf("status polls = %d, want the pre-restart answer to be polled past", n)
+	}
+}
+
+// Same snapshot, the other verdict it carries: a handshake rejection recorded
+// by the process being replaced says nothing about the enrollment replacing it.
+func TestWaitConnectedRejectsPreRestartTunnelError(t *testing.T) {
+	stubNoLocalPiperd(t)
+	fastPoll(t)
+	saveLocalBox(t, "new.example")
+	dataDir, _ := scriptedStatusSocket(t,
+		enrollapi.Status{Enrolled: true, BaseDomain: "old.example", Tunnel: "retrying",
+			LastTunnelError: "relay rejected this box's enrollment"},
+		enrollapi.Status{Enrolled: true, BaseDomain: "new.example", Tunnel: "connected"})
+	var out, errb bytes.Buffer
+	if code := waitConnected(context.Background(), dataDir, "new.example", &out, &errb); code != 0 {
+		t.Fatalf("code = %d, stderr = %q: a rejection recorded by the pre-restart process is not this enrollment's verdict", code, errb.String())
+	}
+	if !strings.Contains(out.String(), "new.example") {
+		t.Fatalf("stdout = %q, want the enrolled identity reported live", out.String())
 	}
 }
 
