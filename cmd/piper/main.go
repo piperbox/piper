@@ -50,9 +50,13 @@ func dialClient(remote string, stderr io.Writer) (*client.Client, bool) {
 			fmt.Fprintln(stderr, "error: remote target requires a relay login; run `piper login`")
 			return nil, false
 		}
-		return client.New(strings.TrimRight(cc.RelayAPI, "/")+"/agents/"+remote, cc.AccountCredential), true
+		return relayClient(cc.RelayAPI, remote, cc.AccountCredential), true
 	}
 	return client.New(cc.Addr, cc.Token), true
+}
+
+func relayClient(api, remote, credential string) *client.Client {
+	return client.New(strings.TrimRight(api, "/")+"/agents/"+remote, credential)
 }
 
 // printAgentVersion reports the build of the piperd actually serving this
@@ -128,9 +132,19 @@ var launchTUI = func(remote string, stderr io.Writer) int {
 	return 0
 }
 
-// dialBox builds a TUI client for an arbitrary saved box (LAN path), for the
-// in-TUI box switcher. Relay boxes are switched via the phase-6 wizard, not here.
+// dialBox builds a TUI client for an arbitrary saved box. Boxes with a LAN
+// address use the direct path; relay-only rows use the same proxied client as
+// dialClient and enter the TUI's relay mode.
 func dialBox(b config.Box) (tui.API, string, bool, error) {
+	if b.Addr == "" && b.RelayAPI != "" {
+		if b.AccountCredential == "" {
+			return nil, "", true, errors.New("relay box has no account credential")
+		}
+		if b.BaseDomain == "" {
+			return nil, "", true, errors.New("relay box has no agent identity")
+		}
+		return relayClient(b.RelayAPI, b.BaseDomain, b.AccountCredential).WithTimeout(tuiRequestTimeout), b.BaseDomain, true, nil
+	}
 	return client.New(b.Addr, b.Token).WithTimeout(tuiRequestTimeout), b.Addr, false, nil
 }
 

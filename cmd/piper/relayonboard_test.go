@@ -601,6 +601,13 @@ func TestRelayLoginReusesAValidSavedCredential(t *testing.T) {
 			t.Errorf("stdout missing %q:\n%s", want, out.String())
 		}
 	}
+	cf, err := config.LoadClientFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cf.Boxes) != 1 || cf.Boxes[0].BaseDomain != "ab12-erin.public.getpiper.co" {
+		t.Fatalf("reusable login did not persist enrolled identity: %+v", cf)
+	}
 }
 
 // A credential the relay no longer accepts must not strand the user: login
@@ -741,6 +748,13 @@ func TestRelayLoginRunsClaimStage(t *testing.T) {
 	got := f.got.Load().(enrollapi.EnrollRequest)
 	if got.RelayAPI != relay.URL || got.AccountCredential != "cred-xyz" {
 		t.Fatalf("claim did not carry the fresh credential: %+v", got)
+	}
+	cf, err := config.LoadClientFile()
+	if err != nil || len(cf.Boxes) != 1 {
+		t.Fatalf("saved client config = %+v (%v)", cf, err)
+	}
+	if got := cf.Boxes[0].BaseDomain; got != "ab12-erin.public.getpiper.co" {
+		t.Fatalf("saved agent identity = %q, want ab12-erin.public.getpiper.co", got)
 	}
 	for _, want := range []string{"logged in to relay as erin", "claiming this box", "ab12-erin.public.getpiper.co"} {
 		if !strings.Contains(out.String(), want) {
