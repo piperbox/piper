@@ -78,7 +78,7 @@ func TestBoxFormRejectsEmptyAndDuplicateName(t *testing.T) {
 }
 
 func TestBoxFormEditPreservesRelayFields(t *testing.T) {
-	orig := config.Box{Name: "cloud", Addr: "old", Token: "t1", RelayAPI: "https://relay.example", AccountCredential: "cred"}
+	orig := boxWithBaseDomain(t, config.Box{Name: "cloud", Addr: "old", Token: "t1", RelayAPI: "https://relay.example", AccountCredential: "cred"}, "cloud.example")
 	seedConfig(t, config.ClientFile{Boxes: []config.Box{orig}, Current: "cloud"})
 	v := newBoxFormEdit(fakeDialer(fakeAPI{}, "", false, nil), []config.Box{orig}, orig)
 	_, cmd := submitForm(t, v, "cloud", "new-addr", "t2")
@@ -93,11 +93,14 @@ func TestBoxFormEditPreservesRelayFields(t *testing.T) {
 	if got.RelayAPI != "https://relay.example" || got.AccountCredential != "cred" {
 		t.Fatalf("edit dropped relay fields: %+v", got)
 	}
+	if got := persistedBaseDomain(t, got); got != "cloud.example" {
+		t.Fatalf("edit dropped relay identity: %q", got)
+	}
 }
 
 func TestBoxesKeyOpensForms(t *testing.T) {
 	v := newBoxesView(fakeDialer(fakeAPI{}, "", false, nil))
-	vv, _ := v.Update(boxesLoadedMsg{boxes: []config.Box{{Name: "pi4", Addr: "a"}}, current: "pi4"})
+	vv, _ := v.Update(boxesLoadedMsg{boxes: []config.Box{{Name: "pi4", Addr: "a"}}, current: "pi4", viewID: v.viewID, requestID: 1})
 	v = vv.(boxesView)
 
 	_, cmd := v.Update(keyRunes('a'))

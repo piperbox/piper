@@ -85,6 +85,7 @@ func (v boxFormView) validate() (config.Box, error) {
 		Name:              name,
 		Addr:              addr,
 		Token:             strings.TrimSpace(v.token.Value()),
+		BaseDomain:        v.orig.BaseDomain,
 		RelayAPI:          v.orig.RelayAPI,
 		AccountCredential: v.orig.AccountCredential,
 	}, nil
