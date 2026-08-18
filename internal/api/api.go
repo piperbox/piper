@@ -89,6 +89,11 @@ type DomainManager interface {
 	RemoveAppDomain(domain string) error
 	AppDomainStatus(domain string) (domain.AppDomainStatus, error)
 	AppDomainStatuses(app string) ([]domain.AppDomainStatus, error)
+	// AppDomainsActivatable reports whether this box's configuration can ever
+	// activate a per-app custom domain: issuance is TLS-ALPN-01 spliced down
+	// the relay tunnel, so a direct-served box answers false until #506 and
+	// POST refuses synchronously (#509 review).
+	AppDomainsActivatable() bool
 }
 
 // RepoBinder tells the relay which repository an app deploys from, so brokered
@@ -126,6 +131,9 @@ type AgentInfo struct {
 // would pick with no App stored locally; the reset endpoint reports it so the
 // operator learns whether anything takes over. Nil answers "unknown".
 func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHubApp func(), dom DomainManager, binder RepoBinder, nextGitHubProvider func() string, fetchRepo FetchRepoFunc, self AgentInfo) http.Handler {
+	// Compute once and reuse it at the three current response construction
+	// sites so every returned app carries the same daemon-reported scheme.
+	scheme := appScheme(self)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -159,7 +167,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, App{App: app, Scheme: appScheme(self)})
+		writeJSON(w, http.StatusCreated, App{App: app, Scheme: scheme})
 	})
 	// The running daemon's own build. Nothing else can answer this: the piperd
 	// binary on disk may already have been replaced by an upgrade that has not
@@ -188,7 +196,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 				serverError(w, r, err)
 				return
 			}
-			out = append(out, App{App: a, Status: status, Scheme: appScheme(self)})
+			out = append(out, App{App: a, Status: status, Scheme: scheme})
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
@@ -207,7 +215,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, App{App: app, Status: status, Scheme: appScheme(self)})
+		writeJSON(w, http.StatusOK, App{App: app, Status: status, Scheme: scheme})
 	})
 	mux.HandleFunc("GET /v1/apps/{name}/deployments", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -605,6 +613,10 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 	})
 	mux.HandleFunc("POST /v1/apps/{name}/domains", func(w http.ResponseWriter, r *http.Request) {
 		if noRelay(w) {
+			return
+		}
+		if !dom.AppDomainsActivatable() {
+			http.Error(w, "per-app custom domains cannot activate on this box: their TLS-ALPN-01 challenge only arrives spliced down a relay tunnel this box does not have (#506 lifts this)", http.StatusConflict)
 			return
 		}
 		var in struct {

@@ -413,6 +413,17 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	return opts
 }
 
+// appDomainCapability wraps the domain manager with the box-level answer the
+// API's per-app collection needs: whether this box can ever activate one.
+// Issuance is TLS-ALPN-01 spliced down the relay tunnel, so the answer is
+// exactly "a relay is configured" until #506 (#509 review).
+type appDomainCapability struct {
+	*domain.Manager
+	activatable bool
+}
+
+func (a appDomainCapability) AppDomainsActivatable() bool { return a.activatable }
+
 // publicIPFunc resolves the box's public IP for direct serve mode:
 // PIPER_PUBLIC_IP pins it; otherwise the relay-observed address, read lazily
 // because it only exists after the first tunnel handshake — well after the
@@ -693,7 +704,7 @@ func main() {
 	var wh *webhookStarter
 	var dm api.DomainManager
 	if domMgr != nil {
-		dm = domMgr
+		dm = appDomainCapability{Manager: domMgr, activatable: cfg.RelayAddr != ""}
 	}
 	// binder is declared as the api.RepoBinder interface (not a
 	// *agent.TunnelClient) so that on a LAN-only box it stays genuinely nil — a
