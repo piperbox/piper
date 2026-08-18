@@ -51,6 +51,17 @@ type App struct {
 	Scheme string
 }
 
+// URL renders the URL this box serves the app on: the daemon-reported scheme
+// plus the stored hostname, or "" for a never-deployed app. One function for
+// every client surface — the per-package twins it replaced were a
+// one-binary-two-answers drift waiting to happen (#509 review).
+func (a App) URL() string {
+	if a.Hostname == "" {
+		return ""
+	}
+	return a.Scheme + "://" + a.Hostname
+}
+
 // appScheme names the URL scheme this box's apps are served on.
 func appScheme(self AgentInfo) string {
 	if self.AppsOverHTTPS {

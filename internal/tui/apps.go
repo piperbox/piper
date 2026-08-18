@@ -94,7 +94,7 @@ func (v appsView) View() string {
 			cursor = "▸ "
 		}
 		status := strings.TrimSpace(statusIcon(a.Status) + " " + a.Status)
-		fmt.Fprintf(&b, "%s%-16s %-12s %s\n", cursor, a.Name, status, appURL(a.Hostname, a.Scheme))
+		fmt.Fprintf(&b, "%s%-16s %-12s %s\n", cursor, a.Name, status, a.URL())
 	}
 	return b.String()
 }

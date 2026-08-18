@@ -37,7 +37,8 @@ type API interface {
 
 // Dialer builds a client for a saved box. cmd/piper supplies the real one
 // (LAN or relay path); tests inject a fake. addr identifies the box in the
-// status bar; remote marks a relay-backed box (HTTPS app URLs).
+// status bar; remote marks a box reached through the relay (hint wording only
+// — URL schemes follow the daemon-reported api.App.Scheme, #507).
 type Dialer func(config.Box) (c API, addr string, remote bool, err error)
 
 // RelayAPI is the slice of the relay control API the TUI consumes.

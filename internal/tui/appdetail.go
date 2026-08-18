@@ -134,7 +134,7 @@ func (v appDetailView) View() string {
 	if v.err != nil {
 		fmt.Fprintf(&b, " ⚠ %v\n\n", v.err)
 	}
-	url := appURL(v.app.Hostname, v.app.Scheme)
+	url := v.app.URL()
 	if url == "" {
 		url = "—"
 	}

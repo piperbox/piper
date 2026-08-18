@@ -456,6 +456,22 @@ func TestAppsAPIIncludesHostname(t *testing.T) {
 	}
 }
 
+// One function renders an app's URL for every client surface: the
+// daemon-reported scheme, guarded against a never-deployed app (empty
+// hostname must never render "://").
+func TestAppURLFollowsTheDaemonReportedScheme(t *testing.T) {
+	for _, tc := range []struct{ name, host, scheme, want string }{
+		{"never deployed", "", "https", ""},
+		{"http box", "blog.piper.localhost", "http", "http://blog.piper.localhost"},
+		{"https box", "blog.example.dev", "https", "https://blog.example.dev"},
+	} {
+		a := App{App: store.App{Hostname: tc.host}, Scheme: tc.scheme}
+		if got := a.URL(); got != tc.want {
+			t.Errorf("%s: URL() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestReservedNameRejected(t *testing.T) {
 	s := newTestStore(t)
 	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})
