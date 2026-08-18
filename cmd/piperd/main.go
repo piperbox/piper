@@ -434,6 +434,19 @@ func publicIPFunc(cfg config.Config, tc *agent.TunnelClient) func() string {
 	}
 }
 
+// resumeStoredDomains restarts the stored domain rows' lifecycle loops at
+// boot. Extracted from the relay block so the resume decision is testable;
+// the gating here is exactly what the relay block imposed.
+func resumeStoredDomains(cfg config.Config, domMgr *domain.Manager) {
+	if domMgr == nil || cfg.RelayAddr == "" {
+		return
+	}
+	if cfg.Terminated {
+		domMgr.Resume() // box-wide API-managed config; env mode has none
+	}
+	domMgr.ResumeAppDomains()
+}
+
 // envServe validates PIPER_SERVE for the env-managed domain path. Junk logs
 // and degrades to relay: a typo must not change where user traffic flows.
 func envServe(cfg config.Config) string {
@@ -814,10 +827,7 @@ func main() {
 			tc.Run(ctx, cfg.RelayAddr, cfg.RelayToken, cfg.BaseDomain, dialLocal)
 		}()
 		domMgr.SetRelay(tc)
-		if cfg.Terminated {
-			domMgr.Resume() // box-wide API-managed config; env mode has none
-		}
-		domMgr.ResumeAppDomains()
+		resumeStoredDomains(cfg, domMgr)
 
 		// The webhook deployer must carry the registrar on exactly the same
 		// condition as the API deployer above: a git-push deploy and an API
