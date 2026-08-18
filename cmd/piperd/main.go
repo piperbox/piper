@@ -377,15 +377,14 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 				return testSelfSignedIssuer{}, nil
 			}
 			// No solver means no relay to splice acme-tls/1 down, which is
-			// every directly-served box (#506 is what lifts this). This is
-			// the second line, not the one that fires: the per-app lifecycle
-			// checks the relay notifier before it ever asks for an issuer, so
-			// a direct box's domain already fails with "relay not connected"
-			// (internal/domain pins that ordering). What the guard buys is
-			// the reason for anything that does reach it — certs.New rejects
-			// the typed-nil solver immediately, but as "exactly one of
-			// DNSProvider or ALPNSolver must be set" (internal/certs pins
-			// that, #242), which names neither the relay nor the domain.
+			// every directly-served box (#506 is what lifts this). The add
+			// path never gets here — appIssueOnce refuses at the relay
+			// notifier first ("relay not connected") — but reissueApp asks
+			// for an issuer with no notifier check, so on a direct box this
+			// guard is the line that fires. Without it certs.New rejects
+			// the typed-nil solver as "exactly one of DNSProvider or
+			// ALPNSolver must be set" (#242), naming neither relay nor
+			// domain.
 			if alpnSolver == nil {
 				return nil, fmt.Errorf("per-app custom domains need a relay connection: their TLS-ALPN-01 challenge is spliced down the tunnel to this box")
 			}
@@ -401,7 +400,7 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	}
 	if !cfg.Terminated {
 		opts.EnvDomain = cfg.BaseDomain // env-managed BYO: API writes are 409
-		opts.EnvServe = envServe(cfg)
+		opts.EnvServe = serveMode(cfg.Serve)
 	}
 	if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 		// E2E: the fake issuer implies the test domains have no real DNS
@@ -434,38 +433,62 @@ func publicIPFunc(cfg config.Config, tc *agent.TunnelClient) func() string {
 	}
 }
 
-// resumeStoredDomains restarts the stored domain rows' lifecycle loops at
-// boot. Extracted from the relay block so the resume decision is testable;
-// the gating here is exactly what the relay block imposed.
+// resumeStoredDomains restarts the stored rows' lifecycle loops at boot.
+// App-domain rows resume whenever a manager exists — a direct box keeps its
+// rows, and asleep active rows read active while nothing re-runs armApp to
+// serve them (#509 review); the loops idle on the nil relay notifier until
+// #506. The box-wide Resume stays gated on terminated relay mode: API-managed
+// box-wide configs exist only there (env mode owns its lifecycle via RunEnv).
 func resumeStoredDomains(cfg config.Config, domMgr *domain.Manager) {
-	if domMgr == nil || cfg.RelayAddr == "" {
+	if domMgr == nil {
 		return
 	}
-	if cfg.Terminated {
+	if cfg.RelayAddr != "" && cfg.Terminated {
 		domMgr.Resume() // box-wide API-managed config; env mode has none
 	}
 	domMgr.ResumeAppDomains()
 }
 
-// envServe validates PIPER_SERVE for the env-managed domain path. Junk logs
-// and degrades to relay: a typo must not change where user traffic flows.
-func envServe(cfg config.Config) string {
-	switch cfg.Serve {
-	case "", domain.ServeRelay:
-		return ""
-	case domain.ServeDirect:
+// serveMode normalizes PIPER_SERVE: only an exact "direct" opts in; unset,
+// "relay" and junk all mean relay. One owner of the parse, so the mode the
+// domain manager is told and the :443 gates cannot drift (#509 review), and
+// side-effect-free: the gates evaluate it several times per boot.
+func serveMode(serve string) string {
+	if serve == domain.ServeDirect {
 		return domain.ServeDirect
-	default:
+	}
+	return ""
+}
+
+// envServe validates PIPER_SERVE once, at startup, and returns the
+// normalized mode for the env-managed path: junk logs and degrades to relay
+// (a typo must not change where traffic flows), and an explicit
+// PIPER_SERVE=direct the box cannot honor gets exactly one line naming the
+// clause that dropped it (#509 review).
+func envServe(cfg config.Config) string {
+	mode := serveMode(cfg.Serve)
+	if cfg.Serve != "" && cfg.Serve != domain.ServeRelay && mode == "" {
 		log.Printf("piper: ignoring invalid PIPER_SERVE=%q (want relay|direct)", cfg.Serve)
 		return ""
 	}
+	if mode == domain.ServeDirect && !directServe(cfg) {
+		switch {
+		case cfg.Terminated:
+			log.Printf("piper: PIPER_SERVE=direct has no effect: this box is terminated (the relay terminates TLS; direct serve needs the box to hold the cert)")
+		case cfg.RelayAddr == "":
+			log.Printf("piper: PIPER_SERVE=direct has no effect: PIPER_BASE_DOMAIN is unset or the built-in default, which resolves nowhere")
+		}
+		// A relay box that is not terminated honors direct through the
+		// env-managed domain path — nothing is dropped, so no log.
+	}
+	return mode
 }
 
 // directServe reports whether this box serves its own box-wide domain with no
 // relay in the picture at all: never enrolled, told what it is publicly called
 // (PIPER_BASE_DOMAIN, and not the built-in default, which resolves nowhere),
-// and told to serve that name itself (PIPER_SERVE=direct — the same value
-// envServe validates; junk is not "direct" either way).
+// and told to serve that name itself (PIPER_SERVE=direct via serveMode, the
+// one normalization both paths consume — junk is not "direct" for either).
 //
 // The opt-in is deliberate rather than inferred from the base domain alone. A
 // LAN-only box named something real is a supported plain-HTTP shape today, and
@@ -473,7 +496,7 @@ func envServe(cfg config.Config) string {
 // run ACME at boot — a hard failure on a box that never asked for either (#507).
 func directServe(cfg config.Config) bool {
 	return cfg.RelayAddr == "" && !cfg.Terminated &&
-		cfg.Serve == domain.ServeDirect &&
+		serveMode(cfg.Serve) == domain.ServeDirect &&
 		cfg.BaseDomain != "" && cfg.BaseDomain != config.DefaultBaseDomain
 }
 
@@ -597,6 +620,7 @@ func main() {
 
 	cfg := config.Load()
 	captureBootExe()
+	envServe(cfg) // one validation pass per boot, for its diagnostics
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
@@ -779,6 +803,11 @@ func main() {
 				log.Fatalf("box tls: %v", err)
 			}
 		}
+	}
+	if cfg.RelayAddr == "" {
+		// Direct-served boxes have no relay notifier to install; resume their
+		// stored rows after synchronous box-cert setup and before serving.
+		resumeStoredDomains(cfg, domMgr)
 	}
 
 	// Relay mode: dial the relay and forward its streams. Terminated (free-tier)
