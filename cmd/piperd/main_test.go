@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1246,5 +1248,109 @@ func TestAppIssuerRefusesWithoutAnALPNSolver(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "relay") {
 		t.Errorf("AppIssuer error = %q, want it to name the relay splice", err)
+	}
+}
+
+// waitAppDomainStatus polls the store until the domain row reaches status.
+func waitAppDomainStatus(t *testing.T, st *store.Store, domainName, status string) store.AppDomain {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var row store.AppDomain
+	var err error
+	for time.Now().Before(deadline) {
+		if row, err = st.GetAppDomain(domainName); err == nil && row.Status == status {
+			return row
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s never reached %q (last: %+v, err %v)", domainName, status, row, err)
+	return row
+}
+
+// A stored per-app domain row's lifecycle must restart at boot whenever a
+// domain manager exists — relay or not: a box that goes direct keeps its
+// rows, and asleep active rows read active while nothing re-runs armApp to
+// serve them (#509 review). Relay-less, the loop idles on the nil relay
+// notifier, which is what the failed status records until #506.
+func TestResumeStoredDomainsRunsWheneverAManagerExists(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+	}{
+		{"relay-less direct box", config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect}},
+		{"terminated relay box", config.Config{RelayAddr: "relay.example.net:7000", Terminated: true,
+			BaseDomain: "ab12-alice.public.getpiper.co"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := store.Open(filepath.Join(t.TempDir(), "piper.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { st.Close() })
+			if _, err := st.CreateApp("blog", 8080); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.AddAppDomain("shop.example.com", "blog"); err != nil {
+				t.Fatal(err)
+			}
+			// Constructed exactly as main constructs it.
+			m := domain.New(newDomainOptions(tc.cfg, st, nil, nil, relayDialHost(tc.cfg), publicIPFunc(tc.cfg, nil)))
+			t.Cleanup(m.Close) // registered last so it runs before the store closes
+			resumeStoredDomains(tc.cfg, m)
+			row := waitAppDomainStatus(t, st, "shop.example.com", domain.StatusFailed)
+			if !strings.Contains(row.Error, "relay") {
+				t.Errorf("resumed row error = %q, want the nil relay notifier named", row.Error)
+			}
+		})
+	}
+	resumeStoredDomains(config.Config{}, nil) // LAN-only box: must be a no-op
+}
+
+// An explicit PIPER_SERVE=direct that this box's configuration cannot honor
+// must not boot silently: exactly one startup line naming the clause that
+// dropped it (#509 review). A working opt-in logs nothing, and neither does
+// the BYO relay shape, where the env-managed path does serve it.
+func TestEnvServeNamesTheClauseThatDropsADirectOptIn(t *testing.T) {
+	directRelay := config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect,
+		RelayAddr: "relay.example.net:7000"}
+	terminated := directRelay
+	terminated.Terminated = true
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want []string // substrings of the one line; nil means silent
+	}{
+		{"terminated box", terminated, []string{"PIPER_SERVE=direct", "terminated"}},
+		{"default base domain", config.Config{BaseDomain: config.DefaultBaseDomain, Serve: domain.ServeDirect},
+			[]string{"PIPER_SERVE=direct", "PIPER_BASE_DOMAIN"}},
+		{"no base domain", config.Config{Serve: domain.ServeDirect}, []string{"PIPER_SERVE=direct", "PIPER_BASE_DOMAIN"}},
+		{"junk warns once", config.Config{BaseDomain: "example.dev", Serve: "bogus"}, []string{"ignoring invalid PIPER_SERVE"}},
+		{"working direct box logs nothing", config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect}, nil},
+		{"BYO relay box serves it via the env path", directRelay, nil},
+		{"unset stays silent", config.Config{BaseDomain: "example.dev"}, nil},
+		{"relay mode stays silent", config.Config{BaseDomain: "example.dev", Serve: domain.ServeRelay}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := log.Writer()
+			log.SetOutput(&buf)
+			defer log.SetOutput(prev) // restore the PRIOR writer, not os.Stderr
+			envServe(tc.cfg)
+			line := strings.TrimSpace(buf.String())
+			if tc.want == nil {
+				if line != "" {
+					t.Errorf("log = %q, want silent", buf.String())
+				}
+				return
+			}
+			if line == "" || strings.Contains(line, "\n") {
+				t.Fatalf("log lines = %q, want exactly one", buf.String())
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(line, w) {
+					t.Errorf("line = %q, want it to name %q", line, w)
+				}
+			}
+		})
 	}
 }

@@ -1012,6 +1012,9 @@ type fakeDomainManager struct {
 	added          []string // "app:domain"
 	removeAppErr   error
 	removedDomains []string
+	// appDomainsBlocked models a box that can never activate a per-app
+	// domain (direct serve, no relay, #506).
+	appDomainsBlocked bool
 }
 
 func (f *fakeDomainManager) Set(d, p, tok, serve string) (domain.Status, error) {
@@ -1054,6 +1057,8 @@ func (f *fakeDomainManager) AppDomainStatus(d string) (domain.AppDomainStatus, e
 func (f *fakeDomainManager) AppDomainStatuses(app string) ([]domain.AppDomainStatus, error) {
 	return f.appStatuses, nil
 }
+
+func (f *fakeDomainManager) AppDomainsActivatable() bool { return !f.appDomainsBlocked }
 
 func TestDomainEndpoints(t *testing.T) {
 	fdm := &fakeDomainManager{status: domain.Status{
@@ -1335,6 +1340,31 @@ func TestAppDomainsUnknownAppAndDomain(t *testing.T) {
 	}
 	if len(fdm.removedDomains) != 0 {
 		t.Errorf("RemoveAppDomain reached: %v", fdm.removedDomains)
+	}
+}
+
+// A per-app domain POST on a box whose configuration can never activate it —
+// direct serve, no relay (#506) — is refused synchronously with a 409 naming
+// the limitation, the way box-wide /v1/domain refuses without a manager;
+// a relay-capable box keeps its 201 (pinned by TestAppDomainsEndpoints).
+func TestAppDomainsPostConflictWhenTheBoxCanNeverActivateIt(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	fdm := &fakeDomainManager{appDomainsBlocked: true}
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, fdm, nil, nil, nil, AgentInfo{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/blog/domains",
+		strings.NewReader(`{"domain":"myshop.com"}`)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST = %d, want 409 for a domain this box can never activate", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "relay") {
+		t.Errorf("409 body = %q, want it to name the missing relay", strings.TrimSpace(body))
+	}
+	if len(fdm.added) != 0 {
+		t.Errorf("AddAppDomain reached despite the refusal: %v", fdm.added)
 	}
 }
 
