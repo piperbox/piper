@@ -17,7 +17,6 @@ import (
 // live. Read-only; actions arrive in phase 4.
 type appDetailView struct {
 	name    string
-	remote  bool
 	app     api.App
 	deps    []store.Deployment
 	domains []domain.AppDomainStatus
@@ -26,8 +25,8 @@ type appDetailView struct {
 	err     error
 }
 
-func newAppDetailView(name string, remote bool) appDetailView {
-	return appDetailView{name: name, remote: remote}
+func newAppDetailView(name string) appDetailView {
+	return appDetailView{name: name}
 }
 
 func (v appDetailView) Init() tea.Cmd { return nil }
@@ -135,7 +134,7 @@ func (v appDetailView) View() string {
 	if v.err != nil {
 		fmt.Fprintf(&b, " ⚠ %v\n\n", v.err)
 	}
-	url := appURL(v.app.Hostname, v.remote)
+	url := v.app.URL()
 	if url == "" {
 		url = "—"
 	}

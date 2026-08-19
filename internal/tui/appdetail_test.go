@@ -19,9 +19,9 @@ func fixtureDeps() []store.Deployment {
 }
 
 func TestAppDetailRendersHeaderAndDeployments(t *testing.T) {
-	v := newAppDetailView("blog", false)
+	v := newAppDetailView("blog")
 	m, _ := v.Update(appDetailLoadedMsg{
-		app:  api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost", Port: 8080, Repo: "me/blog", Branch: "main"}},
+		app:  api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost", Port: 8080, Repo: "me/blog", Branch: "main"}, Scheme: "http"},
 		deps: fixtureDeps(),
 	})
 	out := m.View()
@@ -47,7 +47,7 @@ func fixtureDomains() []domain.AppDomainStatus {
 }
 
 func TestAppDetailRendersDomainsSection(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog"}}, deps: fixtureDeps(), domains: fixtureDomains(),
 	})
 	out := m.View()
@@ -63,7 +63,7 @@ func TestAppDetailRendersDomainsSection(t *testing.T) {
 }
 
 func TestAppDetailDomainsRenderWithoutDeployments(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog"}}, domains: fixtureDomains(),
 	})
 	out := m.View()
@@ -73,7 +73,7 @@ func TestAppDetailDomainsRenderWithoutDeployments(t *testing.T) {
 }
 
 func TestAppDetailCursorSpansDomainsAndXRemoves(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog"}}, deps: fixtureDeps(), domains: fixtureDomains(),
 	})
 	// two deployments first: j, j lands on the first domain row
@@ -93,7 +93,7 @@ func TestAppDetailCursorSpansDomainsAndXRemoves(t *testing.T) {
 }
 
 func TestAppDetailXOnDeploymentStillDeletesApp(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog"}}, deps: fixtureDeps(), domains: fixtureDomains(),
 	})
 	_, cmd := m.Update(keyRunes('x'))
@@ -107,7 +107,7 @@ func TestAppDetailXOnDeploymentStillDeletesApp(t *testing.T) {
 }
 
 func TestAppDetailAKeyPushesDomainForm(t *testing.T) {
-	_, cmd := newAppDetailView("blog", false).Update(keyRunes('a'))
+	_, cmd := newAppDetailView("blog").Update(keyRunes('a'))
 	if cmd == nil {
 		t.Fatal("a should emit a push command")
 	}
@@ -121,7 +121,7 @@ func TestAppDetailAKeyPushesDomainForm(t *testing.T) {
 }
 
 func TestAppDetailEnterOnDomainPushesDetail(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog"}}, deps: fixtureDeps(), domains: fixtureDomains(),
 	})
 	m, _ = m.Update(keyRunes('j'))
@@ -137,7 +137,7 @@ func TestAppDetailEnterOnDomainPushesDetail(t *testing.T) {
 }
 
 func TestAppDetailCursorStopsAtLastDomain(t *testing.T) {
-	v, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	v, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog"}}, deps: fixtureDeps(), domains: fixtureDomains(),
 	})
 	for range 10 {
@@ -149,7 +149,7 @@ func TestAppDetailCursorStopsAtLastDomain(t *testing.T) {
 }
 
 func TestAppDetailRefreshIncludesDomains(t *testing.T) {
-	msg := newAppDetailView("blog", false).refresh(fakeAPI{domains: fixtureDomains()})()
+	msg := newAppDetailView("blog").refresh(fakeAPI{domains: fixtureDomains()})()
 	loaded, ok := msg.(appDetailLoadedMsg)
 	if !ok {
 		t.Fatalf("want appDetailLoadedMsg, got %T", msg)
@@ -160,17 +160,17 @@ func TestAppDetailRefreshIncludesDomains(t *testing.T) {
 }
 
 func TestAppDetailLoadingAndEmpty(t *testing.T) {
-	if out := newAppDetailView("blog", false).View(); !strings.Contains(out, "loading") {
+	if out := newAppDetailView("blog").View(); !strings.Contains(out, "loading") {
 		t.Fatalf("want loading, got:\n%s", out)
 	}
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{app: api.App{App: store.App{Name: "blog"}}, deps: nil})
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{app: api.App{App: store.App{Name: "blog"}}, deps: nil})
 	if out := m.View(); !strings.Contains(out, "no deployments yet") {
 		t.Fatalf("want empty state, got:\n%s", out)
 	}
 }
 
 func TestAppDetailCursorAndEnterPushesLogs(t *testing.T) {
-	v := newAppDetailView("blog", false)
+	v := newAppDetailView("blog")
 	m, _ := v.Update(appDetailLoadedMsg{app: api.App{App: store.App{Name: "blog"}}, deps: fixtureDeps()})
 	// move to the second deployment
 	m, _ = m.Update(keyRunes('j'))
@@ -189,7 +189,7 @@ func TestAppDetailCursorAndEnterPushesLogs(t *testing.T) {
 }
 
 func TestAppDetailStopAndDeleteKeysPushConfirm(t *testing.T) {
-	base := newAppDetailView("blog", false)
+	base := newAppDetailView("blog")
 	for _, tc := range []struct {
 		key  rune
 		want string // substring the confirm prompt must contain
@@ -212,7 +212,7 @@ func TestAppDetailStopAndDeleteKeysPushConfirm(t *testing.T) {
 }
 
 func TestAppDetailSKeyStartsWhenStopped(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog", Port: 8080}, Status: "stopped"},
 	})
 	v := m.(appDetailView)
@@ -233,7 +233,7 @@ func TestAppDetailSKeyStartsWhenStopped(t *testing.T) {
 }
 
 func TestAppDetailDKeyPushesDeploy(t *testing.T) {
-	_, cmd := newAppDetailView("blog", false).Update(keyRunes('d'))
+	_, cmd := newAppDetailView("blog").Update(keyRunes('d'))
 	if cmd == nil {
 		t.Fatal("d should emit a push command")
 	}
@@ -247,7 +247,7 @@ func TestAppDetailDKeyPushesDeploy(t *testing.T) {
 }
 
 func TestAppDetailDKeyOnLinkedAppPushesRepoDeploy(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
 		app: api.App{App: store.App{Name: "blog", Repo: "me/blog", Branch: "main"}},
 	})
 	_, cmd := m.Update(keyRunes('d'))
@@ -268,8 +268,8 @@ func TestAppDetailDKeyOnLinkedAppPushesRepoDeploy(t *testing.T) {
 }
 
 func TestAppDetailErrorBannerKeepsLastRows(t *testing.T) {
-	m, _ := newAppDetailView("blog", false).Update(appDetailLoadedMsg{
-		app:  api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost", Port: 8080, Repo: "me/blog", Branch: "main"}},
+	m, _ := newAppDetailView("blog").Update(appDetailLoadedMsg{
+		app:  api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost", Port: 8080, Repo: "me/blog", Branch: "main"}, Scheme: "http"},
 		deps: fixtureDeps(),
 	})
 	m, _ = m.Update(errMsg{err: errors.New("connection refused")})
@@ -281,7 +281,7 @@ func TestAppDetailErrorBannerKeepsLastRows(t *testing.T) {
 		t.Fatalf("stale rows dropped on error:\n%s", out)
 	}
 	m, _ = m.Update(appDetailLoadedMsg{
-		app:  api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost", Port: 8080, Repo: "me/blog", Branch: "main"}},
+		app:  api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost", Port: 8080, Repo: "me/blog", Branch: "main"}, Scheme: "http"},
 		deps: fixtureDeps(),
 	})
 	if out := m.View(); strings.Contains(out, "⚠") {

@@ -61,7 +61,7 @@ func (v appsView) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(v.apps) > 0 {
 				name := v.apps[v.cursor].Name
-				return v, func() tea.Msg { return pushMsg{newAppDetailView(name, v.remote)} }
+				return v, func() tea.Msg { return pushMsg{newAppDetailView(name)} }
 			}
 		case "n":
 			return v, func() tea.Msg { return pushMsg{newFormView()} }
@@ -94,7 +94,7 @@ func (v appsView) View() string {
 			cursor = "▸ "
 		}
 		status := strings.TrimSpace(statusIcon(a.Status) + " " + a.Status)
-		fmt.Fprintf(&b, "%s%-16s %-12s %s\n", cursor, a.Name, status, appURL(a.Hostname, v.remote))
+		fmt.Fprintf(&b, "%s%-16s %-12s %s\n", cursor, a.Name, status, a.URL())
 	}
 	return b.String()
 }

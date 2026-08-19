@@ -78,20 +78,6 @@ func printAgentVersion(c *client.Client, stdout io.Writer) {
 	}
 }
 
-// appURL renders the URL an app is served on from its stored hostname. A
-// relay-terminated box (remote target) serves over HTTPS; a local/BYO box
-// serves its base-domain host over HTTP. Empty hostname (never deployed)
-// yields "".
-func appURL(hostname string, remote bool) string {
-	if hostname == "" {
-		return ""
-	}
-	if remote {
-		return "https://" + hostname
-	}
-	return "http://" + hostname
-}
-
 // isTerminal reports whether both stdout and stdin are interactive terminals;
 // a func var so run() tests can force either mode. Requiring stdin too keeps
 // a piped-but-drained stdin (e.g. `echo x | piper`) from launching the
@@ -370,7 +356,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "deployed %s: %s (%s)\n", name, appURL(app.Hostname, *remote != ""), final.Status)
+		fmt.Fprintf(stdout, "deployed %s: %s (%s)\n", name, app.URL(), final.Status)
 		return 0
 	case "list":
 		if len(args) != 1 {
@@ -387,7 +373,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		for _, app := range apps {
-			if url := appURL(app.Hostname, *remote != ""); url != "" {
+			if url := app.URL(); url != "" {
 				fmt.Fprintf(stdout, "%s\tport=%d\t%s\n", app.Name, app.Port, url)
 			} else {
 				fmt.Fprintf(stdout, "%s\tport=%d\n", app.Name, app.Port)
@@ -426,7 +412,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if status == "" {
 				status = "-"
 			}
-			if url := appURL(app.Hostname, *remote != ""); url != "" {
+			if url := app.URL(); url != "" {
 				fmt.Fprintf(stdout, "%s\tstatus=%s\tport=%d\t%s\n", app.Name, status, app.Port, url)
 			} else {
 				fmt.Fprintf(stdout, "%s\tstatus=%s\tport=%d\n", app.Name, status, app.Port)

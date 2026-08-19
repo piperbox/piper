@@ -24,7 +24,7 @@ func TestRunStatusLocal(t *testing.T) {
 		case "/v1/apps":
 			_ = json.NewEncoder(w).Encode([]api.App{
 				{App: store.App{Name: "api", Port: 3000}},
-				{App: store.App{Name: "blog", Port: 8080, Hostname: "blog.piper.localhost"}, Status: "running"},
+				{App: store.App{Name: "blog", Port: 8080, Hostname: "blog.piper.localhost"}, Status: "running", Scheme: "http"},
 			})
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -91,7 +91,7 @@ func TestRunStatusRemoteConnected(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"version": "0.8.5"})
 		case "/agents/box.public.getpiper.co/v1/apps":
 			_ = json.NewEncoder(w).Encode([]api.App{
-				{App: store.App{Name: "blog", Port: 8080, Hostname: "ab12-alice.public.getpiper.co"}, Status: "running"},
+				{App: store.App{Name: "blog", Port: 8080, Hostname: "ab12-alice.public.getpiper.co"}, Status: "running", Scheme: "https"},
 			})
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)

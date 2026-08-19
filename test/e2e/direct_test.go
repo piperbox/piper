@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -228,5 +229,126 @@ func TestRelayCustomDomainDirectServe(t *testing.T) {
 	conn.Close()
 	if len(rb) == 0 {
 		t.Fatal("relay path stopped serving the direct domain (migration property broken)")
+	}
+}
+
+// TestNeverEnrolledDirectServesHTTPS is the relay-less half of direct serve
+// (#507): a box that has never been enrolled, told only what it is publicly
+// called and to serve that name itself, terminates TLS for it. There is no
+// relay process in this test at all, so nothing it proves can be coming from
+// one — which is the whole point, and what every other e2e here cannot show.
+//
+// It stops at the TLS layer on purpose: the certificate the box serves under
+// its own SNI is the thing the relay gates used to make unreachable. Routing
+// an app onto that listener is the deploy path, already covered above.
+func TestNeverEnrolledDirectServesHTTPS(t *testing.T) {
+	if os.Getenv("RUN_E2E") != "1" {
+		t.Skip("set RUN_E2E=1 to run (needs Docker; Caddy is embedded)")
+	}
+	repoRoot, _ := filepath.Abs("../..")
+	binDir := t.TempDir()
+	b := exec.Command("go", "build", "-o", filepath.Join(binDir, "piperd"), "./cmd/piperd")
+	b.Dir = repoRoot
+	if out, err := b.CombinedOutput(); err != nil {
+		t.Fatalf("build piperd: %v\n%s", err, out)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	// os.MkdirTemp, not t.TempDir(): see the note in the test above.
+	piperdData, err := os.MkdirTemp("", "p")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(piperdData) })
+
+	const domain = "direct.localhost"
+	pd := exec.CommandContext(ctx, filepath.Join(binDir, "piperd"))
+	// Every PIPER_RELAY_* is cleared explicitly: inheriting one from the
+	// environment would quietly restore the relay path this test exists to
+	// prove is not needed. High loopback ports keep it off :80/:443, which the
+	// relay-mode e2es above own.
+	pd.Env = append(os.Environ(),
+		"PIPER_DATA_DIR="+piperdData,
+		"PIPER_API_ADDR=127.0.0.1:8188",
+		"PIPER_HTTP_ADDR=127.0.0.1:8180",
+		"PIPER_HTTPS_ADDR=127.0.0.1:8543",
+		"PIPER_CADDY_ADMIN=http://127.0.0.1:2219",
+		"PIPER_BASE_DOMAIN="+domain,
+		"PIPER_SERVE=direct",
+		"PIPER_TEST_ISSUER=selfsigned",
+		"PIPER_RELAY_ADDR=",
+		"PIPER_RELAY_TOKEN=",
+		"PIPER_RELAY_TERMINATED=",
+	)
+	pd.Stdout, pd.Stderr = os.Stdout, os.Stderr
+	if err := pd.Start(); err != nil {
+		t.Fatalf("start piperd: %v", err)
+	}
+	killOnCleanup(t, pd)
+	waitPort(t, "127.0.0.1:8188", 20*time.Second)
+	waitPort(t, "127.0.0.1:8543", 20*time.Second)
+
+	// The handshake is the assertion: before the hoist there was no TLS
+	// listener here at all, and no cert for it to present.
+	dialer := &tls.Dialer{Config: &tls.Config{
+		ServerName: "blog." + domain, InsecureSkipVerify: true,
+	}}
+	var conn net.Conn
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		conn, err = dialer.DialContext(ctx, "tcp", "127.0.0.1:8543")
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("TLS dial of the box's own HTTPS listener: %v", err)
+	}
+	defer conn.Close()
+
+	state := conn.(*tls.Conn).ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		t.Fatal("no certificate presented on the box's HTTPS listener")
+	}
+	if err := state.PeerCertificates[0].VerifyHostname("blog." + domain); err != nil {
+		t.Fatalf("served cert does not cover the box's own wildcard: %v (subject %q, SANs %v)",
+			err, state.PeerCertificates[0].Subject, state.PeerCertificates[0].DNSNames)
+	}
+
+	// And it speaks HTTP over that TLS: Caddy is really serving, not just
+	// completing a handshake.
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: blog.%s\r\nConnection: close\r\n\r\n", domain)
+	body, _ := io.ReadAll(conn)
+	if !strings.HasPrefix(string(body), "HTTP/1.1 ") {
+		t.Fatalf("no HTTP response over the direct TLS listener: %q", string(body))
+	}
+
+	// The daemon must also tell its clients the apps are on HTTPS — a client
+	// on the LAN cannot infer it from how it dialled (#507).
+	tokenCmd := exec.Command(filepath.Join(binDir, "piperd"), "token", "create", "--name", "e2e")
+	tokenCmd.Env = append(os.Environ(), "PIPER_DATA_DIR="+piperdData)
+	tokenOut, err := tokenCmd.Output()
+	if err != nil {
+		t.Fatalf("token create: %v", err)
+	}
+	apiToken := strings.TrimSpace(string(tokenOut))
+
+	create, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:8188/v1/apps",
+		strings.NewReader(`{"name":"blog","port":8080}`))
+	create.Header.Set("Authorization", "Bearer "+apiToken)
+	resp, err := http.DefaultClient.Do(create)
+	if err != nil {
+		t.Fatalf("POST /v1/apps: %v", err)
+	}
+	cb, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/apps = %d: %s", resp.StatusCode, cb)
+	}
+	if !strings.Contains(string(cb), `"Scheme":"https"`) {
+		t.Fatalf("daemon must report the https scheme for its apps: %s", cb)
 	}
 }

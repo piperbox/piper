@@ -48,7 +48,9 @@ func (m Model) WithDialer(d Dialer) Model { m.dial = d; return m }
 func (m Model) WithRelay(r RelayDialer) Model { m.relay = r; return m }
 
 // Run starts the interactive TUI against c, identified as box/addr in the
-// status bar. remote marks a relay-backed box (HTTPS URLs). dial builds clients
+// status bar. remote marks a box reached through the relay; it feeds the
+// unauthorized-hint wording, not URL schemes — those follow the
+// daemon-reported api.App.Scheme (#507). dial builds clients
 // for the box switcher; relay builds relay clients for the github wizard and
 // repo picker. It blocks until quit.
 func Run(box, addr string, remote bool, c API, dial Dialer, relay RelayDialer) error {
