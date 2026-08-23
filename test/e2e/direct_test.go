@@ -351,4 +351,58 @@ func TestNeverEnrolledDirectServesHTTPS(t *testing.T) {
 	if !strings.Contains(string(cb), `"Scheme":"https"`) {
 		t.Fatalf("daemon must report the https scheme for its apps: %s", cb)
 	}
+
+	// Per-app custom domain on a never-enrolled box (#506): DNS-01 via the
+	// box-wide token source (the selfsigned test issuer here), no relay
+	// claim anywhere, exact-host cert on the box's own listener. Before
+	// #506 this POST was refused with 409 "cannot activate on this box".
+	addDom, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:8188/v1/apps/blog/domains",
+		strings.NewReader(`{"domain":"shop.localhost"}`))
+	addDom.Header.Set("Authorization", "Bearer "+apiToken)
+	resp, err = http.DefaultClient.Do(addDom)
+	if err != nil {
+		t.Fatalf("POST /v1/apps/blog/domains: %v", err)
+	}
+	db, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("POST /v1/apps/blog/domains = %d: %s", resp.StatusCode, db)
+	}
+
+	statusReq, _ := http.NewRequest(http.MethodGet, "http://127.0.0.1:8188/v1/apps/blog/domains", nil)
+	statusReq.Header.Set("Authorization", "Bearer "+apiToken)
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		r, err := http.DefaultClient.Do(statusReq)
+		if err == nil {
+			sb, _ := io.ReadAll(r.Body)
+			r.Body.Close()
+			if strings.Contains(string(sb), `"status":"active"`) {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("shop.localhost never activated: %s", sb)
+			}
+		} else if time.Now().After(deadline) {
+			t.Fatalf("GET /v1/apps/blog/domains: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	appDialer := &tls.Dialer{Config: &tls.Config{
+		ServerName: "shop.localhost", InsecureSkipVerify: true,
+	}}
+	appConn, err := appDialer.DialContext(ctx, "tcp", "127.0.0.1:8543")
+	if err != nil {
+		t.Fatalf("TLS dial for the per-app domain: %v", err)
+	}
+	defer appConn.Close()
+	appState := appConn.(*tls.Conn).ConnectionState()
+	if len(appState.PeerCertificates) == 0 {
+		t.Fatal("no certificate presented for the per-app domain")
+	}
+	if err := appState.PeerCertificates[0].VerifyHostname("shop.localhost"); err != nil {
+		t.Fatalf("per-app cert does not cover shop.localhost: %v (SANs %v)",
+			err, appState.PeerCertificates[0].DNSNames)
+	}
 }

@@ -133,6 +133,13 @@ type Options struct {
 	EnvDomain   string
 	// EnvServe pins the env-managed domain's serve mode ("" ⇒ relay).
 	EnvServe string
+	// TLSTerminated mirrors cmd/piperd's terminatesTLS(cfg): true when the
+	// box's own "piper" Caddy server already answers HTTPS at boot (armed via
+	// caddy.WithHTTPS, the listener domain.RunEnv/LoadStaticCert put a cert
+	// on). Per-app domain activation must not also arm a runtime "piper-tls"
+	// server on the same address — Caddy refuses two servers on one listener
+	// (#506) — so it skips EnsureHTTPS in that case.
+	TLSTerminated bool
 	// PublicIP reports the box's best-known public IP for direct mode's DNS
 	// guidance ("" ⇒ unknown). Nil tolerated: always unknown.
 	PublicIP func() string
@@ -154,18 +161,19 @@ type Options struct {
 // domains (#224) are exact-host instances (TLS-ALPN-01, tokenless, one route,
 // app_domains rows).
 type Manager struct {
-	st          *store.Store
-	newIssuer   IssuerFactory
-	appIssuer   func() (Issuer, error)
-	proxy       Proxy
-	router      AppRouter
-	dataDir     string
-	dnsTarget   string // what the user's records must point at (see Options.BaseDomain)
-	httpsListen string
-	envDomain   string
-	envServe    string
-	envIssuer   func() (Issuer, error) // see Options.EnvIssuer
-	publicIP    func() string
+	st            *store.Store
+	newIssuer     IssuerFactory
+	appIssuer     func() (Issuer, error)
+	proxy         Proxy
+	router        AppRouter
+	dataDir       string
+	dnsTarget     string // what the user's records must point at (see Options.BaseDomain)
+	httpsListen   string
+	envDomain     string
+	envServe      string
+	envIssuer     func() (Issuer, error) // see Options.EnvIssuer
+	publicIP      func() string
+	tlsTerminated bool // see Options.TLSTerminated
 
 	relayMu sync.Mutex
 	relay   RelayNotifier
@@ -247,16 +255,17 @@ func New(o Options) *Manager {
 		dataDir: o.DataDir, dnsTarget: dnsTarget,
 		httpsListen: o.HTTPSListen, envDomain: o.EnvDomain,
 		envServe: envServe, envIssuer: o.EnvIssuer, publicIP: publicIP,
-		appMu:      map[string]*sync.Mutex{},
-		gens:       map[string]int{},
-		loaded:     map[string]caddy.CertPair{},
-		dnsCache:   map[string]dnsCacheEntry{},
-		stopCh:     make(chan struct{}),
-		envStatus:  envStatus,
-		retryDelay: defaultRetryDelay,
-		dnsWait:    defaultDNSWait,
-		resolve:    resolve,
-		now:        time.Now,
+		tlsTerminated: o.TLSTerminated,
+		appMu:         map[string]*sync.Mutex{},
+		gens:          map[string]int{},
+		loaded:        map[string]caddy.CertPair{},
+		dnsCache:      map[string]dnsCacheEntry{},
+		stopCh:        make(chan struct{}),
+		envStatus:     envStatus,
+		retryDelay:    defaultRetryDelay,
+		dnsWait:       defaultDNSWait,
+		resolve:       resolve,
+		now:           time.Now,
 	}
 }
 

@@ -186,9 +186,17 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 // armApp loads the exact-host cert and backfills the route for an already-
 // running app (deploy/stop/delete otherwise own routes). Shared by first
 // activation and restart resume.
+//
+// EnsureHTTPS is skipped when the box already terminates TLS at boot
+// (m.tlsTerminated): the "piper" server is already listening on
+// m.httpsListen with tls_connection_policies set (see Options.TLSTerminated),
+// so arming a runtime "piper-tls" server on the same address would collide
+// with it (#506).
 func (m *Manager) armApp(row store.AppDomain, certPEM, keyPEM []byte) error {
-	if err := m.proxy.EnsureHTTPS(m.httpsListen); err != nil {
-		return err
+	if !m.tlsTerminated {
+		if err := m.proxy.EnsureHTTPS(m.httpsListen); err != nil {
+			return err
+		}
 	}
 	if err := m.setCert(row.Domain, certPEM, keyPEM); err != nil {
 		return err

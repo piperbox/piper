@@ -362,6 +362,7 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 		Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
 		DataDir: cfg.DataDir, BaseDomain: baseDomain, RelayHost: relayHost,
 		HTTPSListen: cfg.HTTPSAddr, PublicIP: publicIP,
+		TLSTerminated: terminatesTLS(cfg),
 		Issuer: func(provider, token string) (domain.Issuer, error) {
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 				return testSelfSignedIssuer{}, nil
