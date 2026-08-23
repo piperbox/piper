@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -381,6 +382,9 @@ type AppDomainStatus struct {
 	CertNotAfter *time.Time  `json:"cert_not_after,omitempty"`
 	DNSRecords   []DNSRecord `json:"dns_records"`
 	DNSOK        bool        `json:"dns_ok"`
+	// Note is a human-readable hint when guidance is incomplete (direct mode
+	// before the box knows its public IP). Not an error.
+	Note string `json:"note,omitempty"`
 }
 
 // AppDomainStatuses assembles the wire state of every domain attached to app
@@ -408,14 +412,29 @@ func (m *Manager) AppDomainStatus(domain string) (AppDomainStatus, error) {
 	return m.appDomainStatus(row), nil
 }
 
-// appDomainStatus converts one row: the guided-setup CNAME (exact host → the
-// relay) and a best-effort, cached dns_ok — a field, never an error.
+// appDomainStatus converts one row: the guided-setup record (CNAME at the
+// relay, or in direct mode an A/AAAA at the box's public IP) and a
+// best-effort, cached dns_ok — a field, never an error.
 func (m *Manager) appDomainStatus(row store.AppDomain) AppDomainStatus {
 	st := AppDomainStatus{
 		Domain: row.Domain, App: row.App,
 		Status: row.Status, Error: row.Error,
-		DNSRecords: []DNSRecord{{Type: "CNAME", Name: row.Domain, Value: m.dnsTarget}},
-		DNSOK:      m.cachedDNSPointsAt(row.Domain),
+	}
+	if m.boxServe() == ServeDirect {
+		ip := m.publicIP()
+		typ := "A"
+		if p := net.ParseIP(ip); p != nil && p.To4() == nil {
+			typ = "AAAA"
+		}
+		st.DNSRecords = []DNSRecord{{Type: typ, Name: row.Domain, Value: ip}}
+		if ip == "" {
+			st.Note = noteNoPublicIP
+		} else {
+			st.DNSOK = m.cachedDNSResolvesTo(row.Domain, ip)
+		}
+	} else {
+		st.DNSRecords = []DNSRecord{{Type: "CNAME", Name: row.Domain, Value: m.dnsTarget}}
+		st.DNSOK = m.cachedDNSPointsAt(row.Domain)
 	}
 	if !row.CertNotAfter.IsZero() {
 		t := row.CertNotAfter

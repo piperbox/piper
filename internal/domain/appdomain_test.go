@@ -1088,3 +1088,45 @@ func TestAppDomainRenewalFollowsFlippedMode(t *testing.T) {
 		t.Fatalf("dns obtain calls after direct flip = %d, want 2 (activation + renewal)", dnsCalls)
 	}
 }
+
+// Direct-mode status guides an A record at the box's public IP and answers
+// dns_ok against that IP; an unknown IP degrades to an empty-value record
+// plus the box-wide explanatory note. Relay-mode status (CNAME at the relay)
+// is pinned by TestAppDomainStatuses.
+func TestAppDomainStatusDirect(t *testing.T) {
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+
+	// Public IP unknown: empty-value record, note, dns_ok false.
+	stt, err := m.AppDomainStatus("shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stt.DNSRecords) != 1 || stt.DNSRecords[0].Type != "A" ||
+		stt.DNSRecords[0].Name != "shop.example.com" || stt.DNSRecords[0].Value != "" {
+		t.Fatalf("records (no IP) = %+v", stt.DNSRecords)
+	}
+	if stt.Note == "" || stt.DNSOK {
+		t.Fatalf("no-IP status: note=%q dns_ok=%v, want note and false", stt.Note, stt.DNSOK)
+	}
+
+	// Known public IP that the domain resolves to: full record, dns_ok true.
+	m.publicIP = func() string { return "203.0.113.7" } // resolve fake returns this IP
+	stt, err = m.AppDomainStatus("shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stt.DNSRecords) != 1 || stt.DNSRecords[0].Type != "A" ||
+		stt.DNSRecords[0].Value != "203.0.113.7" {
+		t.Fatalf("records (with IP) = %+v", stt.DNSRecords)
+	}
+	if stt.Note != "" || !stt.DNSOK {
+		t.Fatalf("with-IP status: note=%q dns_ok=%v, want no note and true", stt.Note, stt.DNSOK)
+	}
+}
