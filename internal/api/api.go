@@ -90,8 +90,10 @@ func latestStatus(s *store.Store, app string) (string, error) {
 }
 
 // DomainManager is the domain-config surface: the box-wide custom domain
-// (#102) and the per-app domains collection (#231). Nil when the box has no
-// relay configured: the endpoints then answer 409.
+// (#102) and the per-app domains collection (#231). Nil only when the box
+// reaches the public over neither a relay nor a direct-serve domain config
+// (cmd/piperd's publicHTTPS(cfg) gate) — a LAN-only box: the endpoints then
+// answer 409.
 type DomainManager interface {
 	Set(domain, provider, token, serve string) (domain.Status, error)
 	Status() (domain.Status, error)

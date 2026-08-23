@@ -210,13 +210,19 @@ func (m *Manager) armApp(row store.AppDomain, certPEM, keyPEM []byte) error {
 }
 
 // RemoveAppDomain tears the domain down fully: relay claim, Caddy route and
-// loaded cert, disk cert, row. For an active domain the relay removal must
-// succeed before anything local is deleted — once the row is gone nothing
-// would ever retry the removal and the relay would splice the domain forever.
-// A never-confirmed claim expires on the relay by its pending TTL, so its
-// removal is best-effort and teardown proceeds. Removing an absent domain is
-// a no-op. Taking the domain's run lock can block for an in-flight ACME
-// Obtain (minutes, bounded) — the box-wide Remove trade, per domain.
+// loaded cert, disk cert, row. For an active domain on a relay-served box the
+// relay removal must succeed before anything local is deleted — once the row
+// is gone nothing would ever retry the removal and the relay would splice the
+// domain forever. A never-confirmed claim expires on the relay by its pending
+// TTL, so its removal is best-effort and teardown proceeds. A never-enrolled
+// direct box (m.boxServe() == ServeDirect, no notifier) never claimed the
+// domain on the relay in the first place — issuance's direct branch skips the
+// claim (#506) — so there is nothing to clear and local teardown proceeds
+// unconditionally; an enrolled direct box (notifier present) still makes the
+// same best-effort/required relay calls as a relay-mode box. Removing an
+// absent domain is a no-op. Taking the domain's run lock can block for an
+// in-flight ACME Obtain (minutes, bounded) — the box-wide Remove trade, per
+// domain.
 func (m *Manager) RemoveAppDomain(domain string) error {
 	m.nextGenFor(domain) // supersede the running lifecycle loop
 	lock := m.appLock(domain)
@@ -231,7 +237,7 @@ func (m *Manager) RemoveAppDomain(domain string) error {
 	}
 	r := m.notifier()
 	if r == nil {
-		if row.Status == StatusActive {
+		if row.Status == StatusActive && m.boxServe() != ServeDirect {
 			return errors.New("relay not connected; cannot clear the domain mapping")
 		}
 	} else if err := r.RemoveCustomDomain(domain); err != nil && row.Status == StatusActive {

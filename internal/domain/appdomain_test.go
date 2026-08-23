@@ -424,6 +424,33 @@ func TestRemoveAppDomainTearsDown(t *testing.T) {
 	}
 }
 
+// A never-enrolled direct box (no relay notifier) has no claim to clear for
+// an active per-app domain — #506's direct branch skips the claim on
+// issuance too. RemoveAppDomain must proceed with full local teardown rather
+// than refusing forever (#506 final review, finding 1).
+func TestRemoveAppDomainDirectNoRelayTearsDownActive(t *testing.T) {
+	dnsIss := &fakeIssuer{}
+	m, st, _, _ := newDirectAppManager(t, dnsIss, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+
+	if err := m.RemoveAppDomain("shop.example.com"); err != nil {
+		t.Fatalf("RemoveAppDomain on a claimless direct box: %v", err)
+	}
+	if _, err := st.GetAppDomain("shop.example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("row survives remove: %v", err)
+	}
+	dataDir := m.dataDir
+	if _, err := os.Stat(filepath.Join(dataDir, "appdomains", "shop.example.com")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cert dir survives remove: %v", err)
+	}
+}
+
 // An active domain's relay removal must succeed before local teardown — the
 // row survives a failed removal so the user can retry. A never-confirmed
 // (pending) claim expires on the relay by TTL, so its removal is best-effort.
