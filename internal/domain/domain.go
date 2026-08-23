@@ -63,6 +63,10 @@ var (
 	ErrUnsupportedProvider = errors.New("unsupported dns provider")
 	ErrTokenRequired       = errors.New("dns_token required")
 	ErrInvalidServe        = errors.New(`invalid serve mode (want "relay" or "direct")`)
+	// ErrNoDNSIssuer rejects adding a per-app domain on a direct-served box
+	// with no DNS-01 source: TLS-ALPN-01 has no relay splice to arrive by,
+	// and DNS-01 has no token to write records with (#506).
+	ErrNoDNSIssuer = errors.New("direct-served per-app domains need a box-wide domain with a DNS token: this box serves direct, so per-app certificates are issued via DNS-01 with the box-wide token")
 )
 
 // errStaleConfig aborts an issuance/renewal run whose config snapshot no
@@ -129,9 +133,21 @@ type Options struct {
 	EnvDomain   string
 	// EnvServe pins the env-managed domain's serve mode ("" ⇒ relay).
 	EnvServe string
+	// TLSTerminated mirrors cmd/piperd's terminatesTLS(cfg): true when the
+	// box's own "piper" Caddy server already answers HTTPS at boot (armed via
+	// caddy.WithHTTPS, the listener domain.RunEnv/LoadStaticCert put a cert
+	// on). Per-app domain activation must not also arm a runtime "piper-tls"
+	// server on the same address — Caddy refuses two servers on one listener
+	// (#506) — so it skips EnsureHTTPS in that case.
+	TLSTerminated bool
 	// PublicIP reports the box's best-known public IP for direct mode's DNS
 	// guidance ("" ⇒ unknown). Nil tolerated: always unknown.
 	PublicIP func() string
+	// EnvIssuer builds the env-managed box's DNS-01 issuer (provider creds
+	// from the provider's own env vars). Nil means the env box has no ACME
+	// path (static cert files) — or the box is API-managed. Direct-mode
+	// per-app issuance on an env box uses it as the box-wide token source.
+	EnvIssuer func() (Issuer, error)
 	// Resolve overrides the DNS lookup behind dns_ok and the per-app DNS
 	// gate; nil uses net.DefaultResolver. E2E seam: the test domains have no
 	// real DNS (see PIPER_TEST_ISSUER in cmd/piperd).
@@ -145,17 +161,19 @@ type Options struct {
 // domains (#224) are exact-host instances (TLS-ALPN-01, tokenless, one route,
 // app_domains rows).
 type Manager struct {
-	st          *store.Store
-	newIssuer   IssuerFactory
-	appIssuer   func() (Issuer, error)
-	proxy       Proxy
-	router      AppRouter
-	dataDir     string
-	dnsTarget   string // what the user's records must point at (see Options.BaseDomain)
-	httpsListen string
-	envDomain   string
-	envServe    string
-	publicIP    func() string
+	st            *store.Store
+	newIssuer     IssuerFactory
+	appIssuer     func() (Issuer, error)
+	proxy         Proxy
+	router        AppRouter
+	dataDir       string
+	dnsTarget     string // what the user's records must point at (see Options.BaseDomain)
+	httpsListen   string
+	envDomain     string
+	envServe      string
+	envIssuer     func() (Issuer, error) // see Options.EnvIssuer
+	publicIP      func() string
+	tlsTerminated bool // see Options.TLSTerminated
 
 	relayMu sync.Mutex
 	relay   RelayNotifier
@@ -236,17 +254,18 @@ func New(o Options) *Manager {
 		proxy: o.Proxy, router: o.Router,
 		dataDir: o.DataDir, dnsTarget: dnsTarget,
 		httpsListen: o.HTTPSListen, envDomain: o.EnvDomain,
-		envServe: envServe, publicIP: publicIP,
-		appMu:      map[string]*sync.Mutex{},
-		gens:       map[string]int{},
-		loaded:     map[string]caddy.CertPair{},
-		dnsCache:   map[string]dnsCacheEntry{},
-		stopCh:     make(chan struct{}),
-		envStatus:  envStatus,
-		retryDelay: defaultRetryDelay,
-		dnsWait:    defaultDNSWait,
-		resolve:    resolve,
-		now:        time.Now,
+		envServe: envServe, envIssuer: o.EnvIssuer, publicIP: publicIP,
+		tlsTerminated: o.TLSTerminated,
+		appMu:         map[string]*sync.Mutex{},
+		gens:          map[string]int{},
+		loaded:        map[string]caddy.CertPair{},
+		dnsCache:      map[string]dnsCacheEntry{},
+		stopCh:        make(chan struct{}),
+		envStatus:     envStatus,
+		retryDelay:    defaultRetryDelay,
+		dnsWait:       defaultDNSWait,
+		resolve:       resolve,
+		now:           time.Now,
 	}
 }
 
@@ -397,6 +416,65 @@ func (m *Manager) notifier() RelayNotifier {
 	m.relayMu.Lock()
 	defer m.relayMu.Unlock()
 	return m.relay
+}
+
+// boxServe answers which path the public reaches this box by: the env-pinned
+// mode on env-managed boxes, the domain config row's serve mode when one
+// exists, relay otherwise. Per-app domains follow this box-wide fact (#506)
+// — there is no per-domain serve choice.
+func (m *Manager) boxServe() string {
+	if m.envDomain != "" {
+		return m.envServe
+	}
+	if dc, err := m.st.GetDomainConfig(); err == nil && dc.Serve == ServeDirect {
+		return ServeDirect
+	}
+	return ServeRelay
+}
+
+// hasAppDNSSource reports whether a DNS-01 issuer for per-app domains could
+// be built, without building one — AddAppDomain's synchronous guard.
+func (m *Manager) hasAppDNSSource() bool {
+	if m.envDomain != "" {
+		return m.envIssuer != nil
+	}
+	dc, err := m.st.GetDomainConfig()
+	return err == nil && dc.DNSToken != ""
+}
+
+// appDNSIssuer builds the DNS-01 issuer a direct box issues per-app domains
+// with — the box-wide token source: the env box's issuer, or the domain
+// config row's provider+token through the box-wide factory. ErrNoDNSIssuer
+// when the box has neither (AddAppDomain guards this, but issuance re-checks:
+// the config can be removed after the row lands).
+func (m *Manager) appDNSIssuer() (Issuer, error) {
+	if m.envDomain != "" {
+		if m.envIssuer == nil {
+			return nil, ErrNoDNSIssuer
+		}
+		return m.envIssuer()
+	}
+	dc, err := m.st.GetDomainConfig()
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrNoDNSIssuer
+	}
+	if err != nil {
+		return nil, err
+	}
+	if dc.DNSToken == "" {
+		return nil, ErrNoDNSIssuer
+	}
+	return m.newIssuer(dc.DNSProvider, dc.DNSToken)
+}
+
+// appIssuerFor picks the per-app issuer for the serve mode: DNS-01 with the
+// box-wide token on a direct box, TLS-ALPN-01 through the relay splice
+// otherwise (#506).
+func (m *Manager) appIssuerFor(serve string) (Issuer, error) {
+	if serve == ServeDirect {
+		return m.appDNSIssuer()
+	}
+	return m.appIssuer()
 }
 
 // domainRE accepts lowercase dotted DNS names ("shop.example.com").
@@ -586,6 +664,13 @@ func (m *Manager) issueOnce(snap store.DomainConfig) error {
 
 // arm loads the cert and app routes into Caddy — the box must answer before
 // the relay routes to it. Shared by first activation and restart resume.
+//
+// The unconditional EnsureHTTPS below is safe unlike armApp's guarded one:
+// this path only runs for a store/API-managed dc (m.envDomain == ""), which
+// cmd/piperd only reaches when cfg.Terminated is true — the one shape where
+// terminatesTLS(cfg) is also always false, so "piper" never already owns
+// m.httpsListen at boot and arming a runtime "piper-tls" server here cannot
+// collide with it (#506).
 func (m *Manager) arm(dc store.DomainConfig, certPEM, keyPEM []byte) error {
 	if err := m.proxy.EnsureHTTPS(m.httpsListen); err != nil {
 		return err

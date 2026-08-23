@@ -1227,17 +1227,11 @@ func TestRelayDialHost(t *testing.T) {
 	}
 }
 
-// A directly-served box now has a live domain manager, so POST
-// /v1/apps/<app>/domains reaches its per-app lifecycle — which issues over
-// TLS-ALPN-01, and the challenge for that only arrives spliced down a tunnel
-// this box does not have (#506). Without a solver the issuer factory must say
-// so in terms of the relay. It is not what a direct box hits first: the
-// lifecycle refuses at the relay notifier before asking for an issuer at all
-// (internal/domain's TestAppIssuanceWithoutARelayStopsBeforeTheIssuer). Nor is
-// the alternative a slow failure — certs.New rejects a typed-nil solver
-// immediately (internal/certs' TestNewRejectsTypedNilProviders, #242) — but it
-// rejects it as "exactly one of DNSProvider or ALPNSolver must be set", which
-// names neither the relay nor the domain that could not be issued.
+// The ALPN issuer factory refuses without a solver. Since #506 a direct box
+// never asks for it (appIssuerFor picks DNS-01), so this is a relay-mode box
+// whose solver went missing — the guard must still name the relay splice
+// rather than certs.New's "exactly one of DNSProvider or ALPNSolver must be
+// set" (#242), which names neither the relay nor the domain.
 func TestAppIssuerRefusesWithoutAnALPNSolver(t *testing.T) {
 	t.Setenv("PIPER_TEST_ISSUER", "")
 	cfg := config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect, DataDir: t.TempDir()}
@@ -1270,16 +1264,21 @@ func waitAppDomainStatus(t *testing.T, st *store.Store, domainName, status strin
 // A stored per-app domain row's lifecycle must restart at boot whenever a
 // domain manager exists — relay or not: a box that goes direct keeps its
 // rows, and asleep active rows read active while nothing re-runs armApp to
-// serve them (#509 review). Relay-less, the loop idles on the nil relay
-// notifier, which is what the failed status records until #506.
+// serve them (#509 review). Since #506 a relay-less direct box no longer
+// idles on the nil relay notifier: it now attempts its own env DNS-01
+// issuer, so with no provider credentials configured the row instead fails
+// naming the missing credentials. A terminated relay box still has no store
+// domain config row, so it still reads ServeRelay and idles on the nil
+// relay notifier.
 func TestResumeStoredDomainsRunsWheneverAManagerExists(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		cfg  config.Config
+		name    string
+		cfg     config.Config
+		wantErr string
 	}{
-		{"relay-less direct box", config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect}},
+		{"relay-less direct box", config.Config{BaseDomain: "example.dev", Serve: domain.ServeDirect}, "credentials"},
 		{"terminated relay box", config.Config{RelayAddr: "relay.example.net:7000", Terminated: true,
-			BaseDomain: "ab12-alice.public.getpiper.co"}},
+			BaseDomain: "ab12-alice.public.getpiper.co"}, "relay"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			st, err := store.Open(filepath.Join(t.TempDir(), "piper.db"))
@@ -1298,8 +1297,8 @@ func TestResumeStoredDomainsRunsWheneverAManagerExists(t *testing.T) {
 			t.Cleanup(m.Close) // registered last so it runs before the store closes
 			resumeStoredDomains(tc.cfg, m)
 			row := waitAppDomainStatus(t, st, "shop.example.com", domain.StatusFailed)
-			if !strings.Contains(row.Error, "relay") {
-				t.Errorf("resumed row error = %q, want the nil relay notifier named", row.Error)
+			if !strings.Contains(row.Error, tc.wantErr) {
+				t.Errorf("resumed row error = %q, want it to name %q", row.Error, tc.wantErr)
 			}
 		})
 	}

@@ -68,7 +68,7 @@ func TestWebhookDeployerUsesTheRelayHostname(t *testing.T) {
 	routes := &stubRoutes{}
 	reg := &recordingRegistrar{host: "abc123-alice.relay.example"}
 
-	d := newWebhookDeployer(st, stubRuntime{}, routes, "piper.localhost", reg)
+	d := newWebhookDeployer(st, stubRuntime{}, routes, "piper.localhost", reg, false)
 	if err := d.Delete(context.Background(), "blog"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestWebhookDeployerWithoutRelayKeepsLocalHost(t *testing.T) {
 	st := webhookTestStore(t)
 	routes := &stubRoutes{}
 
-	d := newWebhookDeployer(st, stubRuntime{}, routes, "piper.localhost", nil)
+	d := newWebhookDeployer(st, stubRuntime{}, routes, "piper.localhost", nil, false)
 	if err := d.Delete(context.Background(), "blog"); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}

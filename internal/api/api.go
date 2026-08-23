@@ -90,8 +90,10 @@ func latestStatus(s *store.Store, app string) (string, error) {
 }
 
 // DomainManager is the domain-config surface: the box-wide custom domain
-// (#102) and the per-app domains collection (#231). Nil when the box has no
-// relay configured: the endpoints then answer 409.
+// (#102) and the per-app domains collection (#231). Nil only when the box
+// reaches the public over neither a relay nor a direct-serve domain config
+// (cmd/piperd's publicHTTPS(cfg) gate) — a LAN-only box: the endpoints then
+// answer 409.
 type DomainManager interface {
 	Set(domain, provider, token, serve string) (domain.Status, error)
 	Status() (domain.Status, error)
@@ -100,11 +102,6 @@ type DomainManager interface {
 	RemoveAppDomain(domain string) error
 	AppDomainStatus(domain string) (domain.AppDomainStatus, error)
 	AppDomainStatuses(app string) ([]domain.AppDomainStatus, error)
-	// AppDomainsActivatable reports whether this box's configuration can ever
-	// activate a per-app custom domain: issuance is TLS-ALPN-01 spliced down
-	// the relay tunnel, so a direct-served box answers false until #506 and
-	// POST refuses synchronously (#509 review).
-	AppDomainsActivatable() bool
 }
 
 // RepoBinder tells the relay which repository an app deploys from, so brokered
@@ -626,10 +623,6 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 		if noRelay(w) {
 			return
 		}
-		if !dom.AppDomainsActivatable() {
-			http.Error(w, "per-app custom domains cannot activate on this box: their TLS-ALPN-01 challenge only arrives spliced down a relay tunnel this box does not have (#506 lifts this)", http.StatusConflict)
-			return
-		}
 		var in struct {
 			Domain string `json:"domain"`
 		}
@@ -645,7 +638,8 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 		case errors.Is(err, domain.ErrInvalidDomain):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		case errors.Is(err, domain.ErrBoxWideDomain), errors.Is(err, store.ErrDomainExists):
+		case errors.Is(err, domain.ErrBoxWideDomain), errors.Is(err, store.ErrDomainExists),
+			errors.Is(err, domain.ErrNoDNSIssuer):
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		case err != nil:

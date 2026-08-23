@@ -175,6 +175,65 @@ func TestAddAppDomainIssuesAndActivates(t *testing.T) {
 	}
 }
 
+// On a TLS-terminated box (Options.TLSTerminated, #506) armApp must not call
+// EnsureHTTPS: the box's own "piper" server already owns m.httpsListen at
+// boot, so arming a runtime "piper-tls" server on the same address would
+// collide with it. The cert still loads and the route still backfills.
+func TestAddAppDomainSkipsEnsureHTTPSWhenTLSTerminated(t *testing.T) {
+	iss := &fakeIssuer{}
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	proxy := &fakeProxy{}
+	router := &fakeRouter{}
+	m := New(Options{
+		Store:     st,
+		Issuer:    func(provider, token string) (Issuer, error) { return iss, nil },
+		AppIssuer: func() (Issuer, error) { return iss, nil },
+		Proxy:     proxy, Router: router, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+		TLSTerminated: true,
+	})
+	t.Cleanup(m.Close)
+	m.retryDelay = func(int) time.Duration { return time.Millisecond }
+	m.dnsWait = time.Millisecond
+	m.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	// No relay at all: TLSTerminated boxes (never-enrolled direct included)
+	// activate per-app domains with r == nil, per appIssueOnce's ServeDirect
+	// branch. boxServe() falls back to ServeRelay without an envDomain/dc, so
+	// pin the domain config's serve mode to direct explicitly.
+	if err := st.SetDomainConfig("wild.example.net", "cloudflare", "tok", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatalf("AddAppDomain: %v", err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+
+	proxy.mu.Lock()
+	ensured := append([]string(nil), proxy.ensured...)
+	certs := len(proxy.certs)
+	proxy.mu.Unlock()
+	if len(ensured) != 0 {
+		t.Fatalf("proxy.ensured = %v, want none: piper-tls must never be armed on a TLS-terminated box", ensured)
+	}
+	if certs != 1 {
+		t.Fatalf("proxy.certs = %d, want 1: the cert must still load", certs)
+	}
+	if r := router.routes(); len(r) != 1 || r[0] != "blog:shop.example.com" {
+		t.Fatalf("router backfill = %v", r)
+	}
+}
+
 func TestAddAppDomainValidation(t *testing.T) {
 	m, st, _, _, _, _ := newAppTestManager(t, &fakeIssuer{})
 	if _, err := st.CreateApp("blog", 8080); err != nil {
@@ -362,6 +421,33 @@ func TestRemoveAppDomainTearsDown(t *testing.T) {
 	// Removing an absent domain is a no-op.
 	if err := m.RemoveAppDomain("one.example.com"); err != nil {
 		t.Fatalf("second remove: %v", err)
+	}
+}
+
+// A never-enrolled direct box (no relay notifier) has no claim to clear for
+// an active per-app domain — #506's direct branch skips the claim on
+// issuance too. RemoveAppDomain must proceed with full local teardown rather
+// than refusing forever (#506 final review, finding 1).
+func TestRemoveAppDomainDirectNoRelayTearsDownActive(t *testing.T) {
+	dnsIss := &fakeIssuer{}
+	m, st, _, _ := newDirectAppManager(t, dnsIss, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+
+	if err := m.RemoveAppDomain("shop.example.com"); err != nil {
+		t.Fatalf("RemoveAppDomain on a claimless direct box: %v", err)
+	}
+	if _, err := st.GetAppDomain("shop.example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("row survives remove: %v", err)
+	}
+	dataDir := m.dataDir
+	if _, err := os.Stat(filepath.Join(dataDir, "appdomains", "shop.example.com")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cert dir survives remove: %v", err)
 	}
 }
 
@@ -841,5 +927,292 @@ func TestAppIssuanceWithoutARelayStopsBeforeTheIssuer(t *testing.T) {
 	if calls != 0 {
 		t.Errorf("AppIssuer called %d time(s); the run must refuse at the relay check, "+
 			"before anything can hand certs.New a nil solver", calls)
+	}
+}
+
+// newDirectAppManager builds a Manager on a box whose box-wide domain config
+// is serve=direct ("box.example.com", cloudflare token): dnsIss backs the
+// box-wide Issuer factory (the DNS-01 token source), alpnIss backs the ALPN
+// AppIssuer factory. No relay is set — direct boxes may have none; tests
+// that want one call m.SetRelay.
+func newDirectAppManager(t *testing.T, dnsIss, alpnIss Issuer) (*Manager, *store.Store, *fakeProxy, *fakeRouter) {
+	t.Helper()
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := st.SetDomainConfig("box.example.com", "cloudflare", "tok", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	proxy := &fakeProxy{}
+	router := &fakeRouter{}
+	m := New(Options{
+		Store:     st,
+		Issuer:    func(provider, token string) (Issuer, error) { return dnsIss, nil },
+		AppIssuer: func() (Issuer, error) { return alpnIss, nil },
+		Proxy:     proxy, Router: router, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+	})
+	t.Cleanup(m.Close)
+	m.retryDelay = func(int) time.Duration { return time.Millisecond }
+	m.dnsWait = time.Millisecond
+	m.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	return m, st, proxy, router
+}
+
+// A direct box with no DNS-01 source can never issue a per-app cert:
+// TLS-ALPN-01 has no relay splice to arrive by and DNS-01 has no token.
+// AddAppDomain must refuse synchronously — nothing stored, no lifecycle
+// spinning on an unrecoverable failure.
+func TestAddAppDomainDirectWithoutDNSSourceRefuses(t *testing.T) {
+	// API-managed shape: direct config whose row has no token.
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	if err := st.SetDomainConfig("box.example.com", "cloudflare", "", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); !errors.Is(err, ErrNoDNSIssuer) {
+		t.Fatalf("tokenless direct box: err = %v, want ErrNoDNSIssuer", err)
+	}
+	if _, err := st.GetAppDomain("shop.example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("refused add must store nothing, got err %v", err)
+	}
+}
+
+// Env-managed direct box on static cert files (no EnvIssuer): same refusal.
+func TestAddAppDomainDirectEnvStaticCertRefuses(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := New(Options{
+		Store:  st,
+		Issuer: func(provider, token string) (Issuer, error) { return &fakeIssuer{}, nil },
+		Proxy:  &fakeProxy{}, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+		EnvDomain: "box.example.com", EnvServe: ServeDirect, // EnvIssuer nil: static certs
+	})
+	t.Cleanup(m.Close)
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); !errors.Is(err, ErrNoDNSIssuer) {
+		t.Fatalf("static-cert env direct box: err = %v, want ErrNoDNSIssuer", err)
+	}
+}
+
+// A direct box WITH a token source accepts the add (the row lands pending);
+// a relay box never hits the guard regardless of token presence — that path
+// is pinned by TestAddAppDomainValidation running against a tokenless
+// relay-mode manager.
+func TestAddAppDomainDirectWithTokenAccepts(t *testing.T) {
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	row, err := m.AddAppDomain("blog", "shop.example.com")
+	if err != nil {
+		t.Fatalf("AddAppDomain on a tokened direct box: %v", err)
+	}
+	if row.Domain != "shop.example.com" {
+		t.Fatalf("row = %+v", row)
+	}
+}
+
+// Direct-mode activation: the DNS-01 issuer (box-wide token source) obtains
+// the exact-host cert; the ALPN issuer is never consulted; with no relay
+// connected there is no claim and no DNS gate — even unresolvable DNS
+// doesn't park the domain (the user flips DNS at their own pace, like
+// box-wide direct).
+func TestAppDomainDirectIssuesViaDNS01(t *testing.T) {
+	dnsIss := &fakeIssuer{}
+	alpnIss := &fakeIssuer{}
+	m, st, proxy, router := newDirectAppManager(t, dnsIss, alpnIss)
+	// No DNS gate: resolution failing must not matter in direct mode.
+	m.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		return nil, errors.New("no such host")
+	}
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatalf("AddAppDomain: %v", err)
+	}
+	got := waitAppStatus(t, st, "shop.example.com", StatusActive)
+	if got.Error != "" || got.CertNotAfter.IsZero() {
+		t.Fatalf("active row = %+v", got)
+	}
+	dnsIss.mu.Lock()
+	dnsCalls := dnsIss.calls
+	dnsIss.mu.Unlock()
+	alpnIss.mu.Lock()
+	alpnCalls := alpnIss.calls
+	alpnIss.mu.Unlock()
+	if dnsCalls != 1 || alpnCalls != 0 {
+		t.Fatalf("obtain calls: dns=%d alpn=%d, want 1/0", dnsCalls, alpnCalls)
+	}
+	// Activation is fully local: HTTPS armed, cert loaded, route backfilled.
+	proxy.mu.Lock()
+	certs := len(proxy.certs)
+	proxy.mu.Unlock()
+	if certs != 1 {
+		t.Fatalf("proxy certs = %d, want 1", certs)
+	}
+	if r := router.routes(); len(r) != 1 || r[0] != "blog:shop.example.com" {
+		t.Fatalf("router backfill = %v", r)
+	}
+}
+
+// Direct-mode with a relay connected keeps the claim (both paths serve
+// during the user's DNS flip): add before, confirm after activation.
+func TestAppDomainDirectWithRelayStillClaims(t *testing.T) {
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	relay := &fakeNotifier{}
+	m.SetRelay(relay)
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+	pushes := relay.pushes()
+	if len(pushes) < 2 || pushes[0] != "add:shop.example.com" ||
+		pushes[len(pushes)-1] != "confirm:shop.example.com" {
+		t.Fatalf("relay ops = %v, want add first and trailing confirm", pushes)
+	}
+}
+
+// A connected relay whose claim fails must fail the attempt — the claim is
+// load-bearing for the migration window, exactly the box-wide posture.
+func TestAppDomainDirectClaimFailureFailsTheAttempt(t *testing.T) {
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	m.SetRelay(&fakeNotifier{failAdd: errors.New("relay says no")})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	row := waitAppStatus(t, st, "shop.example.com", StatusFailed)
+	if !strings.Contains(row.Error, "relay says no") {
+		t.Fatalf("failed row error = %q", row.Error)
+	}
+}
+
+// A direct-mode Obtain failure must name the token source in the failed
+// row: the likeliest cause is the box-wide token not covering this domain's
+// zone (a different zone than the box-wide domain), which the raw provider
+// error does not say in Piper's terms.
+func TestAppDomainDirectObtainFailureNamesTheTokenSource(t *testing.T) {
+	dnsIss := &fakeIssuer{failures: 1 << 30} // every Obtain fails
+	m, st, _, _ := newDirectAppManager(t, dnsIss, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	row := waitAppStatus(t, st, "shop.example.com", StatusFailed)
+	if !strings.Contains(row.Error, "box-wide DNS token") || !strings.Contains(row.Error, "acme: boom") {
+		t.Fatalf("failed row error = %q, want the token-source guidance wrapping the provider error", row.Error)
+	}
+}
+
+// Renewal follows the mode current at renew time, both directions: a domain
+// activated under direct renews via ALPN after a flip to relay, and vice
+// versa. reissueApp is the single reissue path renewApp drives.
+func TestAppDomainRenewalFollowsFlippedMode(t *testing.T) {
+	dnsIss := &fakeIssuer{}
+	alpnIss := &fakeIssuer{}
+	m, st, _, _ := newDirectAppManager(t, dnsIss, alpnIss)
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive) // via dnsIss (call 1)
+
+	// Flip the box to relay: the next reissue must use the ALPN issuer.
+	if err := st.SetDomainConfig("box.example.com", "cloudflare", "tok", ServeRelay); err != nil {
+		t.Fatal(err)
+	}
+	row, err := st.GetAppDomain("shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.reissueApp(row); err != nil {
+		t.Fatalf("reissueApp after flip to relay: %v", err)
+	}
+	alpnIss.mu.Lock()
+	alpnCalls := alpnIss.calls
+	alpnIss.mu.Unlock()
+	if alpnCalls != 1 {
+		t.Fatalf("alpn obtain calls after relay flip = %d, want 1", alpnCalls)
+	}
+
+	// And back: direct again renews via DNS-01.
+	if err := st.SetDomainConfig("box.example.com", "cloudflare", "tok", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.reissueApp(row); err != nil {
+		t.Fatalf("reissueApp after flip to direct: %v", err)
+	}
+	dnsIss.mu.Lock()
+	dnsCalls := dnsIss.calls
+	dnsIss.mu.Unlock()
+	if dnsCalls != 2 {
+		t.Fatalf("dns obtain calls after direct flip = %d, want 2 (activation + renewal)", dnsCalls)
+	}
+}
+
+// Direct-mode status guides an A record at the box's public IP and answers
+// dns_ok against that IP; an unknown IP degrades to an empty-value record
+// plus the box-wide explanatory note. Relay-mode status (CNAME at the relay)
+// is pinned by TestAppDomainStatuses.
+func TestAppDomainStatusDirect(t *testing.T) {
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+
+	// Public IP unknown: empty-value record, note, dns_ok false.
+	stt, err := m.AppDomainStatus("shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stt.DNSRecords) != 1 || stt.DNSRecords[0].Type != "A" ||
+		stt.DNSRecords[0].Name != "shop.example.com" || stt.DNSRecords[0].Value != "" {
+		t.Fatalf("records (no IP) = %+v", stt.DNSRecords)
+	}
+	if stt.Note == "" || stt.DNSOK {
+		t.Fatalf("no-IP status: note=%q dns_ok=%v, want note and false", stt.Note, stt.DNSOK)
+	}
+
+	// Known public IP that the domain resolves to: full record, dns_ok true.
+	m.publicIP = func() string { return "203.0.113.7" } // resolve fake returns this IP
+	stt, err = m.AppDomainStatus("shop.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stt.DNSRecords) != 1 || stt.DNSRecords[0].Type != "A" ||
+		stt.DNSRecords[0].Value != "203.0.113.7" {
+		t.Fatalf("records (with IP) = %+v", stt.DNSRecords)
+	}
+	if stt.Note != "" || !stt.DNSOK {
+		t.Fatalf("with-IP status: note=%q dns_ok=%v, want no note and true", stt.Note, stt.DNSOK)
 	}
 }

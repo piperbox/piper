@@ -1558,6 +1558,35 @@ func TestDeployRoutesActiveAppDomainsOnly(t *testing.T) {
 	}
 }
 
+// On a TLS-terminated box (env-managed direct-serve, or BYO-relay-with-its-
+// own-domain), per-app domain routes must land on the "piper" server via
+// plain UpsertRoute, not UpsertRouteTLS: EnsureHTTPS is never called there
+// (#506), so the runtime "piper-tls" server UpsertRouteTLS targets does not
+// exist — "piper" already terminates TLS itself and serves any host whose
+// cert is loaded, exactly like the box-wide direct domain and the primary
+// host already do.
+func TestDeployRoutesActiveAppDomainsOnTLSTerminatedBox(t *testing.T) {
+	s, _ := newStore(t)
+	addAppDomain(t, s, "blog.example.com", "blog", "active")
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	routes := newFakeCaddy()
+	d := New(s, rt, routes, "piper.localhost")
+	d.SetTLSTerminated(true)
+
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if routes.upserts["blog.example.com"] != 40001 {
+		t.Errorf("upserts = %+v, want blog.example.com -> 40001 on the piper server", routes.upserts)
+	}
+	if len(routes.tlsRoutes) != 0 {
+		t.Errorf("tlsRoutes = %v, want none: piper-tls is never armed on a TLS-terminated box", routes.tlsRoutes)
+	}
+}
+
 // A flaky Caddy admin call on a per-app domain route must not fail a deploy
 // that already succeeded on its primary URL (same stance as #115).
 func TestDeployAppDomainRouteFailureDoesNotAbort(t *testing.T) {
@@ -1668,6 +1697,32 @@ func TestRouteAppDomainBackfillsRunningApp(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("tlsRoutes = %v, want %s", routes.tlsRoutes, want)
+	}
+}
+
+// RouteAppDomain backfill follows the same TLS-terminated routing choice as
+// Deploy's own per-app domain routes.
+func TestRouteAppDomainBackfillOnTLSTerminatedBox(t *testing.T) {
+	s, _ := newStore(t)
+	rt := &runtime.FakeRuntime{
+		BuildResultVal: runtime.BuildResult{ImageID: "img1"},
+		RunResultVal:   runtime.RunResult{ContainerID: "c1", HostPort: 40001},
+	}
+	routes := newFakeCaddy()
+	d := New(s, rt, routes, "piper.localhost")
+	d.SetTLSTerminated(true)
+	if _, err := d.Deploy(context.Background(), "blog", t.TempDir()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+
+	if err := d.RouteAppDomain("blog", "blog.example.com"); err != nil {
+		t.Fatalf("RouteAppDomain: %v", err)
+	}
+	if routes.upserts["blog.example.com"] != 40001 {
+		t.Errorf("upserts = %+v, want blog.example.com -> 40001", routes.upserts)
+	}
+	if len(routes.tlsRoutes) != 0 {
+		t.Errorf("tlsRoutes = %v, want none", routes.tlsRoutes)
 	}
 }
 
