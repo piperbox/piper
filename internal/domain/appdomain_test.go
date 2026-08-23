@@ -175,6 +175,65 @@ func TestAddAppDomainIssuesAndActivates(t *testing.T) {
 	}
 }
 
+// On a TLS-terminated box (Options.TLSTerminated, #506) armApp must not call
+// EnsureHTTPS: the box's own "piper" server already owns m.httpsListen at
+// boot, so arming a runtime "piper-tls" server on the same address would
+// collide with it. The cert still loads and the route still backfills.
+func TestAddAppDomainSkipsEnsureHTTPSWhenTLSTerminated(t *testing.T) {
+	iss := &fakeIssuer{}
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	proxy := &fakeProxy{}
+	router := &fakeRouter{}
+	m := New(Options{
+		Store:     st,
+		Issuer:    func(provider, token string) (Issuer, error) { return iss, nil },
+		AppIssuer: func() (Issuer, error) { return iss, nil },
+		Proxy:     proxy, Router: router, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+		TLSTerminated: true,
+	})
+	t.Cleanup(m.Close)
+	m.retryDelay = func(int) time.Duration { return time.Millisecond }
+	m.dnsWait = time.Millisecond
+	m.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	// No relay at all: TLSTerminated boxes (never-enrolled direct included)
+	// activate per-app domains with r == nil, per appIssueOnce's ServeDirect
+	// branch. boxServe() falls back to ServeRelay without an envDomain/dc, so
+	// pin the domain config's serve mode to direct explicitly.
+	if err := st.SetDomainConfig("wild.example.net", "cloudflare", "tok", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); err != nil {
+		t.Fatalf("AddAppDomain: %v", err)
+	}
+	waitAppStatus(t, st, "shop.example.com", StatusActive)
+
+	proxy.mu.Lock()
+	ensured := append([]string(nil), proxy.ensured...)
+	certs := len(proxy.certs)
+	proxy.mu.Unlock()
+	if len(ensured) != 0 {
+		t.Fatalf("proxy.ensured = %v, want none: piper-tls must never be armed on a TLS-terminated box", ensured)
+	}
+	if certs != 1 {
+		t.Fatalf("proxy.certs = %d, want 1: the cert must still load", certs)
+	}
+	if r := router.routes(); len(r) != 1 || r[0] != "blog:shop.example.com" {
+		t.Fatalf("router backfill = %v", r)
+	}
+}
+
 func TestAddAppDomainValidation(t *testing.T) {
 	m, st, _, _, _, _ := newAppTestManager(t, &fakeIssuer{})
 	if _, err := st.CreateApp("blog", 8080); err != nil {

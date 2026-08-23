@@ -656,6 +656,10 @@ func main() {
 	}
 
 	dep := deploy.New(st, rt, caddy.NewClient(cfg.CaddyAdmin), cfg.BaseDomain)
+	// See terminatesTLS: on such a box the domain manager never arms a
+	// runtime "piper-tls" server (#506), so custom-domain routes must land on
+	// "piper" itself via plain UpsertRoute.
+	dep.SetTLSTerminated(terminatesTLS(cfg))
 
 	// Created before the domain manager so its DNS guidance can consult the
 	// relay-observed public IP; Run and the rest of its wiring still start in
@@ -1057,11 +1061,12 @@ func newWebhookStarter(cfg config.Config, st *store.Store, rt *runtime.DockerRun
 // certificate and unknown to its router — so the app is unreachable however
 // healthy the container is. reg is nil on a LAN-only box, which keeps that
 // local convention deliberately.
-func newWebhookDeployer(st *store.Store, rt runtime.Runtime, routes deploy.RouteSetter, baseDomain string, reg deploy.HostnameRegistrar) *deploy.Deployer {
+func newWebhookDeployer(st *store.Store, rt runtime.Runtime, routes deploy.RouteSetter, baseDomain string, reg deploy.HostnameRegistrar, tlsTerminated bool) *deploy.Deployer {
 	d := deploy.New(st, rt, routes, baseDomain)
 	if reg != nil {
 		d.SetHostnameRegistrar(reg)
 	}
+	d.SetTLSTerminated(tlsTerminated)
 	return d
 }
 
@@ -1191,7 +1196,7 @@ func (w *webhookStarter) run() {
 		return
 	}
 
-	wdep := newWebhookDeployer(w.st, w.rt, caddy.NewClient(w.cfg.CaddyAdmin), w.cfg.BaseDomain, w.registrar)
+	wdep := newWebhookDeployer(w.st, w.rt, caddy.NewClient(w.cfg.CaddyAdmin), w.cfg.BaseDomain, w.registrar, terminatesTLS(w.cfg))
 	w.handler = webhook.New(prov, w.st, wdep, w.cfg.BaseDomain)
 	w.srv = &http.Server{Addr: w.cfg.WebhookAddr, Handler: w.handler}
 	go func() {

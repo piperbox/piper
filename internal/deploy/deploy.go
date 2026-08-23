@@ -71,6 +71,10 @@ type Deployer struct {
 	routes    RouteSetter
 	baseDom   string
 	registrar HostnameRegistrar
+	// tlsTerminated mirrors domain.Options.TLSTerminated / cmd/piperd's
+	// terminatesTLS(cfg): true when the box's own "piper" Caddy server
+	// already answers HTTPS at boot. See SetTLSTerminated.
+	tlsTerminated bool
 
 	mu    sync.Mutex             // guards locks
 	locks map[string]*sync.Mutex // per-app serialization of mutating ops
@@ -102,6 +106,28 @@ func (d *Deployer) lockApp(name string) func() {
 // the registrar for each app's public hostname and routes that. Nil restores
 // LAN/BYO behavior.
 func (d *Deployer) SetHostnameRegistrar(r HostnameRegistrar) { d.registrar = r }
+
+// SetTLSTerminated tells the Deployer that this box's "piper" Caddy server
+// already terminates TLS at boot (env-managed direct-serve, or BYO-relay with
+// its own domain — see cmd/piperd's terminatesTLS(cfg)). Custom-domain routes
+// (box-wide BYO and per-app) then go through domainRoute, which upserts onto
+// "piper" via UpsertRoute instead of arming a runtime "piper-tls" server via
+// UpsertRouteTLS — that server is never armed in this mode (#506), so posting
+// a route to it would fail. Default false keeps existing (relay-terminated /
+// LAN) behavior.
+func (d *Deployer) SetTLSTerminated(v bool) { d.tlsTerminated = v }
+
+// domainRoute upserts a secondary hostname's route — a per-app or box-wide
+// BYO custom domain, alongside the app's primary host — choosing the server
+// that actually terminates TLS for it: "piper" itself via UpsertRoute on a
+// TLS-terminated box (see SetTLSTerminated), or the runtime "piper-tls"
+// server via UpsertRouteTLS (plus its :80->:443 redirect) otherwise.
+func (d *Deployer) domainRoute(host string, upstreamHostPort int) error {
+	if d.tlsTerminated {
+		return d.routes.UpsertRoute(host, upstreamHostPort)
+	}
+	return d.routes.UpsertRouteTLS(host, upstreamHostPort)
+}
 
 func (d *Deployer) hostFor(app string) string {
 	return app + "." + d.baseDom
@@ -303,7 +329,7 @@ func (d *Deployer) finish(ctx context.Context, dep store.Deployment, srcDir stri
 	// logged and skipped rather than failing an otherwise-successful deploy (#115).
 	if dc, err := d.store.GetDomainConfig(); err == nil && dc.Status == "active" {
 		host := dep.App + "." + dc.Domain
-		if err := d.routes.UpsertRouteTLS(host, run.HostPort); err != nil {
+		if err := d.domainRoute(host, run.HostPort); err != nil {
 			log.Printf("deploy %s: custom-domain route %s (deploy still succeeded on primary): %v", dep.App, host, err)
 		}
 	}
@@ -317,7 +343,7 @@ func (d *Deployer) finish(ctx context.Context, dep store.Deployment, srcDir stri
 			if ad.Status != "active" {
 				continue
 			}
-			if err := d.routes.UpsertRouteTLS(ad.Domain, run.HostPort); err != nil {
+			if err := d.domainRoute(ad.Domain, run.HostPort); err != nil {
 				log.Printf("deploy %s: app-domain route %s (deploy still succeeded on primary): %v", dep.App, ad.Domain, err)
 			}
 		}
@@ -550,7 +576,7 @@ func (d *Deployer) RouteAppDomain(appName, domain string) error {
 	if err != nil {
 		return err
 	}
-	return d.routes.UpsertRouteTLS(domain, dep.HostPort)
+	return d.domainRoute(domain, dep.HostPort)
 }
 
 // removeCustomDomainRoute drops the app's custom-domain routes: <app>.<custom>
@@ -623,7 +649,7 @@ func (d *Deployer) Stop(ctx context.Context, appName string) error {
 func (d *Deployer) addCustomDomainRoute(appName string, hostPort int) {
 	if dc, err := d.store.GetDomainConfig(); err == nil && dc.Status == "active" {
 		host := appName + "." + dc.Domain
-		if err := d.routes.UpsertRouteTLS(host, hostPort); err != nil {
+		if err := d.domainRoute(host, hostPort); err != nil {
 			log.Printf("start %s: custom-domain route %s: %v", appName, host, err)
 		}
 	}
@@ -636,7 +662,7 @@ func (d *Deployer) addCustomDomainRoute(appName string, hostPort int) {
 		if ad.Status != "active" {
 			continue
 		}
-		if err := d.routes.UpsertRouteTLS(ad.Domain, hostPort); err != nil {
+		if err := d.domainRoute(ad.Domain, hostPort); err != nil {
 			log.Printf("start %s: app-domain route %s: %v", appName, ad.Domain, err)
 		}
 	}

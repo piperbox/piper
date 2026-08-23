@@ -664,6 +664,13 @@ func (m *Manager) issueOnce(snap store.DomainConfig) error {
 
 // arm loads the cert and app routes into Caddy — the box must answer before
 // the relay routes to it. Shared by first activation and restart resume.
+//
+// The unconditional EnsureHTTPS below is safe unlike armApp's guarded one:
+// this path only runs for a store/API-managed dc (m.envDomain == ""), which
+// cmd/piperd only reaches when cfg.Terminated is true — the one shape where
+// terminatesTLS(cfg) is also always false, so "piper" never already owns
+// m.httpsListen at boot and arming a runtime "piper-tls" server here cannot
+// collide with it (#506).
 func (m *Manager) arm(dc store.DomainConfig, certPEM, keyPEM []byte) error {
 	if err := m.proxy.EnsureHTTPS(m.httpsListen); err != nil {
 		return err

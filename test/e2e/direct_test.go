@@ -241,6 +241,15 @@ func TestRelayCustomDomainDirectServe(t *testing.T) {
 // It stops at the TLS layer on purpose: the certificate the box serves under
 // its own SNI is the thing the relay gates used to make unreachable. Routing
 // an app onto that listener is the deploy path, already covered above.
+//
+// It also proves a per-app custom domain (#506) activates on this same
+// never-enrolled box — DNS-01 through the box-wide token source, no relay
+// claim anywhere — and that its exact-host cert lands on the box's own :443.
+// That half stops at the TLS layer too: "blog" is never actually deployed
+// here, so this does not prove a real app is reachable behind the per-app
+// domain — that's deploy.Deployer's TLS-terminated route path
+// (RouteAppDomain / finish / addCustomDomainRoute, all through domainRoute),
+// covered by internal/deploy's own unit tests instead.
 func TestNeverEnrolledDirectServesHTTPS(t *testing.T) {
 	if os.Getenv("RUN_E2E") != "1" {
 		t.Skip("set RUN_E2E=1 to run (needs Docker; Caddy is embedded)")
