@@ -376,15 +376,12 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 				return testSelfSignedIssuer{}, nil
 			}
-			// No solver means no relay to splice acme-tls/1 down, which is
-			// every directly-served box (#506 is what lifts this). The add
-			// path never gets here — appIssueOnce refuses at the relay
-			// notifier first ("relay not connected") — but reissueApp asks
-			// for an issuer with no notifier check, so on a direct box this
-			// guard is the line that fires. Without it certs.New rejects
-			// the typed-nil solver as "exactly one of DNSProvider or
-			// ALPNSolver must be set" (#242), naming neither relay nor
-			// domain.
+			// No solver means no relay to splice acme-tls/1 down. Since #506
+			// a direct box never asks for this issuer (appIssuerFor picks
+			// DNS-01), so this guard is a relay-mode box whose solver went
+			// missing — kept because certs.New would otherwise reject the
+			// typed-nil solver as "exactly one of DNSProvider or ALPNSolver
+			// must be set" (#242), naming neither relay nor domain.
 			if alpnSolver == nil {
 				return nil, fmt.Errorf("per-app custom domains need a relay connection: their TLS-ALPN-01 challenge is spliced down the tunnel to this box")
 			}
@@ -401,6 +398,12 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	if !cfg.Terminated {
 		opts.EnvDomain = cfg.BaseDomain // env-managed BYO: API writes are 409
 		opts.EnvServe = serveMode(cfg.Serve)
+		// The env box's DNS-01 source, doubling as the per-app token source
+		// on a direct box (#506). Static-cert boxes (PIPER_TLS_CERT_FILE)
+		// have no ACME path and stay nil — per-app adds are refused there.
+		if cfg.TLSCertFile == "" {
+			opts.EnvIssuer = func() (domain.Issuer, error) { return newEnvIssuer(cfg) }
+		}
 	}
 	if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 		// E2E: the fake issuer implies the test domains have no real DNS
@@ -412,17 +415,6 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	}
 	return opts
 }
-
-// appDomainCapability wraps the domain manager with the box-level answer the
-// API's per-app collection needs: whether this box can ever activate one.
-// Issuance is TLS-ALPN-01 spliced down the relay tunnel, so the answer is
-// exactly "a relay is configured" until #506 (#509 review).
-type appDomainCapability struct {
-	*domain.Manager
-	activatable bool
-}
-
-func (a appDomainCapability) AppDomainsActivatable() bool { return a.activatable }
 
 // publicIPFunc resolves the box's public IP for direct serve mode:
 // PIPER_PUBLIC_IP pins it; otherwise the relay-observed address, read lazily
@@ -704,7 +696,7 @@ func main() {
 	var wh *webhookStarter
 	var dm api.DomainManager
 	if domMgr != nil {
-		dm = appDomainCapability{Manager: domMgr, activatable: cfg.RelayAddr != ""}
+		dm = domMgr
 	}
 	// binder is declared as the api.RepoBinder interface (not a
 	// *agent.TunnelClient) so that on a LAN-only box it stays genuinely nil — a
