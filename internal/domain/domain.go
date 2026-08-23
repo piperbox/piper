@@ -433,6 +433,41 @@ func (m *Manager) hasAppDNSSource() bool {
 	return err == nil && dc.DNSToken != ""
 }
 
+// appDNSIssuer builds the DNS-01 issuer a direct box issues per-app domains
+// with — the box-wide token source: the env box's issuer, or the domain
+// config row's provider+token through the box-wide factory. ErrNoDNSIssuer
+// when the box has neither (AddAppDomain guards this, but issuance re-checks:
+// the config can be removed after the row lands).
+func (m *Manager) appDNSIssuer() (Issuer, error) {
+	if m.envDomain != "" {
+		if m.envIssuer == nil {
+			return nil, ErrNoDNSIssuer
+		}
+		return m.envIssuer()
+	}
+	dc, err := m.st.GetDomainConfig()
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, ErrNoDNSIssuer
+	}
+	if err != nil {
+		return nil, err
+	}
+	if dc.DNSToken == "" {
+		return nil, ErrNoDNSIssuer
+	}
+	return m.newIssuer(dc.DNSProvider, dc.DNSToken)
+}
+
+// appIssuerFor picks the per-app issuer for the serve mode: DNS-01 with the
+// box-wide token on a direct box, TLS-ALPN-01 through the relay splice
+// otherwise (#506).
+func (m *Manager) appIssuerFor(serve string) (Issuer, error) {
+	if serve == ServeDirect {
+		return m.appDNSIssuer()
+	}
+	return m.appIssuer()
+}
+
 // domainRE accepts lowercase dotted DNS names ("shop.example.com").
 var domainRE = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+[a-z][a-z0-9-]*[a-z0-9]$`)
 

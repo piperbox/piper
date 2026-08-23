@@ -117,15 +117,29 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	if err != nil || row.App != snap.App {
 		return errStaleConfig
 	}
+	serve := m.boxServe()
 	r := m.notifier()
-	if r == nil {
-		return errors.New("relay not connected")
-	}
-	if err := r.AddCustomDomain(row.Domain); err != nil {
-		return err
-	}
-	if !m.dnsPointsAt(m.dnsTarget, row.Domain) {
-		return fmt.Errorf("%w: point a CNAME or A record for %s at %s", errWaitDNS, row.Domain, m.dnsTarget)
+	if serve == ServeDirect {
+		// Direct: the relay claim is optional — kept when connected so both
+		// paths serve identically during the user's DNS flip (the TTL-window
+		// migration property), skipped on a never-enrolled box. No DNS gate:
+		// DNS-01 does not depend on where visitor DNS points, so issue
+		// immediately, like the box-wide instance.
+		if r != nil {
+			if err := r.AddCustomDomain(row.Domain); err != nil {
+				return err
+			}
+		}
+	} else {
+		if r == nil {
+			return errors.New("relay not connected")
+		}
+		if err := r.AddCustomDomain(row.Domain); err != nil {
+			return err
+		}
+		if !m.dnsPointsAt(m.dnsTarget, row.Domain) {
+			return fmt.Errorf("%w: point a CNAME or A record for %s at %s", errWaitDNS, row.Domain, m.dnsTarget)
+		}
 	}
 	if err := m.st.UpdateAppDomainStatus(row.Domain, StatusIssuing, "", time.Time{}); err != nil {
 		return err
@@ -135,12 +149,15 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	// certificate.
 	certPEM, keyPEM, err := m.readAppCert(row.Domain)
 	if err != nil || !certValidFor(certPEM, row.Domain, time.Now()) {
-		iss, err := m.appIssuer()
+		iss, err := m.appIssuerFor(serve)
 		if err != nil {
 			return err
 		}
 		certPEM, keyPEM, err = iss.Obtain([]string{row.Domain})
 		if err != nil {
+			if serve == ServeDirect {
+				return fmt.Errorf("dns-01 obtain (the box-wide DNS token must cover %s's zone): %w", row.Domain, err)
+			}
 			return err
 		}
 		if cur, err := m.st.GetAppDomain(row.Domain); err != nil || cur.App != row.App {
@@ -153,8 +170,10 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	if err := m.armApp(row, certPEM, keyPEM); err != nil {
 		return err
 	}
-	if err := r.ConfirmCustomDomain(row.Domain); err != nil {
-		return err
+	if r != nil {
+		if err := r.ConfirmCustomDomain(row.Domain); err != nil {
+			return err
+		}
 	}
 	notAfter, err := certs.NotAfter(certPEM)
 	if err != nil {
@@ -328,7 +347,7 @@ func (m *Manager) renewApp(snap store.AppDomain, now time.Time) {
 // reissueApp obtains a fresh exact-host cert for an already-active domain and
 // swaps it in. Caller holds the domain's run lock.
 func (m *Manager) reissueApp(row store.AppDomain) error {
-	iss, err := m.appIssuer()
+	iss, err := m.appIssuerFor(m.boxServe())
 	if err != nil {
 		return err
 	}
