@@ -843,3 +843,100 @@ func TestAppIssuanceWithoutARelayStopsBeforeTheIssuer(t *testing.T) {
 			"before anything can hand certs.New a nil solver", calls)
 	}
 }
+
+// newDirectAppManager builds a Manager on a box whose box-wide domain config
+// is serve=direct ("box.example.com", cloudflare token): dnsIss backs the
+// box-wide Issuer factory (the DNS-01 token source), alpnIss backs the ALPN
+// AppIssuer factory. No relay is set — direct boxes may have none; tests
+// that want one call m.SetRelay.
+func newDirectAppManager(t *testing.T, dnsIss, alpnIss Issuer) (*Manager, *store.Store, *fakeProxy, *fakeRouter) {
+	t.Helper()
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if err := st.SetDomainConfig("box.example.com", "cloudflare", "tok", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	proxy := &fakeProxy{}
+	router := &fakeRouter{}
+	m := New(Options{
+		Store:     st,
+		Issuer:    func(provider, token string) (Issuer, error) { return dnsIss, nil },
+		AppIssuer: func() (Issuer, error) { return alpnIss, nil },
+		Proxy:     proxy, Router: router, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+	})
+	t.Cleanup(m.Close)
+	m.retryDelay = func(int) time.Duration { return time.Millisecond }
+	m.dnsWait = time.Millisecond
+	m.resolve = func(_ context.Context, _ string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("203.0.113.7")}, nil
+	}
+	return m, st, proxy, router
+}
+
+// A direct box with no DNS-01 source can never issue a per-app cert:
+// TLS-ALPN-01 has no relay splice to arrive by and DNS-01 has no token.
+// AddAppDomain must refuse synchronously — nothing stored, no lifecycle
+// spinning on an unrecoverable failure.
+func TestAddAppDomainDirectWithoutDNSSourceRefuses(t *testing.T) {
+	// API-managed shape: direct config whose row has no token.
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	if err := st.SetDomainConfig("box.example.com", "cloudflare", "", ServeDirect); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); !errors.Is(err, ErrNoDNSIssuer) {
+		t.Fatalf("tokenless direct box: err = %v, want ErrNoDNSIssuer", err)
+	}
+	if _, err := st.GetAppDomain("shop.example.com"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("refused add must store nothing, got err %v", err)
+	}
+}
+
+// Env-managed direct box on static cert files (no EnvIssuer): same refusal.
+func TestAddAppDomainDirectEnvStaticCertRefuses(t *testing.T) {
+	dataDir := t.TempDir()
+	st, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	m := New(Options{
+		Store:  st,
+		Issuer: func(provider, token string) (Issuer, error) { return &fakeIssuer{}, nil },
+		Proxy:  &fakeProxy{}, DataDir: dataDir,
+		RelayHost: "relay.example.net", HTTPSListen: ":8443",
+		EnvDomain: "box.example.com", EnvServe: ServeDirect, // EnvIssuer nil: static certs
+	})
+	t.Cleanup(m.Close)
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.AddAppDomain("blog", "shop.example.com"); !errors.Is(err, ErrNoDNSIssuer) {
+		t.Fatalf("static-cert env direct box: err = %v, want ErrNoDNSIssuer", err)
+	}
+}
+
+// A direct box WITH a token source accepts the add (the row lands pending);
+// a relay box never hits the guard regardless of token presence — that path
+// is pinned by TestAddAppDomainValidation running against a tokenless
+// relay-mode manager.
+func TestAddAppDomainDirectWithTokenAccepts(t *testing.T) {
+	m, st, _, _ := newDirectAppManager(t, &fakeIssuer{}, &fakeIssuer{})
+	if _, err := st.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	row, err := m.AddAppDomain("blog", "shop.example.com")
+	if err != nil {
+		t.Fatalf("AddAppDomain on a tokened direct box: %v", err)
+	}
+	if row.Domain != "shop.example.com" {
+		t.Fatalf("row = %+v", row)
+	}
+}

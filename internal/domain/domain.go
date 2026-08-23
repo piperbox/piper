@@ -63,6 +63,10 @@ var (
 	ErrUnsupportedProvider = errors.New("unsupported dns provider")
 	ErrTokenRequired       = errors.New("dns_token required")
 	ErrInvalidServe        = errors.New(`invalid serve mode (want "relay" or "direct")`)
+	// ErrNoDNSIssuer rejects adding a per-app domain on a direct-served box
+	// with no DNS-01 source: TLS-ALPN-01 has no relay splice to arrive by,
+	// and DNS-01 has no token to write records with (#506).
+	ErrNoDNSIssuer = errors.New("direct-served per-app domains need a box-wide domain with a DNS token: this box serves direct, so per-app certificates are issued via DNS-01 with the box-wide token")
 )
 
 // errStaleConfig aborts an issuance/renewal run whose config snapshot no
@@ -132,6 +136,11 @@ type Options struct {
 	// PublicIP reports the box's best-known public IP for direct mode's DNS
 	// guidance ("" ⇒ unknown). Nil tolerated: always unknown.
 	PublicIP func() string
+	// EnvIssuer builds the env-managed box's DNS-01 issuer (provider creds
+	// from the provider's own env vars). Nil means the env box has no ACME
+	// path (static cert files) — or the box is API-managed. Direct-mode
+	// per-app issuance on an env box uses it as the box-wide token source.
+	EnvIssuer func() (Issuer, error)
 	// Resolve overrides the DNS lookup behind dns_ok and the per-app DNS
 	// gate; nil uses net.DefaultResolver. E2E seam: the test domains have no
 	// real DNS (see PIPER_TEST_ISSUER in cmd/piperd).
@@ -155,6 +164,7 @@ type Manager struct {
 	httpsListen string
 	envDomain   string
 	envServe    string
+	envIssuer   func() (Issuer, error) // see Options.EnvIssuer
 	publicIP    func() string
 
 	relayMu sync.Mutex
@@ -236,7 +246,7 @@ func New(o Options) *Manager {
 		proxy: o.Proxy, router: o.Router,
 		dataDir: o.DataDir, dnsTarget: dnsTarget,
 		httpsListen: o.HTTPSListen, envDomain: o.EnvDomain,
-		envServe: envServe, publicIP: publicIP,
+		envServe: envServe, envIssuer: o.EnvIssuer, publicIP: publicIP,
 		appMu:      map[string]*sync.Mutex{},
 		gens:       map[string]int{},
 		loaded:     map[string]caddy.CertPair{},
@@ -397,6 +407,30 @@ func (m *Manager) notifier() RelayNotifier {
 	m.relayMu.Lock()
 	defer m.relayMu.Unlock()
 	return m.relay
+}
+
+// boxServe answers which path the public reaches this box by: the env-pinned
+// mode on env-managed boxes, the domain config row's serve mode when one
+// exists, relay otherwise. Per-app domains follow this box-wide fact (#506)
+// — there is no per-domain serve choice.
+func (m *Manager) boxServe() string {
+	if m.envDomain != "" {
+		return m.envServe
+	}
+	if dc, err := m.st.GetDomainConfig(); err == nil && dc.Serve == ServeDirect {
+		return ServeDirect
+	}
+	return ServeRelay
+}
+
+// hasAppDNSSource reports whether a DNS-01 issuer for per-app domains could
+// be built, without building one — AddAppDomain's synchronous guard.
+func (m *Manager) hasAppDNSSource() bool {
+	if m.envDomain != "" {
+		return m.envIssuer != nil
+	}
+	dc, err := m.st.GetDomainConfig()
+	return err == nil && dc.DNSToken != ""
 }
 
 // domainRE accepts lowercase dotted DNS names ("shop.example.com").

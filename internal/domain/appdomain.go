@@ -49,6 +49,9 @@ func (m *Manager) AddAppDomain(app, domainName string) (store.AppDomain, error) 
 	if dc, err := m.st.GetDomainConfig(); err == nil && dc.Domain == d {
 		return store.AppDomain{}, ErrBoxWideDomain
 	}
+	if m.boxServe() == ServeDirect && !m.hasAppDNSSource() {
+		return store.AppDomain{}, ErrNoDNSIssuer
+	}
 	if err := m.st.AddAppDomain(d, app); err != nil {
 		return store.AppDomain{}, err
 	}
