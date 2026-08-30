@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/piperbox/piper/security/advisories/new
+    about: Report privately through GitHub. Please don't open a public issue for a suspected vulnerability.
+  - name: Contributing guide
+    url: https://github.com/piperbox/piper/blob/main/CONTRIBUTING.md
+    about: Dev setup, the make verify gate, layering rules, and how issues and PRs are expected to look.
+  - name: What's built and what's stubbed
+    url: https://github.com/piperbox/piper/blob/main/PROGRESS.md
+    about: Check here before filing — the gap you found may already be a known stub.
