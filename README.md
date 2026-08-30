@@ -104,7 +104,7 @@ tunnel as your traffic; nothing else on the box is exposed.
 [Issues](https://github.com/piperbox/piper/issues) carry an `[area]` title
 prefix (`[agent]`, `[cli]`, `[relay]`, …); new here? Look for
 [`good first issue`](https://github.com/piperbox/piper/labels/good%20first%20issue).
-How to work in this repo — coding principles, branch workflow, issue
-conventions — lives in [`CLAUDE.md`](CLAUDE.md). Trunk-based: branch off
-`main`, open a PR back into it, squash-merge; CI's `verify` gate (gofmt ·
-`go vet` · tests · arm64 cross-compile) must pass.
+How to work in this repo — dev setup, coding principles, branch workflow,
+issue conventions — lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Trunk-based: branch off `main`, open a PR back into it, squash-merge; CI's
+`verify` gate (gofmt · `go vet` · tests · arm64 cross-compile) must pass.
