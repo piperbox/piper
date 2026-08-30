@@ -1,0 +1,63 @@
+name: Feature request
+description: Propose a change or an addition to Piper
+title: "[area] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Replace `[area]` in the title** with the tag matching the dropdown below.
+
+        Worth knowing before you write: Piper is deliberately opinionated about scope. The minimum
+        code that solves a real problem beats a general mechanism — see
+        [CONTRIBUTING.md](https://github.com/piperbox/piper/blob/main/CONTRIBUTING.md#how-we-write-code).
+        Proposals get shaped down more often than up, so lead with the problem.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which surface would this touch? Use the same tag at the start of the title.
+      options:
+        - "[agent] piperd daemon: control-plane API, orchestration"
+        - "[cli] the piper CLI"
+        - "[deploy] build -> run -> health -> route -> retire flow"
+        - "[runtime] Docker build/run driver"
+        - "[proxy] Caddy routing, TLS"
+        - "[store] SQLite persistence"
+        - "[relay] piper-relay + outbound tunnel"
+        - "[repo] governance: CI, branch protection, tooling"
+        - "[docs] docs, design, README"
+        - "not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Piper makes hard or impossible today? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like to happen
+    validations:
+      required: true
+
+  - type: textarea
+    id: smallest
+    attributes:
+      label: The smallest version of this
+      description: If only part of it shipped, which part carries most of the value? This is the version most likely to get built.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds you've tried
+    validations:
+      required: false

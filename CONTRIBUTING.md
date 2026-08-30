@@ -143,5 +143,11 @@ in (`agent` / `cli` / `relay`) and `good first issue` / `help wanted` where they
 fit. Priority and size are orthogonal: a task can be small but `P1`.
 
 For bugs, include your OS/arch, `piper version`, and what you expected versus
-what happened. Suspected security issues: please report them privately rather
-than in a public issue.
+what happened. The issue forms ask for all of this and prefill the `[area]`
+prefix, so opening one from the **New issue** page is the easiest way to get it
+right — the type label is applied for you; priority and size are triage calls
+the maintainers make.
+
+Suspected security issues: **don't open a public issue.** Report them privately
+through [GitHub's advisory form](https://github.com/piperbox/piper/security/advisories/new);
+[`SECURITY.md`](SECURITY.md) covers supported versions and what's in scope.
