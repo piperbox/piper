@@ -449,6 +449,9 @@ func TestDeleteOrgRefusedWhileAgentsExist(t *testing.T) {
 func TestDeleteOrgRefusesNonOrgAccounts(t *testing.T) {
 	st := openTestStore(t)
 	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	if _, err := st.Enroll("alice-box", "alice-box.example.com"); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := st.db.Exec(
 		`INSERT INTO hostnames(hostname, agent_name, account_id, app, created_at) VALUES($1,$2,$3,$4,$5)`,
@@ -470,5 +473,27 @@ func TestDeleteOrgRefusesNonOrgAccounts(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("hostnames row survived refused delete = %d, want 1", n)
+	}
+}
+
+// An org-target App installation is linked to the org account
+// (ingress routes it through OrgForGitHubInstall). Postgres enforces the
+// github_installations.account_id foreign key, so DeleteOrg must remove
+// those rows or the account delete fails.
+func TestDeleteOrgRemovesItsInstallations(t *testing.T) {
+	st := openTestStore(t)
+	alice, _ := st.UpsertAccount("gh-alice", "alice")
+	org, err := st.CreateOrg(alice.ID, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.LinkInstallationForAccount("inst-9", org.ID, "org", "acme"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteOrg(org.ID); err != nil {
+		t.Fatalf("DeleteOrg with an installation: %v", err)
+	}
+	if _, err := st.AccountForInstallation("inst-9"); !errors.Is(err, ErrNoInstallation) {
+		t.Fatalf("installation survived org delete: %v", err)
 	}
 }
