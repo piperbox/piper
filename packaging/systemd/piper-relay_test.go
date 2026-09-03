@@ -17,6 +17,14 @@ func TestPiperRelayServiceContract(t *testing.T) {
 	required := []string{
 		"After=network-online.target",
 		"Wants=network-online.target",
+		// Ordering hint for a single-host layout where Postgres runs on the
+		// same box; harmless (systemd ignores it) when the unit doesn't exist.
+		"After=postgresql.service",
+		// The relay log.Fatals if it can't reach Postgres at startup; without
+		// this, systemd's default StartLimitBurst gives up restarting after a
+		// handful of tries within StartLimitIntervalSec, and a DB that's merely
+		// slow to come up on boot leaves the unit permanently failed.
+		"StartLimitIntervalSec=0",
 		"ExecStart=/usr/local/bin/piper-relay",
 		"Environment=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay",
 		"EnvironmentFile=-/etc/piper-relay.env",
