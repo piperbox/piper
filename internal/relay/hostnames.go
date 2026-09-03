@@ -46,11 +46,11 @@ func appHostname(agentName, app, username, apex string, pr int) string {
 // (`piper-relay enroll <name> --domain <base>`). ErrBadToken if there is no such
 // agent; ErrBadCredential if the owning account is disabled.
 func (s *Store) AgentAccount(baseDomain string) (accountID, username, agentName string, err error) {
-	var disabled sql.NullInt64
+	var disabled sql.NullBool
 	err = s.db.QueryRow(
 		`SELECT acc.id, acc.username, ag.name, acc.disabled
 		   FROM agents ag JOIN accounts acc ON acc.id = ag.account_id
-		  WHERE ag.base_domain = ?`, baseDomain).
+		  WHERE ag.base_domain = $1`, baseDomain).
 		Scan(&accountID, &username, &agentName, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", "", ErrBadToken
@@ -58,7 +58,7 @@ func (s *Store) AgentAccount(baseDomain string) (accountID, username, agentName 
 	if err != nil {
 		return "", "", "", err
 	}
-	if disabled.Valid && disabled.Int64 != 0 {
+	if disabled.Valid && disabled.Bool {
 		return "", "", "", ErrBadCredential
 	}
 	return accountID, username, agentName, nil
@@ -79,18 +79,18 @@ func (s *Store) AgentAccount(baseDomain string) (accountID, username, agentName 
 // enroll`) still has an agents row, so its NULL acc.disabled reads as
 // not-disabled — only a *missing agent row* is unknown.
 func (s *Store) AgentDisabled(baseDomain string) (bool, error) {
-	var disabled sql.NullInt64
+	var disabled sql.NullBool
 	err := s.db.QueryRow(
 		`SELECT acc.disabled
 		   FROM agents ag LEFT JOIN accounts acc ON acc.id = ag.account_id
-		  WHERE ag.base_domain = ?`, baseDomain).Scan(&disabled)
+		  WHERE ag.base_domain = $1`, baseDomain).Scan(&disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, ErrUnknownAccount
 	}
 	if err != nil {
 		return false, err
 	}
-	return disabled.Valid && disabled.Int64 != 0, nil
+	return disabled.Valid && disabled.Bool, nil
 }
 
 // RegisterHostname assigns (idempotently) the public hostname for app on the
@@ -107,10 +107,23 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 		return "", err
 	}
 
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	// The cap is per account, so the account row is the lock: two boxes on
+	// one account registering at once count in sequence, on any relay.
+	var one int
+	if err := tx.QueryRow(`SELECT 1 FROM accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&one); err != nil {
+		return "", err
+	}
+
 	var existing string
-	err = s.db.QueryRow(`SELECT hostname FROM hostnames WHERE agent_name=? AND app=? AND pr=?`, agentName, app, pr).Scan(&existing)
+	err = tx.QueryRow(`SELECT hostname FROM hostnames WHERE agent_name=$1 AND app=$2 AND pr=$3`, agentName, app, pr).Scan(&existing)
 	if err == nil {
-		return existing, nil // idempotent
+		return existing, nil // idempotent; the deferred rollback releases the lock
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", err
@@ -118,7 +131,7 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 
 	if pr == 0 {
 		var count int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM hostnames WHERE account_id=? AND pr=0`, accountID).Scan(&count); err != nil {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM hostnames WHERE account_id=$1 AND pr=0`, accountID).Scan(&count); err != nil {
 			return "", err
 		}
 		if count >= s.maxAppsOrDefault() {
@@ -127,10 +140,12 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 	}
 
 	hostname := appHostname(agentName, app, username, s.apexOrDefault(), pr)
-	_, err = s.db.Exec(
-		`INSERT INTO hostnames(hostname, agent_name, account_id, app, pr, created_at) VALUES(?,?,?,?,?,?)`,
-		hostname, agentName, accountID, app, pr, time.Now().UTC().Format(time.RFC3339Nano))
-	if err != nil {
+	if _, err := tx.Exec(
+		`INSERT INTO hostnames(hostname, agent_name, account_id, app, pr, created_at) VALUES($1,$2,$3,$4,$5,$6)`,
+		hostname, agentName, accountID, app, pr, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return hostname, nil
@@ -166,7 +181,7 @@ func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (liv
 	for _, a := range apps {
 		keep[hostnameSlot(a.App, a.PR)] = true
 	}
-	rows, err := s.db.Query(`SELECT hostname, app, pr FROM hostnames WHERE agent_name=?`, agentName)
+	rows, err := s.db.Query(`SELECT hostname, app, pr FROM hostnames WHERE agent_name=$1`, agentName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,7 +207,7 @@ func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (liv
 	}
 	for _, sl := range stale {
 		if _, err := s.db.Exec(
-			`DELETE FROM hostnames WHERE agent_name=? AND app=? AND pr=?`,
+			`DELETE FROM hostnames WHERE agent_name=$1 AND app=$2 AND pr=$3`,
 			agentName, sl.app, sl.pr); err != nil {
 			return nil, nil, err
 		}
@@ -224,6 +239,6 @@ func (s *Store) DeregisterHostname(baseDomain, hostname string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`DELETE FROM hostnames WHERE agent_name=? AND hostname=?`, agentName, hostname)
+	_, err = s.db.Exec(`DELETE FROM hostnames WHERE agent_name=$1 AND hostname=$2`, agentName, hostname)
 	return err
 }
