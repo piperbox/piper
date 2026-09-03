@@ -80,6 +80,15 @@ Dialect changes across the queries:
   (`WHERE box_id IS NOT NULL AND box_id != ''`) is valid Postgres as written.
 - No `LastInsertId` anywhere (pgx's stdlib driver doesn't support it), and
   every `RowsAffected` use is fine.
+- Unique-violation detection (`isUniqueViolation`, and the inline string
+  check in `domains.go`) reads SQLSTATE `23505` through `pgconn.PgError`
+  instead of matching SQLite's "UNIQUE constraint failed" text.
+- A failed statement **aborts a Postgres transaction**. The one place that
+  retries an `INSERT` inside a transaction after a unique violation
+  (`EnrollForAccount`'s base-domain loop) wraps each attempt in a savepoint.
+- `INSERT … SELECT $1, id, $2 …` (`LinkInstallationIfAbsent`) casts each
+  bare parameter (`$1::text`) — Postgres cannot infer a type for a parameter
+  with no column to compare against.
 
 **Timestamps stay TEXT.** `created_at`/`next_try_at` remain RFC3339Nano /
 fixed-width `pendingTimeLayout` strings compared lexicographically, exactly as
@@ -126,7 +135,10 @@ locking. Four call sites:
    committed both `SELECT`s can return the same rows before either `DELETE`
    commits, and the event is delivered twice. The `SELECT` gains
    `FOR UPDATE SKIP LOCKED`: rows another drain holds are skipped, and that
-   drain delivers them. No transaction is held across a network call.
+   drain delivers them. The `DELETE` names the claimed ids
+   (`WHERE id = ANY($1)`) rather than the whole agent, so it can neither block
+   on the other drain's rows nor sweep up a re-park that landed in between.
+   No transaction is held across a network call.
 
    In practice the retry sweep only drains agents whose tunnel is on *this*
    relay (`drain` bails on `router.Lookup` miss), so the overlap window is
@@ -168,6 +180,10 @@ already accepted in the existing comments.
     isolation and parallelism.
 - `openTestStore(t)` in `internal/relay` becomes a one-line wrapper over the
   harness; the 14 + 3 direct `Open` call sites become helper calls.
+- The e2e suite (`test/e2e`) spawns real `piper-relay` binaries with
+  `PIPER_RELAY_DATA_DIR`; those three tests hand the binary a
+  `PIPER_RELAY_DB_URL` from the same harness. `RUN_E2E` already implies
+  Docker, so nothing new is required of the runner.
 - CI needs no workflow change: GitHub's ubuntu runners have Docker, so the
   spawn path runs. Exporting `PIPER_TEST_POSTGRES_URL` against a service
   container is an optional speedup, not a requirement.
