@@ -77,6 +77,10 @@ The relay creates its tables on first start. Any `admin` / `enroll` invocation
 needs the same variable — the transient-unit commands below pass it with
 `--setenv`.
 
+The shipped systemd unit orders itself after `postgresql.service` and retries
+indefinitely (no start-limit) if the database isn't reachable yet, so a slow
+Postgres on boot doesn't leave the relay permanently failed.
+
 Defaults work for a passthrough-only relay otherwise. Anything else goes in
 `/etc/piper-relay.env`:
 
@@ -192,6 +196,11 @@ Prefer (a) whenever the changed table is one the boxes repopulate on
 reconnect (`hostnames`, `repo_bindings`, `custom_domains`, `pending_events`)
 or one you can rebuild by hand in `psql`; fall back to (b) otherwise.
 
+The bare `DROP TABLE <table>` above works as-is for those four leaf tables.
+With foreign keys enforced, a parent table (`agents`, `accounts`) refuses a
+bare drop; it needs `DROP TABLE <table> CASCADE`, which also drops every
+child row across the schema — at that point prefer path (b) instead.
+
 The fresh tables materialize on first start after (b). Then, per box:
 
 - **Self-service boxes:** upgrade piperd, then `piper login --re-enroll`
@@ -273,10 +282,17 @@ services:
       POSTGRES_DB: piper_relay
     volumes:
       - relay_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piper_relay -d piper_relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   relay:
     image: ghcr.io/piperbox/piper-relay:<version>
     restart: unless-stopped
-    depends_on: [postgres]
+    depends_on:
+      postgres:
+        condition: service_healthy
     env_file: piper-relay.env
     environment:
       PIPER_RELAY_DB_URL: postgres://piper_relay:change-me@postgres:5432/piper_relay
