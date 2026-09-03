@@ -402,7 +402,7 @@ Relay before agents, as always; nothing on the boxes changes.
 3. **Rehearse the copier** against a copy before touching the live file:
    `scp` `relay.db` to your workstation, open a forward with
    `ssh -L 5432:127.0.0.1:5432 <box>`, run
-   `go run ./cmd/relay-sqlite-to-pg -sqlite relay.db -postgres postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay`,
+   `go run ./cmd/relay-sqlite-to-pg -sqlite relay.db -pg postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay`,
    and check the per-table counts it prints. Then
    `psql … -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'` so the real
    run starts empty (the relay recreates the tables on start).
