@@ -88,3 +88,49 @@ func TestRegisterHostnameCapHoldsUnderConcurrency(t *testing.T) {
 		t.Fatalf("%d concurrent registrations succeeded against a cap of 2", ok)
 	}
 }
+
+// Two drains of the same agent — the reconnect race, where an agent moves
+// between relays while a sweep is in flight — must hand each parked event to
+// exactly one of them. Under read committed without a row lock both SELECTs
+// see the row before either DELETE commits and the webhook goes out twice.
+func TestDrainEventsDeliversEachEventOnce(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, err := st.UpsertAccount("gh-drain", "drain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	en, err := st.EnrollForAccount(acc.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := en.BaseDomain // EnrollForAccount names the agent by its base domain
+	for i := 0; i < 5; i++ {
+		if err := st.ParkEvent(agent, fmt.Sprintf("app%d", i), "main", "push", []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const drainers = 6
+	got := make(chan int, drainers)
+	var wg sync.WaitGroup
+	for i := 0; i < drainers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			evs, err := st.DrainEvents(agent)
+			if err != nil {
+				t.Error(err)
+			}
+			got <- len(evs)
+		}()
+	}
+	wg.Wait()
+	close(got)
+	total := 0
+	for n := range got {
+		total += n
+	}
+	if total != 5 {
+		t.Fatalf("%d events returned across concurrent drains, want exactly 5", total)
+	}
+}

@@ -299,7 +299,7 @@ func (s *Store) ParkEvent(agentName, app, ref, event string, payload []byte) err
 	next := now.Add(retryDelay(1)).Format(pendingTimeLayout)
 	if _, err := s.db.Exec(
 		`INSERT INTO pending_events(agent_name, app, ref, event, payload, created_at, attempts, next_try_at)
-		 VALUES(?,?,?,?,?,?,1,?)
+		 VALUES($1,$2,$3,$4,$5,$6,1,$7)
 		 ON CONFLICT(agent_name, app, ref) DO UPDATE SET
 		     event = excluded.event, payload = excluded.payload, created_at = excluded.created_at,
 		     attempts = 1, next_try_at = excluded.next_try_at`,
@@ -318,10 +318,10 @@ func (s *Store) ParkEvent(agentName, app, ref, event string, payload []byte) err
 func (s *Store) evictOldestPending(agentName string) error {
 	_, err := s.db.Exec(
 		`DELETE FROM pending_events
-		  WHERE agent_name = ?
-		    AND rowid NOT IN (
-		        SELECT rowid FROM pending_events WHERE agent_name = ?
-		         ORDER BY created_at DESC LIMIT ?)`,
+		  WHERE agent_name = $1
+		    AND id NOT IN (
+		        SELECT id FROM pending_events WHERE agent_name = $2
+		         ORDER BY created_at DESC LIMIT $3)`,
 		agentName, agentName, maxPendingPerAgent)
 	return err
 }
@@ -341,7 +341,7 @@ func (s *Store) ReparkEvent(agentName, app, ref, event string, payload []byte, c
 	next := time.Now().UTC().Add(retryDelay(attempts)).Format(pendingTimeLayout)
 	if _, err := s.db.Exec(
 		`INSERT INTO pending_events(agent_name, app, ref, event, payload, created_at, attempts, next_try_at)
-		 VALUES(?,?,?,?,?,?,?,?)
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
 		 ON CONFLICT(agent_name, app, ref) DO UPDATE SET
 		     event = excluded.event, payload = excluded.payload, created_at = excluded.created_at,
 		     attempts = excluded.attempts, next_try_at = excluded.next_try_at
@@ -357,11 +357,13 @@ func (s *Store) ReparkEvent(agentName, app, ref, event string, payload []byte, c
 	return s.evictOldestPending(agentName)
 }
 
-// DrainEvents returns and removes every parked event for agentName. Read and
-// delete share one immediate transaction (see Open's _txlock): a concurrent
-// ParkEvent either commits before it and is returned, or blocks until after
-// the delete and survives for the next drain — the blanket DELETE can never
-// destroy a row this call did not return.
+// DrainEvents returns and removes every parked event for agentName. The read
+// locks the rows it returns (FOR UPDATE SKIP LOCKED) and the delete names
+// exactly those rows, so two drains of one agent — on one relay or two — split
+// the events between them and never both deliver the same one: a row the
+// other drain holds is skipped here and returned there. A concurrent
+// ParkEvent either commits before the read and is returned, or after the
+// delete and survives for the next drain.
 // Events older than pendingEventTTL are deleted with the rest but never
 // returned: a box gone for a week should not have a week-old push replayed at
 // it, and the delete is what reclaims its capped slots.
@@ -376,12 +378,12 @@ func (s *Store) DrainDueEvents(agentName string) ([]PendingEvent, error) {
 	return s.drainEvents(agentName, time.Now().UTC().Format(pendingTimeLayout))
 }
 
-// drainEvents reads and deletes agentName's parked events in one immediate
+// drainEvents reads, locks, and deletes agentName's parked events in one
 // transaction. dueBy empty means every event regardless of backoff.
 func (s *Store) drainEvents(agentName, dueBy string) ([]PendingEvent, error) {
-	where, args := `agent_name=?`, []any{agentName}
+	where, args := `agent_name=$1`, []any{agentName}
 	if dueBy != "" {
-		where += ` AND next_try_at<=?`
+		where += ` AND next_try_at<=$2`
 		args = append(args, dueBy)
 	}
 	expiry := time.Now().UTC().Add(-pendingEventTTL).Format(pendingTimeLayout)
@@ -392,18 +394,21 @@ func (s *Store) drainEvents(agentName, dueBy string) ([]PendingEvent, error) {
 	}
 	defer tx.Rollback()
 	rows, err := tx.Query(
-		`SELECT app, ref, event, payload, created_at, attempts FROM pending_events
-		  WHERE `+where+` ORDER BY created_at`, args...)
+		`SELECT id, app, ref, event, payload, created_at, attempts FROM pending_events
+		  WHERE `+where+` ORDER BY created_at FOR UPDATE SKIP LOCKED`, args...)
 	if err != nil {
 		return nil, err
 	}
 	var out []PendingEvent
+	var ids []int64
 	for rows.Next() {
+		var id int64
 		ev := PendingEvent{AgentName: agentName}
-		if err := rows.Scan(&ev.App, &ev.Ref, &ev.Event, &ev.Payload, &ev.CreatedAt, &ev.Attempts); err != nil {
+		if err := rows.Scan(&id, &ev.App, &ev.Ref, &ev.Event, &ev.Payload, &ev.CreatedAt, &ev.Attempts); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		ids = append(ids, id)
 		if ev.CreatedAt < expiry {
 			continue // deleted below with the rest, but too stale to replay
 		}
@@ -413,7 +418,10 @@ func (s *Store) drainEvents(agentName, dueBy string) ([]PendingEvent, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if _, err := tx.Exec(`DELETE FROM pending_events WHERE `+where, args...); err != nil {
+	if len(ids) == 0 {
+		return nil, tx.Commit()
+	}
+	if _, err := tx.Exec(`DELETE FROM pending_events WHERE id = ANY($1)`, ids); err != nil {
 		return nil, err
 	}
 	return out, tx.Commit()
@@ -423,7 +431,7 @@ func (s *Store) drainEvents(agentName, dueBy string) ([]PendingEvent, error) {
 // never reconnects stops holding its slots. Returns how many were removed.
 func (s *Store) PurgeExpiredPending() (int64, error) {
 	expiry := time.Now().UTC().Add(-pendingEventTTL).Format(pendingTimeLayout)
-	res, err := s.db.Exec(`DELETE FROM pending_events WHERE created_at < ?`, expiry)
+	res, err := s.db.Exec(`DELETE FROM pending_events WHERE created_at < $1`, expiry)
 	if err != nil {
 		return 0, err
 	}
@@ -435,7 +443,7 @@ func (s *Store) PurgeExpiredPending() (int64, error) {
 func (s *Store) AgentsWithDuePending() ([]string, error) {
 	now := time.Now().UTC().Format(pendingTimeLayout)
 	rows, err := s.db.Query(
-		`SELECT DISTINCT agent_name FROM pending_events WHERE next_try_at<=?`, now)
+		`SELECT DISTINCT agent_name FROM pending_events WHERE next_try_at<=$1`, now)
 	if err != nil {
 		return nil, err
 	}
