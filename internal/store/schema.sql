@@ -1,3 +1,6 @@
+-- Most created_at values use time.RFC3339Nano. Its trimmed fractional zeros
+-- make lexical ordering unsafe; queries needing creation order must use rowid.
+
 CREATE TABLE IF NOT EXISTS apps (
     name           TEXT PRIMARY KEY,
     port           INTEGER NOT NULL,
@@ -40,6 +43,7 @@ CREATE TABLE IF NOT EXISTS domain_config (
     domain         TEXT NOT NULL,
     dns_provider   TEXT NOT NULL,
     dns_token      TEXT NOT NULL,
+    serve          TEXT NOT NULL DEFAULT 'relay',
     status         TEXT NOT NULL,
     error          TEXT NOT NULL DEFAULT '',
     cert_not_after TEXT NOT NULL DEFAULT '',

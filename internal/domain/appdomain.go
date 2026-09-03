@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,9 @@ func (m *Manager) AddAppDomain(app, domainName string) (store.AppDomain, error) 
 	}
 	if dc, err := m.st.GetDomainConfig(); err == nil && dc.Domain == d {
 		return store.AppDomain{}, ErrBoxWideDomain
+	}
+	if m.boxServe() == ServeDirect && !m.hasAppDNSSource() {
+		return store.AppDomain{}, ErrNoDNSIssuer
 	}
 	if err := m.st.AddAppDomain(d, app); err != nil {
 		return store.AppDomain{}, err
@@ -114,15 +118,29 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	if err != nil || row.App != snap.App {
 		return errStaleConfig
 	}
+	serve := m.boxServe()
 	r := m.notifier()
-	if r == nil {
-		return errors.New("relay not connected")
-	}
-	if err := r.AddCustomDomain(row.Domain); err != nil {
-		return err
-	}
-	if !m.dnsPointsAt(m.dnsTarget, row.Domain) {
-		return fmt.Errorf("%w: point a CNAME or A record for %s at %s", errWaitDNS, row.Domain, m.dnsTarget)
+	if serve == ServeDirect {
+		// Direct: the relay claim is optional — kept when connected so both
+		// paths serve identically during the user's DNS flip (the TTL-window
+		// migration property), skipped on a never-enrolled box. No DNS gate:
+		// DNS-01 does not depend on where visitor DNS points, so issue
+		// immediately, like the box-wide instance.
+		if r != nil {
+			if err := r.AddCustomDomain(row.Domain); err != nil {
+				return err
+			}
+		}
+	} else {
+		if r == nil {
+			return errors.New("relay not connected")
+		}
+		if err := r.AddCustomDomain(row.Domain); err != nil {
+			return err
+		}
+		if !m.dnsPointsAt(m.dnsTarget, row.Domain) {
+			return fmt.Errorf("%w: point a CNAME or A record for %s at %s", errWaitDNS, row.Domain, m.dnsTarget)
+		}
 	}
 	if err := m.st.UpdateAppDomainStatus(row.Domain, StatusIssuing, "", time.Time{}); err != nil {
 		return err
@@ -132,12 +150,15 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	// certificate.
 	certPEM, keyPEM, err := m.readAppCert(row.Domain)
 	if err != nil || !certValidFor(certPEM, row.Domain, time.Now()) {
-		iss, err := m.appIssuer()
+		iss, err := m.appIssuerFor(serve)
 		if err != nil {
 			return err
 		}
 		certPEM, keyPEM, err = iss.Obtain([]string{row.Domain})
 		if err != nil {
+			if serve == ServeDirect {
+				return fmt.Errorf("dns-01 obtain (the box-wide DNS token must cover %s's zone): %w", row.Domain, err)
+			}
 			return err
 		}
 		if cur, err := m.st.GetAppDomain(row.Domain); err != nil || cur.App != row.App {
@@ -150,8 +171,10 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 	if err := m.armApp(row, certPEM, keyPEM); err != nil {
 		return err
 	}
-	if err := r.ConfirmCustomDomain(row.Domain); err != nil {
-		return err
+	if r != nil {
+		if err := r.ConfirmCustomDomain(row.Domain); err != nil {
+			return err
+		}
 	}
 	notAfter, err := certs.NotAfter(certPEM)
 	if err != nil {
@@ -163,9 +186,17 @@ func (m *Manager) appIssueOnce(snap store.AppDomain) error {
 // armApp loads the exact-host cert and backfills the route for an already-
 // running app (deploy/stop/delete otherwise own routes). Shared by first
 // activation and restart resume.
+//
+// EnsureHTTPS is skipped when the box already terminates TLS at boot
+// (m.tlsTerminated): the "piper" server is already listening on
+// m.httpsListen with tls_connection_policies set (see Options.TLSTerminated),
+// so arming a runtime "piper-tls" server on the same address would collide
+// with it (#506).
 func (m *Manager) armApp(row store.AppDomain, certPEM, keyPEM []byte) error {
-	if err := m.proxy.EnsureHTTPS(m.httpsListen); err != nil {
-		return err
+	if !m.tlsTerminated {
+		if err := m.proxy.EnsureHTTPS(m.httpsListen); err != nil {
+			return err
+		}
 	}
 	if err := m.setCert(row.Domain, certPEM, keyPEM); err != nil {
 		return err
@@ -179,13 +210,19 @@ func (m *Manager) armApp(row store.AppDomain, certPEM, keyPEM []byte) error {
 }
 
 // RemoveAppDomain tears the domain down fully: relay claim, Caddy route and
-// loaded cert, disk cert, row. For an active domain the relay removal must
-// succeed before anything local is deleted — once the row is gone nothing
-// would ever retry the removal and the relay would splice the domain forever.
-// A never-confirmed claim expires on the relay by its pending TTL, so its
-// removal is best-effort and teardown proceeds. Removing an absent domain is
-// a no-op. Taking the domain's run lock can block for an in-flight ACME
-// Obtain (minutes, bounded) — the box-wide Remove trade, per domain.
+// loaded cert, disk cert, row. For an active domain on a relay-served box the
+// relay removal must succeed before anything local is deleted — once the row
+// is gone nothing would ever retry the removal and the relay would splice the
+// domain forever. A never-confirmed claim expires on the relay by its pending
+// TTL, so its removal is best-effort and teardown proceeds. A never-enrolled
+// direct box (m.boxServe() == ServeDirect, no notifier) never claimed the
+// domain on the relay in the first place — issuance's direct branch skips the
+// claim (#506) — so there is nothing to clear and local teardown proceeds
+// unconditionally; an enrolled direct box (notifier present) still makes the
+// same best-effort/required relay calls as a relay-mode box. Removing an
+// absent domain is a no-op. Taking the domain's run lock can block for an
+// in-flight ACME Obtain (minutes, bounded) — the box-wide Remove trade, per
+// domain.
 func (m *Manager) RemoveAppDomain(domain string) error {
 	m.nextGenFor(domain) // supersede the running lifecycle loop
 	lock := m.appLock(domain)
@@ -200,7 +237,7 @@ func (m *Manager) RemoveAppDomain(domain string) error {
 	}
 	r := m.notifier()
 	if r == nil {
-		if row.Status == StatusActive {
+		if row.Status == StatusActive && m.boxServe() != ServeDirect {
 			return errors.New("relay not connected; cannot clear the domain mapping")
 		}
 	} else if err := r.RemoveCustomDomain(domain); err != nil && row.Status == StatusActive {
@@ -325,7 +362,7 @@ func (m *Manager) renewApp(snap store.AppDomain, now time.Time) {
 // reissueApp obtains a fresh exact-host cert for an already-active domain and
 // swaps it in. Caller holds the domain's run lock.
 func (m *Manager) reissueApp(row store.AppDomain) error {
-	iss, err := m.appIssuer()
+	iss, err := m.appIssuerFor(m.boxServe())
 	if err != nil {
 		return err
 	}
@@ -359,6 +396,9 @@ type AppDomainStatus struct {
 	CertNotAfter *time.Time  `json:"cert_not_after,omitempty"`
 	DNSRecords   []DNSRecord `json:"dns_records"`
 	DNSOK        bool        `json:"dns_ok"`
+	// Note is a human-readable hint when guidance is incomplete (direct mode
+	// before the box knows its public IP). Not an error.
+	Note string `json:"note,omitempty"`
 }
 
 // AppDomainStatuses assembles the wire state of every domain attached to app
@@ -386,14 +426,29 @@ func (m *Manager) AppDomainStatus(domain string) (AppDomainStatus, error) {
 	return m.appDomainStatus(row), nil
 }
 
-// appDomainStatus converts one row: the guided-setup CNAME (exact host → the
-// relay) and a best-effort, cached dns_ok — a field, never an error.
+// appDomainStatus converts one row: the guided-setup record (CNAME at the
+// relay, or in direct mode an A/AAAA at the box's public IP) and a
+// best-effort, cached dns_ok — a field, never an error.
 func (m *Manager) appDomainStatus(row store.AppDomain) AppDomainStatus {
 	st := AppDomainStatus{
 		Domain: row.Domain, App: row.App,
 		Status: row.Status, Error: row.Error,
-		DNSRecords: []DNSRecord{{Type: "CNAME", Name: row.Domain, Value: m.dnsTarget}},
-		DNSOK:      m.cachedDNSPointsAt(row.Domain),
+	}
+	if m.boxServe() == ServeDirect {
+		ip := m.publicIP()
+		typ := "A"
+		if p := net.ParseIP(ip); p != nil && p.To4() == nil {
+			typ = "AAAA"
+		}
+		st.DNSRecords = []DNSRecord{{Type: typ, Name: row.Domain, Value: ip}}
+		if ip == "" {
+			st.Note = noteNoPublicIP
+		} else {
+			st.DNSOK = m.cachedDNSResolvesTo(row.Domain, ip)
+		}
+	} else {
+		st.DNSRecords = []DNSRecord{{Type: "CNAME", Name: row.Domain, Value: m.dnsTarget}}
+		st.DNSOK = m.cachedDNSPointsAt(row.Domain)
 	}
 	if !row.CertNotAfter.IsZero() {
 		t := row.CertNotAfter

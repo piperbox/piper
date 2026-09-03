@@ -4,6 +4,11 @@
 -- (or the fixed-width pendingTimeLayout) compared as strings, as the Go code
 -- has always done.
 --
+-- Most created_at values use time.RFC3339Nano; trimmed fractional zeros make
+-- lexical ordering unsafe, so creation-order queries must use the id column.
+-- The pending_events exception is written with fixed-width pendingTimeLayout,
+-- so its documented text comparisons remain chronological.
+--
 -- id BIGSERIAL columns stand in for SQLite's rowid where the code orders or
 -- dedupes by insertion order; they are never exposed.
 

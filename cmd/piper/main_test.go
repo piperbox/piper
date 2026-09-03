@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/piperbox/piper/internal/api"
+	"github.com/piperbox/piper/internal/config"
 	"github.com/piperbox/piper/internal/store"
 )
 
@@ -66,7 +67,7 @@ func TestRunDeploySupportsNameFirstFlags(t *testing.T) {
 		case r.URL.Path == "/v1/apps/blog/deployments":
 			_ = json.NewEncoder(w).Encode([]store.Deployment{{ID: "dep1", App: "blog", Status: "running"}})
 		case r.URL.Path == "/v1/apps/blog":
-			_ = json.NewEncoder(w).Encode(api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost"}, Status: "running"})
+			_ = json.NewEncoder(w).Encode(api.App{App: store.App{Name: "blog", Hostname: "blog.piper.localhost"}, Status: "running", Scheme: "http"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -125,7 +126,7 @@ func TestDeployLinkedAppWithoutPathDeploysFromRepo(t *testing.T) {
 		case r.URL.Path == "/v1/apps/web":
 			_ = json.NewEncoder(w).Encode(api.App{App: store.App{
 				Name: "web", Hostname: "web.piper.localhost", Repo: "me/web", Branch: "main",
-			}, Status: "running"})
+			}, Status: "running", Scheme: "http"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -160,7 +161,7 @@ func TestDeployStreamsProgressAndReportsURL(t *testing.T) {
 		case r.URL.Path == "/v1/apps/web/deployments":
 			json.NewEncoder(w).Encode([]store.Deployment{{ID: "dep1", App: "web", Status: "running"}})
 		case r.URL.Path == "/v1/apps/web":
-			json.NewEncoder(w).Encode(api.App{App: store.App{Name: "web", Hostname: "web.piper.localhost"}, Status: "running"})
+			json.NewEncoder(w).Encode(api.App{App: store.App{Name: "web", Hostname: "web.piper.localhost"}, Status: "running", Scheme: "http"})
 		default:
 			t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
 		}
@@ -623,5 +624,41 @@ func TestRunGithubResetAborts(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "aborted") {
 		t.Errorf("stdout = %q, want aborted", stdout.String())
+	}
+}
+
+func boxWithPersistedAgentIdentity(t *testing.T, box config.Box, baseDomain string) config.Box {
+	t.Helper()
+	box.BaseDomain = baseDomain
+	return box
+}
+
+func TestDialBoxRelayOnlyUsesPersistedAgentIdentity(t *testing.T) {
+	var gotPath, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		if r.URL.Path != "/agents/cloud.example/v1/apps" {
+			t.Errorf("request path = %q", r.URL.Path)
+		}
+		io.WriteString(w, "[]")
+	}))
+	defer srv.Close()
+
+	c, addr, remote, err := dialBox(boxWithPersistedAgentIdentity(t, config.Box{
+		Name:              "living-room",
+		RelayAPI:          srv.URL,
+		AccountCredential: "cred-xyz",
+	}, "cloud.example"))
+	if err != nil {
+		t.Fatalf("dialBox: %v", err)
+	}
+	if addr != "cloud.example" || !remote {
+		t.Fatalf("relay box identity = addr %q remote %v, want cloud.example/true", addr, remote)
+	}
+	if _, err := c.ListApps(); err != nil {
+		t.Fatalf("relay client request: %v", err)
+	}
+	if gotPath != "/agents/cloud.example/v1/apps" || gotAuth != "Bearer cred-xyz" {
+		t.Fatalf("relay request = path %q auth %q", gotPath, gotAuth)
 	}
 }

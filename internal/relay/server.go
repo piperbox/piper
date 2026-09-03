@@ -63,8 +63,14 @@ func (q *connQueue) push(c net.Conn) {
 // delivery, when non-nil, drains any webhooks parked for a box while it was
 // disconnected as soon as its tunnel reconnects; nil (no App configured) skips
 // the drain. m, when non-nil, receives traffic counters; nil disables
-// instrumentation. Blocks until a listener fails.
-func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, router *Router, ctrl http.Handler, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics) error {
+// instrumentation. proxyProto (PIPER_RELAY_PROXY_PROTOCOL=1, #485) wraps all
+// three listeners so the first bytes on every connection must be a PROXY
+// protocol v2 header from the trusted L4 proxy in front; the header's source
+// address becomes the conn's RemoteAddr for rate limiting and logs. It must
+// stay off unless such a proxy is the only path to the ports — a listener
+// that trusts PROXY headers from arbitrary peers lets anyone spoof their
+// source IP. Blocks until a listener fails.
+func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, router *Router, ctrl http.Handler, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics, proxyProto bool) error {
 	var ctrlQ *connQueue
 	if ctrl != nil && tlsCfg != nil {
 		ctrlQ = newConnQueue()
@@ -83,17 +89,26 @@ func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, 
 	if err != nil {
 		return err
 	}
+	if proxyProto {
+		tunLn = proxyV2Listener(tunLn)
+	}
 	go acceptTunnels(tunLn, st, router, ghApp, delivery, m)
 
 	httpLn, err := net.Listen("tcp", httpAddr)
 	if err != nil {
 		return err
 	}
+	if proxyProto {
+		httpLn = proxyV2Listener(httpLn)
+	}
 	go acceptHTTP(httpLn, router, m)
 
 	tlsLn, err := net.Listen("tcp", tlsAddr)
 	if err != nil {
 		return err
+	}
+	if proxyProto {
+		tlsLn = proxyV2Listener(tlsLn)
 	}
 	for {
 		conn, err := tlsLn.Accept()

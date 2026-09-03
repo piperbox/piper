@@ -43,6 +43,31 @@ type Deployerer interface {
 type App struct {
 	store.App
 	Status string
+	// Scheme is the URL scheme this box serves the app on, "http" or "https".
+	// The daemon is the only party that can answer it: a client reaches a
+	// relay-backed box over the relay and a directly-served box over the LAN
+	// (#507), so how the client dialled stopped being a usable proxy for
+	// whether the app itself is on TLS.
+	Scheme string
+}
+
+// URL renders the URL this box serves the app on: the daemon-reported scheme
+// plus the stored hostname, or "" for a never-deployed app. One function for
+// every client surface — the per-package twins it replaced were a
+// one-binary-two-answers drift waiting to happen (#509 review).
+func (a App) URL() string {
+	if a.Hostname == "" {
+		return ""
+	}
+	return a.Scheme + "://" + a.Hostname
+}
+
+// appScheme names the URL scheme this box's apps are served on.
+func appScheme(self AgentInfo) string {
+	if self.AppsOverHTTPS {
+		return "https"
+	}
+	return "http"
 }
 
 // latestStatus resolves the App.Status for one app; never-deployed is "".
@@ -65,10 +90,12 @@ func latestStatus(s *store.Store, app string) (string, error) {
 }
 
 // DomainManager is the domain-config surface: the box-wide custom domain
-// (#102) and the per-app domains collection (#231). Nil when the box has no
-// relay configured: the endpoints then answer 409.
+// (#102) and the per-app domains collection (#231). Nil only when the box
+// reaches the public over neither a relay nor a direct-serve domain config
+// (cmd/piperd's publicHTTPS(cfg) gate) — a LAN-only box: the endpoints then
+// answer 409.
 type DomainManager interface {
-	Set(domain, provider, token string) (domain.Status, error)
+	Set(domain, provider, token, serve string) (domain.Status, error)
 	Status() (domain.Status, error)
 	Remove() error
 	AddAppDomain(app, domain string) (store.AppDomain, error)
@@ -100,6 +127,10 @@ type AgentInfo struct {
 	HTTPAddr  string
 	HTTPSAddr string
 	DataDir   string
+	// AppsOverHTTPS records that the public reaches this box's apps on TLS —
+	// terminated by the relay on a free-tier box, by the box itself on a BYO
+	// relay box or a never-enrolled direct one (#507). It sets App.Scheme.
+	AppsOverHTTPS bool
 }
 
 // onGitHubApp, if non-nil, is invoked after a GitHub App is configured via the
@@ -108,6 +139,9 @@ type AgentInfo struct {
 // would pick with no App stored locally; the reset endpoint reports it so the
 // operator learns whether anything takes over. Nil answers "unknown".
 func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHubApp func(), dom DomainManager, binder RepoBinder, nextGitHubProvider func() string, fetchRepo FetchRepoFunc, self AgentInfo) http.Handler {
+	// Compute once and reuse it at the three current response construction
+	// sites so every returned app carries the same daemon-reported scheme.
+	scheme := appScheme(self)
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/apps", func(w http.ResponseWriter, r *http.Request) {
 		var in struct {
@@ -141,7 +175,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusCreated, App{App: app})
+		writeJSON(w, http.StatusCreated, App{App: app, Scheme: scheme})
 	})
 	// The running daemon's own build. Nothing else can answer this: the piperd
 	// binary on disk may already have been replaced by an upgrade that has not
@@ -170,7 +204,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 				serverError(w, r, err)
 				return
 			}
-			out = append(out, App{App: a, Status: status})
+			out = append(out, App{App: a, Status: status, Scheme: scheme})
 		}
 		writeJSON(w, http.StatusOK, out)
 	})
@@ -189,7 +223,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			serverError(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, App{App: app, Status: status})
+		writeJSON(w, http.StatusOK, App{App: app, Status: status, Scheme: scheme})
 	})
 	mux.HandleFunc("GET /v1/apps/{name}/deployments", func(w http.ResponseWriter, r *http.Request) {
 		name := r.PathValue("name")
@@ -491,7 +525,7 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 
 	noRelay := func(w http.ResponseWriter) bool {
 		if dom == nil {
-			http.Error(w, "domain config requires a relay: connect this box to a relay first", http.StatusConflict)
+			http.Error(w, "domain config requires a relay connection, or direct serve (PIPER_BASE_DOMAIN with PIPER_SERVE=direct)", http.StatusConflict)
 			return true
 		}
 		return false
@@ -515,19 +549,21 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 			Domain      string `json:"domain"`
 			DNSProvider string `json:"dns_provider"`
 			DNSToken    string `json:"dns_token"`
+			Serve       string `json:"serve"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, "invalid body", http.StatusBadRequest)
 			return
 		}
-		st, err := dom.Set(in.Domain, in.DNSProvider, in.DNSToken)
+		st, err := dom.Set(in.Domain, in.DNSProvider, in.DNSToken, in.Serve)
 		switch {
 		case errors.Is(err, domain.ErrEnvManaged):
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		case errors.Is(err, domain.ErrInvalidDomain),
 			errors.Is(err, domain.ErrUnsupportedProvider),
-			errors.Is(err, domain.ErrTokenRequired):
+			errors.Is(err, domain.ErrTokenRequired),
+			errors.Is(err, domain.ErrInvalidServe):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		case err != nil:
@@ -602,7 +638,8 @@ func New(s *store.Store, d Deployerer, baseDomain, githubAPIBase string, onGitHu
 		case errors.Is(err, domain.ErrInvalidDomain):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
-		case errors.Is(err, domain.ErrBoxWideDomain), errors.Is(err, store.ErrDomainExists):
+		case errors.Is(err, domain.ErrBoxWideDomain), errors.Is(err, store.ErrDomainExists),
+			errors.Is(err, domain.ErrNoDNSIssuer):
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		case err != nil:

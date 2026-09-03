@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -30,17 +32,6 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("PIPER_API_ADDR", "0.0.0.0:9000")
 	if got := Load().APIAddr; got != "0.0.0.0:9000" {
 		t.Errorf("APIAddr = %q, want 0.0.0.0:9000", got)
-	}
-}
-
-func TestClientAddr(t *testing.T) {
-	t.Setenv("PIPER_ADDR", "")
-	if got := ClientAddr(); got != "http://127.0.0.1:8088" {
-		t.Errorf("default ClientAddr = %q", got)
-	}
-	t.Setenv("PIPER_ADDR", "http://piper.test:9000")
-	if got := ClientAddr(); got != "http://piper.test:9000" {
-		t.Errorf("configured ClientAddr = %q", got)
 	}
 }
 
@@ -150,6 +141,45 @@ func TestClientConfigRoundTripsRelayFields(t *testing.T) {
 	}
 	if cc.RelayAPI != "https://api.public.getpiper.co" || cc.AccountCredential != "cred-xyz" {
 		t.Fatalf("cc = %+v", cc)
+	}
+}
+
+func TestSaveClientPreservesPersistedAgentIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PIPER_ADDR", "")
+	t.Setenv("PIPER_TOKEN", "")
+	path := filepath.Join(home, ".piper", "piper", "config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"boxes":[{"name":"living-room","addr":"http://box:8088","base_domain":"cloud.example"}],"current":"living-room"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cc, err := LoadClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cc.BaseDomain != "cloud.example" {
+		t.Fatalf("LoadClient dropped persisted agent identity: %q", cc.BaseDomain)
+	}
+	if err := SaveClient(cc); err != nil {
+		t.Fatal(err)
+	}
+	cf, err := LoadClientFile()
+	if err != nil || len(cf.Boxes) != 1 {
+		t.Fatalf("saved config = %+v (%v)", cf, err)
+	}
+	data, err := json.Marshal(cf.Boxes[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := raw["base_domain"].(string); got != "cloud.example" {
+		t.Fatalf("SaveClient dropped persisted agent identity: %q", got)
 	}
 }
 
@@ -448,6 +478,150 @@ func TestSaveClientFileRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveCurrentBoxBaseDomainTargetsLocalDaemonAndClearsDuplicates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "http://127.0.0.1:8088")
+	t.Setenv("PIPER_API_ADDR", "")
+	if err := SaveClientFile(ClientFile{
+		Boxes: []Box{
+			{Name: "remote", Addr: "http://192.168.1.6:8088", BaseDomain: "local.example"},
+			{Name: "local", Addr: "127.0.0.1:8088"},
+			{Name: "duplicate", Addr: "http://192.168.1.9:8088", BaseDomain: "local.example"},
+			{Name: "other", Addr: "http://192.168.1.10:8088", BaseDomain: "other.example"},
+		},
+		Current: "remote",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SaveCurrentBoxBaseDomain(" local.example "); err != nil {
+		t.Fatal(err)
+	}
+
+	cf, err := LoadClientFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cf.Current != "remote" {
+		t.Fatalf("identity persistence changed Current: %+v", cf)
+	}
+	if got := cf.Boxes[1].BaseDomain; got != "local.example" {
+		t.Fatalf("local daemon box BaseDomain = %q, want local.example: %+v", got, cf.Boxes)
+	}
+	if cf.Boxes[0].BaseDomain != "" || cf.Boxes[2].BaseDomain != "" {
+		t.Fatalf("duplicate BaseDomain identities were not cleared: %+v", cf.Boxes)
+	}
+	if got := cf.Boxes[3].BaseDomain; got != "other.example" {
+		t.Fatalf("unrelated BaseDomain was cleared: %q", got)
+	}
+}
+
+func TestSaveCurrentBoxBaseDomainNoOpDoesNotRewrite(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("PIPER_ADDR", "http://127.0.0.1:8088")
+	t.Setenv("PIPER_API_ADDR", "")
+	if err := SaveClientFile(ClientFile{
+		Boxes:   []Box{{Name: "local", Addr: "http://127.0.0.1:8088", BaseDomain: "local.example"}},
+		Current: "local",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, err := clientConfigPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if _, err := SaveCurrentBoxBaseDomain("local.example"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("no-op identity persistence rewrote config: before=%v after=%v", before.ModTime(), after.ModTime())
+	}
+}
+
+// Enrollment always applies to the piperd on this box, reached over its Unix
+// socket, so the row that receives the identity must be the one addressing
+// that local daemon for every documented PIPER_API_ADDR value. PIPER_API_ADDR
+// is a bind address: a wildcard or empty host means "all interfaces", which
+// includes loopback, and must not stop a loopback row matching.
+func TestSaveCurrentBoxBaseDomainMatchesLocalDaemonForEveryBindAddress(t *testing.T) {
+	const (
+		remoteRow = "remote"
+		localRow  = "local"
+	)
+	rows := func() []Box {
+		return []Box{
+			{Name: remoteRow, Addr: "http://192.168.1.6:8088"},
+			{Name: localRow, Addr: "http://127.0.0.1:8088"},
+		}
+	}
+	for _, tc := range []struct {
+		name    string
+		apiAddr string
+		boxes   []Box
+		want    string
+	}{
+		{name: "wildcard IPv4 bind", apiAddr: "0.0.0.0:8088", boxes: rows(), want: localRow},
+		{name: "port-only bind", apiAddr: ":8088", boxes: rows(), want: localRow},
+		{name: "wildcard IPv6 bind", apiAddr: "[::]:8088", boxes: rows(), want: localRow},
+		{name: "loopback bind", apiAddr: "127.0.0.1:8088", boxes: rows(), want: localRow},
+		{name: "localhost bind", apiAddr: "localhost:8088", boxes: rows(), want: localRow},
+		{name: "unset", apiAddr: "", boxes: rows(), want: localRow},
+		{name: "specific host bind", apiAddr: "192.168.1.6:8088", boxes: rows(), want: remoteRow},
+		{
+			name:    "wildcard bind with an IPv6 loopback row",
+			apiAddr: "0.0.0.0:8088",
+			boxes:   []Box{{Name: remoteRow, Addr: "http://192.168.1.6:8088"}, {Name: localRow, Addr: "http://[::1]:8088"}},
+			want:    localRow,
+		},
+		{
+			name:    "specific host bind with no row addressing it",
+			apiAddr: "192.168.1.7:8088",
+			boxes:   rows(),
+			want:    "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			// The identity follows the enrolled local daemon, never the
+			// client's remote-pinned dial address.
+			t.Setenv("PIPER_ADDR", "http://192.168.1.6:8088")
+			t.Setenv("PIPER_API_ADDR", tc.apiAddr)
+			if err := SaveClientFile(ClientFile{Boxes: tc.boxes, Current: remoteRow}); err != nil {
+				t.Fatal(err)
+			}
+			matched, err := SaveCurrentBoxBaseDomain("mine.example")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if matched != (tc.want != "") {
+				t.Fatalf("matched = %v, want %v for PIPER_API_ADDR=%q", matched, tc.want != "", tc.apiAddr)
+			}
+			cf, err := LoadClientFile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, box := range cf.Boxes {
+				want := ""
+				if box.Name == tc.want {
+					want = "mine.example"
+				}
+				if box.BaseDomain != want {
+					t.Fatalf("box %q BaseDomain = %q, want %q for PIPER_API_ADDR=%q: %+v",
+						box.Name, box.BaseDomain, want, tc.apiAddr, cf.Boxes)
+				}
+			}
+		})
+	}
+}
+
 func TestSaveClientFileSetsRestrictedMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -485,7 +659,7 @@ func TestSaveClientFileLeavesNoTempFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if e.Name() != "config.json" {
+		if e.Name() != "config.json" && e.Name() != "config.json.lock" {
 			t.Fatalf("unexpected leftover file in config dir: %s", e.Name())
 		}
 	}
@@ -677,5 +851,17 @@ func TestEnrollSocketCandidatesOrder(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("candidates[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+func TestLoadPublicIPAndServe(t *testing.T) {
+	t.Setenv("PIPER_PUBLIC_IP", "203.0.113.7")
+	t.Setenv("PIPER_SERVE", "direct")
+	c := Load()
+	if c.PublicIP != "203.0.113.7" {
+		t.Errorf("PublicIP = %q", c.PublicIP)
+	}
+	if c.Serve != "direct" {
+		t.Errorf("Serve = %q", c.Serve)
 	}
 }

@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -412,20 +413,56 @@ func TestOpenSetsBusyTimeout(t *testing.T) {
 	}
 }
 
-func TestListTokens(t *testing.T) {
+// stampToken overwrites a token's created_at directly. CreateToken stamps
+// time.Now(), so the only way to pin a specific pair of timestamps is to
+// write them behind it.
+func stampToken(t *testing.T, s *Store, label, created string) {
+	t.Helper()
+	res, err := s.db.Exec(`UPDATE tokens SET created_at=? WHERE label=?`, created, label)
+	if err != nil {
+		t.Fatalf("stamp %s: %v", label, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("stamp %s rows affected: %v", label, err)
+	}
+	if n != 1 {
+		t.Fatalf("stamp %s: matched %d rows, want 1", label, n)
+	}
+}
+
+// TestListTokensOrdersByCreation pins the listing to creation order for the
+// timestamp pair RFC3339Nano compares backwards. The format trims trailing
+// fractional zeros, so the earlier ".1Z" is a shorter string than the later
+// ".15Z" and sorts after it ('Z' > '5') — lexical order is not chronological
+// order, and ordering on the text column returns the newer token first.
+func TestListTokensOrdersByCreation(t *testing.T) {
 	s := openTemp(t)
-	if _, err := s.CreateToken("a", "admin"); err != nil {
+	// Make SQLite expose the difference between an explicit ORDER BY and an
+	// unordered table scan; the API contract must not depend on scan order.
+	if _, err := s.db.Exec(`PRAGMA reverse_unordered_selects = ON`); err != nil {
+		t.Fatalf("enable reverse_unordered_selects: %v", err)
+	}
+	if _, err := s.CreateToken("z-older", "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateToken("b", "readonly"); err != nil {
+	if _, err := s.CreateToken("a-newer", "readonly"); err != nil {
 		t.Fatal(err)
 	}
+	stampToken(t, s, "z-older", "2026-01-01T00:00:00.1Z")
+	stampToken(t, s, "a-newer", "2026-01-01T00:00:00.15Z")
+
 	toks, err := s.ListTokens()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(toks) != 2 {
-		t.Fatalf("len = %d, want 2", len(toks))
+	var got []string
+	for _, tk := range toks {
+		got = append(got, tk.Label)
+	}
+	want := []string{"z-older", "a-newer"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("token order = %v, want %v (oldest first)", got, want)
 	}
 }
 
@@ -604,7 +641,7 @@ func TestDomainConfigRoundTrip(t *testing.T) {
 		t.Fatalf("GetDomainConfig on empty store: err = %v, want ErrNotFound", err)
 	}
 
-	if err := s.SetDomainConfig("example.com", "cloudflare", "cf-token"); err != nil {
+	if err := s.SetDomainConfig("example.com", "cloudflare", "cf-token", "relay"); err != nil {
 		t.Fatalf("SetDomainConfig: %v", err)
 	}
 	dc, err := s.GetDomainConfig()
@@ -636,7 +673,7 @@ func TestDomainConfigRoundTrip(t *testing.T) {
 	}
 
 	// Re-Set replaces the row and resets status/error.
-	if err := s.SetDomainConfig("other.dev", "cloudflare", "tok2"); err != nil {
+	if err := s.SetDomainConfig("other.dev", "cloudflare", "tok2", "relay"); err != nil {
 		t.Fatalf("re-SetDomainConfig: %v", err)
 	}
 	dc, _ = s.GetDomainConfig()
@@ -661,7 +698,7 @@ func TestUpdateDomainStatusWithoutRow(t *testing.T) {
 
 func TestUpdateDomainStatusWrongDomain(t *testing.T) {
 	s := openTemp(t)
-	if err := s.SetDomainConfig("new.dev", "cloudflare", "tok"); err != nil {
+	if err := s.SetDomainConfig("new.dev", "cloudflare", "tok", "relay"); err != nil {
 		t.Fatal(err)
 	}
 	// A run holding a snapshot of a replaced config must not stamp the new row.
@@ -1178,5 +1215,53 @@ func TestDeleteAppRemovesEnv(t *testing.T) {
 	}
 	if len(env) != 0 {
 		t.Errorf("app_env rows after DeleteApp = %v, want none", env)
+	}
+}
+
+func TestDomainConfigServeRoundTrip(t *testing.T) {
+	s := openTemp(t)
+
+	if err := s.SetDomainConfig("shop.example.com", "cloudflare", "tok", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	dc, err := s.GetDomainConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dc.Serve != "direct" {
+		t.Fatalf("Serve = %q, want direct", dc.Serve)
+	}
+
+	// Upsert replaces serve along with the rest.
+	if err := s.SetDomainConfig("shop.example.com", "cloudflare", "tok", "relay"); err != nil {
+		t.Fatal(err)
+	}
+	dc, _ = s.GetDomainConfig()
+	if dc.Serve != "relay" {
+		t.Fatalf("Serve after upsert = %q, want relay", dc.Serve)
+	}
+}
+
+func TestUpdateDomainServeFlipsWithoutTouchingStatus(t *testing.T) {
+	s := openTemp(t)
+	if err := s.SetDomainConfig("shop.example.com", "cloudflare", "tok", "relay"); err != nil {
+		t.Fatal(err)
+	}
+	na := time.Now().Add(60 * 24 * time.Hour)
+	if err := s.UpdateDomainStatus("shop.example.com", "active", "", na); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.UpdateDomainServe("shop.example.com", "direct"); err != nil {
+		t.Fatal(err)
+	}
+	dc, _ := s.GetDomainConfig()
+	if dc.Serve != "direct" || dc.Status != "active" || dc.CertNotAfter.IsZero() {
+		t.Fatalf("after serve flip: serve=%q status=%q notAfter=%v", dc.Serve, dc.Status, dc.CertNotAfter)
+	}
+
+	// Stale-domain guard, same contract as UpdateDomainStatus.
+	if err := s.UpdateDomainServe("other.example.com", "relay"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("mismatched domain = %v, want ErrNotFound", err)
 	}
 }

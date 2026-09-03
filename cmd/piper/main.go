@@ -50,9 +50,13 @@ func dialClient(remote string, stderr io.Writer) (*client.Client, bool) {
 			fmt.Fprintln(stderr, "error: remote target requires a relay login; run `piper login`")
 			return nil, false
 		}
-		return client.New(strings.TrimRight(cc.RelayAPI, "/")+"/agents/"+remote, cc.AccountCredential), true
+		return relayClient(cc.RelayAPI, remote, cc.AccountCredential), true
 	}
 	return client.New(cc.Addr, cc.Token), true
+}
+
+func relayClient(api, remote, credential string) *client.Client {
+	return client.New(strings.TrimRight(api, "/")+"/agents/"+remote, credential)
 }
 
 // printAgentVersion reports the build of the piperd actually serving this
@@ -72,20 +76,6 @@ func printAgentVersion(c *client.Client, stdout io.Writer) {
 	case err == nil:
 		fmt.Fprintf(stdout, "agent: %s\n", v)
 	}
-}
-
-// appURL renders the URL an app is served on from its stored hostname. A
-// relay-terminated box (remote target) serves over HTTPS; a local/BYO box
-// serves its base-domain host over HTTP. Empty hostname (never deployed)
-// yields "".
-func appURL(hostname string, remote bool) string {
-	if hostname == "" {
-		return ""
-	}
-	if remote {
-		return "https://" + hostname
-	}
-	return "http://" + hostname
 }
 
 // isTerminal reports whether both stdout and stdin are interactive terminals;
@@ -128,9 +118,19 @@ var launchTUI = func(remote string, stderr io.Writer) int {
 	return 0
 }
 
-// dialBox builds a TUI client for an arbitrary saved box (LAN path), for the
-// in-TUI box switcher. Relay boxes are switched via the phase-6 wizard, not here.
+// dialBox builds a TUI client for an arbitrary saved box. Boxes with a LAN
+// address use the direct path; relay-only rows use the same proxied client as
+// dialClient and enter the TUI's relay mode.
 func dialBox(b config.Box) (tui.API, string, bool, error) {
+	if b.Addr == "" && b.RelayAPI != "" {
+		if b.AccountCredential == "" {
+			return nil, "", true, errors.New("relay box has no account credential")
+		}
+		if b.BaseDomain == "" {
+			return nil, "", true, errors.New("relay box has no agent identity")
+		}
+		return relayClient(b.RelayAPI, b.BaseDomain, b.AccountCredential).WithTimeout(tuiRequestTimeout), b.BaseDomain, true, nil
+	}
 	return client.New(b.Addr, b.Token).WithTimeout(tuiRequestTimeout), b.Addr, false, nil
 }
 
@@ -356,7 +356,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "deployed %s: %s (%s)\n", name, appURL(app.Hostname, *remote != ""), final.Status)
+		fmt.Fprintf(stdout, "deployed %s: %s (%s)\n", name, app.URL(), final.Status)
 		return 0
 	case "list":
 		if len(args) != 1 {
@@ -373,7 +373,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		for _, app := range apps {
-			if url := appURL(app.Hostname, *remote != ""); url != "" {
+			if url := app.URL(); url != "" {
 				fmt.Fprintf(stdout, "%s\tport=%d\t%s\n", app.Name, app.Port, url)
 			} else {
 				fmt.Fprintf(stdout, "%s\tport=%d\n", app.Name, app.Port)
@@ -412,7 +412,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			if status == "" {
 				status = "-"
 			}
-			if url := appURL(app.Hostname, *remote != ""); url != "" {
+			if url := app.URL(); url != "" {
 				fmt.Fprintf(stdout, "%s\tstatus=%s\tport=%d\t%s\n", app.Name, status, app.Port, url)
 			} else {
 				fmt.Fprintf(stdout, "%s\tstatus=%s\tport=%d\n", app.Name, status, app.Port)

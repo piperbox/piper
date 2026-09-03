@@ -22,10 +22,11 @@ var ErrNotConnected = errors.New("relay tunnel not connected")
 // registration over it. The current session is published under a mutex so the
 // deploy path can open control streams on whatever session is live.
 type TunnelClient struct {
-	mu      sync.Mutex
-	sess    *tunnel.Session
-	running bool
-	lastErr string
+	mu         sync.Mutex
+	sess       *tunnel.Session
+	running    bool
+	lastErr    string
+	observedIP string // last relay-reported source host; sticky across reconnects
 
 	// OnConnect, if set before Run, is invoked in its own goroutine each time a
 	// relay session is established — piperd uses it to provision the relay's
@@ -70,6 +71,25 @@ func (c *TunnelClient) current() *tunnel.Session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.sess
+}
+
+// ObservedIP is the source host the relay last saw this box connect from —
+// the box's best guess at its own public IP (advisory: it can be a NAT
+// egress). "" until the first successful handshake; deliberately never
+// cleared on disconnect, so direct mode's DNS guidance survives tunnel blips.
+func (c *TunnelClient) ObservedIP() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.observedIP
+}
+
+func (c *TunnelClient) setObservedIP(ip string) {
+	if ip == "" {
+		return
+	}
+	c.mu.Lock()
+	c.observedIP = ip
+	c.mu.Unlock()
 }
 
 // relayDialTimeout bounds one relay connect. piperd joins Run at shutdown
@@ -130,6 +150,7 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 		}
 		log.Printf("tunnel: connected to relay %s as %s", relayAddr, baseDomain)
 		c.setSession(sess)
+		c.setObservedIP(sess.ObservedAddr)
 		if c.OnConnect != nil {
 			go c.OnConnect()
 		}

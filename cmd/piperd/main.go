@@ -353,7 +353,7 @@ func newDialLocal(authAddr, alpnAddr, httpAddr, httpsAddr string) func(kind byte
 // whose base domain is still the built-in default — nobody has told that box
 // what it is publicly called, and config.DefaultBaseDomain resolves nowhere, so
 // passing it on would swap the reported bug for the same bug one name over.
-func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string) domain.Options {
+func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, alpnSolver *certs.ALPNSolver, relayHost string, publicIP func() string) domain.Options {
 	baseDomain := cfg.BaseDomain
 	if baseDomain == config.DefaultBaseDomain {
 		baseDomain = ""
@@ -361,7 +361,8 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	opts := domain.Options{
 		Store: st, Proxy: caddy.NewClient(cfg.CaddyAdmin), Router: dep,
 		DataDir: cfg.DataDir, BaseDomain: baseDomain, RelayHost: relayHost,
-		HTTPSListen: cfg.HTTPSAddr,
+		HTTPSListen: cfg.HTTPSAddr, PublicIP: publicIP,
+		TLSTerminated: terminatesTLS(cfg),
 		Issuer: func(provider, token string) (domain.Issuer, error) {
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 				return testSelfSignedIssuer{}, nil
@@ -376,6 +377,15 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 			if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 				return testSelfSignedIssuer{}, nil
 			}
+			// No solver means no relay to splice acme-tls/1 down. Since #506
+			// a direct box never asks for this issuer (appIssuerFor picks
+			// DNS-01), so this guard is a relay-mode box whose solver went
+			// missing — kept because certs.New would otherwise reject the
+			// typed-nil solver as "exactly one of DNSProvider or ALPNSolver
+			// must be set" (#242), naming neither relay nor domain.
+			if alpnSolver == nil {
+				return nil, fmt.Errorf("per-app custom domains need a relay connection: their TLS-ALPN-01 challenge is spliced down the tunnel to this box")
+			}
 			key, err := certs.LoadOrCreateAccountKey(filepath.Join(cfg.DataDir, "acme_account.key"))
 			if err != nil {
 				return nil, err
@@ -388,6 +398,13 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 	}
 	if !cfg.Terminated {
 		opts.EnvDomain = cfg.BaseDomain // env-managed BYO: API writes are 409
+		opts.EnvServe = serveMode(cfg.Serve)
+		// The env box's DNS-01 source, doubling as the per-app token source
+		// on a direct box (#506). Static-cert boxes (PIPER_TLS_CERT_FILE)
+		// have no ACME path and stay nil — per-app adds are refused there.
+		if cfg.TLSCertFile == "" {
+			opts.EnvIssuer = func() (domain.Issuer, error) { return newEnvIssuer(cfg) }
+		}
 	}
 	if os.Getenv("PIPER_TEST_ISSUER") == "selfsigned" {
 		// E2E: the fake issuer implies the test domains have no real DNS
@@ -398,6 +415,127 @@ func newDomainOptions(cfg config.Config, st *store.Store, dep *deploy.Deployer, 
 		}
 	}
 	return opts
+}
+
+// publicIPFunc resolves the box's public IP for direct serve mode:
+// PIPER_PUBLIC_IP pins it; otherwise the relay-observed address, read lazily
+// because it only exists after the first tunnel handshake — well after the
+// domain manager is constructed.
+func publicIPFunc(cfg config.Config, tc *agent.TunnelClient) func() string {
+	return func() string {
+		if cfg.PublicIP != "" {
+			if net.ParseIP(cfg.PublicIP) == nil {
+				log.Printf("piper: ignoring invalid PIPER_PUBLIC_IP=%q (not an IP)", cfg.PublicIP)
+			} else {
+				return cfg.PublicIP
+			}
+		}
+		if tc != nil {
+			return tc.ObservedIP()
+		}
+		return ""
+	}
+}
+
+// resumeStoredDomains restarts the stored rows' lifecycle loops at boot.
+// App-domain rows resume whenever a manager exists — a direct box keeps its
+// rows, and asleep active rows read active while nothing re-runs armApp to
+// serve them (#509 review); the loops idle on the nil relay notifier until
+// #506. The box-wide Resume stays gated on terminated relay mode: API-managed
+// box-wide configs exist only there (env mode owns its lifecycle via RunEnv).
+func resumeStoredDomains(cfg config.Config, domMgr *domain.Manager) {
+	if domMgr == nil {
+		return
+	}
+	if cfg.RelayAddr != "" && cfg.Terminated {
+		domMgr.Resume() // box-wide API-managed config; env mode has none
+	}
+	domMgr.ResumeAppDomains()
+}
+
+// serveMode normalizes PIPER_SERVE: only an exact "direct" opts in; unset,
+// "relay" and junk all mean relay. One owner of the parse, so the mode the
+// domain manager is told and the :443 gates cannot drift (#509 review), and
+// side-effect-free: the gates evaluate it several times per boot.
+func serveMode(serve string) string {
+	if serve == domain.ServeDirect {
+		return domain.ServeDirect
+	}
+	return ""
+}
+
+// envServe validates PIPER_SERVE once, at startup, and returns the
+// normalized mode for the env-managed path: junk logs and degrades to relay
+// (a typo must not change where traffic flows), and an explicit
+// PIPER_SERVE=direct the box cannot honor gets exactly one line naming the
+// clause that dropped it (#509 review).
+func envServe(cfg config.Config) string {
+	mode := serveMode(cfg.Serve)
+	if cfg.Serve != "" && cfg.Serve != domain.ServeRelay && mode == "" {
+		log.Printf("piper: ignoring invalid PIPER_SERVE=%q (want relay|direct)", cfg.Serve)
+		return ""
+	}
+	if mode == domain.ServeDirect && !directServe(cfg) {
+		switch {
+		case cfg.Terminated:
+			log.Printf("piper: PIPER_SERVE=direct has no effect: this box is terminated (the relay terminates TLS; direct serve needs the box to hold the cert)")
+		case cfg.RelayAddr == "":
+			log.Printf("piper: PIPER_SERVE=direct has no effect: PIPER_BASE_DOMAIN is unset or the built-in default, which resolves nowhere")
+		}
+		// A relay box that is not terminated honors direct through the
+		// env-managed domain path — nothing is dropped, so no log.
+	}
+	return mode
+}
+
+// directServe reports whether this box serves its own box-wide domain with no
+// relay in the picture at all: never enrolled, told what it is publicly called
+// (PIPER_BASE_DOMAIN, and not the built-in default, which resolves nowhere),
+// and told to serve that name itself (PIPER_SERVE=direct via serveMode, the
+// one normalization both paths consume — junk is not "direct" for either).
+//
+// The opt-in is deliberate rather than inferred from the base domain alone. A
+// LAN-only box named something real is a supported plain-HTTP shape today, and
+// inferring direct serve from its name would, on upgrade, make it bind :443 and
+// run ACME at boot — a hard failure on a box that never asked for either (#507).
+func directServe(cfg config.Config) bool {
+	return cfg.RelayAddr == "" && !cfg.Terminated &&
+		serveMode(cfg.Serve) == domain.ServeDirect &&
+		cfg.BaseDomain != "" && cfg.BaseDomain != config.DefaultBaseDomain
+}
+
+// publicHTTPS reports whether the public reaches this box's apps over TLS: via
+// the relay in either relay mode, or straight at this box in direct serve. It
+// gates the domain manager, which owns the cert lifecycle in all three shapes,
+// and it is the URL scheme the daemon reports to clients. A LAN-only box is the
+// only false case.
+func publicHTTPS(cfg config.Config) bool {
+	return cfg.RelayAddr != "" || directServe(cfg)
+}
+
+// terminatesTLS reports whether THIS box holds the cert and answers on
+// cfg.HTTPSAddr: true for a BYO relay box and for a direct-serve box, false for
+// the relay-terminated free tier (the relay holds the cert and opens plaintext
+// KindHTTP streams) and for a LAN-only box. It gates caddy.WithHTTPS and the
+// box cert bootstrap together, which is what lets domain.RunEnv keep assuming
+// the TLS listener is already up.
+func terminatesTLS(cfg config.Config) bool {
+	return publicHTTPS(cfg) && !cfg.Terminated
+}
+
+// relayDialHost is the host part of the relay dial address — the DNS-record
+// target only for a box with no public name of its own (#434). Empty when there
+// is no relay: a direct-serve box has no dial address to fall back to, and
+// directServe guarantees it has a base domain of its own that is not the
+// built-in default.
+func relayDialHost(cfg config.Config) string {
+	if cfg.RelayAddr == "" {
+		return ""
+	}
+	if h, _, err := net.SplitHostPort(cfg.RelayAddr); err == nil {
+		return h
+	}
+	return cfg.RelayAddr
 }
 
 // runTokenCmd implements `piperd token <create|list|revoke>`, writing directly
@@ -486,6 +624,7 @@ func main() {
 
 	cfg := config.Load()
 	captureBootExe()
+	envServe(cfg) // one validation pass per boot, for its diagnostics
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
@@ -507,7 +646,7 @@ func main() {
 	var mgr *caddy.Manager
 	if os.Getenv("PIPER_SKIP_CADDY") == "" {
 		opts := []caddy.Option{}
-		if cfg.RelayAddr != "" && !cfg.Terminated {
+		if terminatesTLS(cfg) {
 			opts = append(opts, caddy.WithHTTPS(cfg.HTTPSAddr))
 		}
 		mgr, err = caddy.StartManager(cfg.CaddyAdmin, cfg.HTTPAddr, opts...)
@@ -517,23 +656,43 @@ func main() {
 	}
 
 	dep := deploy.New(st, rt, caddy.NewClient(cfg.CaddyAdmin), cfg.BaseDomain)
+	// See terminatesTLS: on such a box the domain manager never arms a
+	// runtime "piper-tls" server (#506), so custom-domain routes must land on
+	// "piper" itself via plain UpsertRoute.
+	dep.SetTLSTerminated(terminatesTLS(cfg))
 
-	var domMgr *domain.Manager
+	// Created before the domain manager so its DNS guidance can consult the
+	// relay-observed public IP; Run and the rest of its wiring still start in
+	// the relay block below.
+	var tc *agent.TunnelClient
+	if cfg.RelayAddr != "" {
+		tc = &agent.TunnelClient{}
+	}
+
+	// The TLS-ALPN-01 solver runs whenever relay mode is up: idle it is one
+	// dormant loopback listener. The relay splices acme-tls/1 ClientHellos
+	// down the tunnel to it (see newDialLocal); the per-app domain
+	// lifecycle drives issuance against it. It stays gated on the relay even
+	// though the domain manager no longer is: nothing splices challenges to a
+	// directly-served box, so its per-app domains cannot be issued there at
+	// all — they fail with "relay not connected" until #506 gives them an
+	// issuance path of their own.
 	var alpnSolver *certs.ALPNSolver
 	if cfg.RelayAddr != "" {
-		relayHost := cfg.RelayAddr
-		if h, _, err := net.SplitHostPort(cfg.RelayAddr); err == nil {
-			relayHost = h
-		}
-		// The TLS-ALPN-01 solver runs whenever relay mode is up: idle it is one
-		// dormant loopback listener. The relay splices acme-tls/1 ClientHellos
-		// down the tunnel to it (see newDialLocal); the per-app domain
-		// lifecycle drives issuance against it.
 		alpnSolver, err = certs.NewALPNSolver("127.0.0.1:0")
 		if err != nil {
 			log.Fatalf("alpn solver: %v", err)
 		}
-		domMgr = domain.New(newDomainOptions(cfg, st, dep, alpnSolver, relayHost))
+	}
+
+	// The domain manager is not relay machinery — it owns the box's cert
+	// lifecycle, which a never-enrolled box serving its own domain directly
+	// needs in full. Gating it on cfg.RelayAddr left that box with no manager,
+	// no cert and no HTTPS listener, and nothing on it that would ever arm one
+	// (#507).
+	var domMgr *domain.Manager
+	if publicHTTPS(cfg) {
+		domMgr = domain.New(newDomainOptions(cfg, st, dep, alpnSolver, relayDialHost(cfg), publicIPFunc(cfg, tc)))
 	}
 
 	// The control API mux, shared by both listeners. wh is assigned below in
@@ -544,17 +703,13 @@ func main() {
 	if domMgr != nil {
 		dm = domMgr
 	}
-	// The tunnel client is created here, ahead of api.New, so the link handler
-	// can push repo bindings to the relay; Run and the rest of its wiring still
-	// start later, in the relay block below. binder is declared as the
-	// api.RepoBinder interface (not a *agent.TunnelClient) so that on a
-	// LAN-only box it stays genuinely nil — a nil *agent.TunnelClient boxed into
-	// the interface would be a non-nil interface value and would defeat the
-	// "binder != nil" guard in the link handler.
+	// binder is declared as the api.RepoBinder interface (not a
+	// *agent.TunnelClient) so that on a LAN-only box it stays genuinely nil — a
+	// nil *agent.TunnelClient boxed into the interface would be a non-nil
+	// interface value and would defeat the "binder != nil" guard in the link
+	// handler.
 	var binder api.RepoBinder
-	var tc *agent.TunnelClient
-	if cfg.RelayAddr != "" {
-		tc = &agent.TunnelClient{}
+	if tc != nil {
 		binder = tc
 	}
 	var ghTokenFn func(repo string) (string, error)
@@ -570,9 +725,10 @@ func main() {
 		// if the row it just deleted had never been there.
 		return decideWebhookProvider(store.ErrNotFound, cfg, wh != nil && wh.ghToken != nil).name()
 	}, newRepoFetcher(st, cfg, ghTokenFn), api.AgentInfo{
-		HTTPAddr:  cfg.HTTPAddr,
-		HTTPSAddr: cfg.HTTPSAddr,
-		DataDir:   cfg.DataDir,
+		HTTPAddr:      cfg.HTTPAddr,
+		HTTPSAddr:     cfg.HTTPSAddr,
+		DataDir:       cfg.DataDir,
+		AppsOverHTTPS: publicHTTPS(cfg),
 	})
 
 	// The authenticated entry point. Always on, so LAN-only and relay-connected
@@ -624,11 +780,50 @@ func main() {
 	}()
 	log.Printf("enrollment socket at %s", sockPath)
 
+	// The box's own wildcard cert, from static files or the env-managed DNS-01
+	// issuer. Hoisted out of the relay block below because a direct-served box
+	// terminates TLS with exactly this cert and no tunnel at all (#507) — its
+	// gate is terminatesTLS, the same one that armed caddy.WithHTTPS, which is
+	// the coupling domain.RunEnv relies on to skip EnsureHTTPS. It keeps its
+	// place ahead of the tunnel: a relay box must hold its cert before the
+	// relay can route anything to it.
+	if terminatesTLS(cfg) {
+		if cfg.TLSCertFile != "" {
+			certPEM, err := os.ReadFile(cfg.TLSCertFile)
+			if err != nil {
+				log.Fatalf("box tls: %v", err)
+			}
+			keyPEM, err := os.ReadFile(cfg.TLSKeyFile)
+			if err != nil {
+				log.Fatalf("box tls: %v", err)
+			}
+			// Through the manager's cert set, not straight into Caddy, so
+			// a per-app domain sync can't clobber the file-provided cert.
+			if err := domMgr.LoadStaticCert(certPEM, keyPEM); err != nil {
+				log.Fatalf("box tls: %v", err)
+			}
+		} else {
+			iss, err := newEnvIssuer(cfg)
+			if err != nil {
+				log.Fatalf("box tls: %v", err)
+			}
+			if err := domMgr.RunEnv(ctx, iss); err != nil {
+				log.Fatalf("box tls: %v", err)
+			}
+		}
+	}
+	if cfg.RelayAddr == "" {
+		// Direct-served boxes have no relay notifier to install; resume their
+		// stored rows after synchronous box-cert setup and before serving.
+		resumeStoredDomains(cfg, domMgr)
+	}
+
 	// Relay mode: dial the relay and forward its streams. Terminated (free-tier)
 	// mode holds no box cert and serves apps on :80; the relay terminates TLS and
-	// opens KindHTTP streams. Non-terminated (BYO-domain) mode obtains a wildcard
-	// cert, serves :443, and answers KindPassthrough streams. Control streams go
-	// to the authenticated listener — never the tokenless local one.
+	// opens KindHTTP streams. Non-terminated (BYO-domain) mode holds the wildcard
+	// cert obtained just above, serves :443, and answers KindPassthrough streams.
+	// Control streams go to the authenticated listener — never the tokenless
+	// local one.
 	//
 	// tunnelDone lets shutdown join the tunnel client's Run goroutine: streams
 	// must stop being accepted before the backends they splice into (the ALPN
@@ -637,31 +832,6 @@ func main() {
 	var tunnelDone chan struct{}
 	if cfg.RelayAddr != "" {
 		dialLocal := newDialLocal(authAddr, alpnSolver.Addr(), dialAddr(cfg.HTTPAddr), dialAddr(cfg.HTTPSAddr))
-		if !cfg.Terminated {
-			if cfg.TLSCertFile != "" {
-				certPEM, err := os.ReadFile(cfg.TLSCertFile)
-				if err != nil {
-					log.Fatalf("relay tls: %v", err)
-				}
-				keyPEM, err := os.ReadFile(cfg.TLSKeyFile)
-				if err != nil {
-					log.Fatalf("relay tls: %v", err)
-				}
-				// Through the manager's cert set, not straight into Caddy, so
-				// a per-app domain sync can't clobber the file-provided cert.
-				if err := domMgr.LoadStaticCert(certPEM, keyPEM); err != nil {
-					log.Fatalf("relay tls: %v", err)
-				}
-			} else {
-				iss, err := newEnvIssuer(cfg)
-				if err != nil {
-					log.Fatalf("relay tls: %v", err)
-				}
-				if err := domMgr.RunEnv(ctx, iss); err != nil {
-					log.Fatalf("relay tls: %v", err)
-				}
-			}
-		}
 		// One mutex shared by every OnConnect callback, so overlapping
 		// (re)connects can't race the list-then-mint and double-provision.
 		var provisionMu sync.Mutex
@@ -694,11 +864,7 @@ func main() {
 			tc.Run(ctx, cfg.RelayAddr, cfg.RelayToken, cfg.BaseDomain, dialLocal)
 		}()
 		domMgr.SetRelay(tc)
-		if cfg.Terminated {
-			domMgr.Resume() // box-wide API-managed config; env mode has none
-		}
-		domMgr.ResumeAppDomains()
-		go domMgr.StartRenewals(ctx)
+		resumeStoredDomains(cfg, domMgr)
 
 		// The webhook deployer must carry the registrar on exactly the same
 		// condition as the API deployer above: a git-push deploy and an API
@@ -721,6 +887,15 @@ func main() {
 		default:
 			wh.start()
 		}
+	}
+
+	// Renewal is the domain manager's own clock, not the relay's: a
+	// direct-served box renews its wildcard on the same schedule with no tunnel
+	// (#507). It stays behind the relay block so a relay box still hands the
+	// manager its notifier first, and the first tick is renewInterval away, so
+	// nothing here races startup.
+	if domMgr != nil {
+		go domMgr.StartRenewals(ctx)
 	}
 
 	// A box without relay-terminated hostnames re-arms at startup instead: its
@@ -886,11 +1061,12 @@ func newWebhookStarter(cfg config.Config, st *store.Store, rt *runtime.DockerRun
 // certificate and unknown to its router — so the app is unreachable however
 // healthy the container is. reg is nil on a LAN-only box, which keeps that
 // local convention deliberately.
-func newWebhookDeployer(st *store.Store, rt runtime.Runtime, routes deploy.RouteSetter, baseDomain string, reg deploy.HostnameRegistrar) *deploy.Deployer {
+func newWebhookDeployer(st *store.Store, rt runtime.Runtime, routes deploy.RouteSetter, baseDomain string, reg deploy.HostnameRegistrar, tlsTerminated bool) *deploy.Deployer {
 	d := deploy.New(st, rt, routes, baseDomain)
 	if reg != nil {
 		d.SetHostnameRegistrar(reg)
 	}
+	d.SetTLSTerminated(tlsTerminated)
 	return d
 }
 
@@ -1020,7 +1196,7 @@ func (w *webhookStarter) run() {
 		return
 	}
 
-	wdep := newWebhookDeployer(w.st, w.rt, caddy.NewClient(w.cfg.CaddyAdmin), w.cfg.BaseDomain, w.registrar)
+	wdep := newWebhookDeployer(w.st, w.rt, caddy.NewClient(w.cfg.CaddyAdmin), w.cfg.BaseDomain, w.registrar, terminatesTLS(w.cfg))
 	w.handler = webhook.New(prov, w.st, wdep, w.cfg.BaseDomain)
 	w.srv = &http.Server{Addr: w.cfg.WebhookAddr, Handler: w.handler}
 	go func() {

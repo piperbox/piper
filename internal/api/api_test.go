@@ -456,6 +456,22 @@ func TestAppsAPIIncludesHostname(t *testing.T) {
 	}
 }
 
+// One function renders an app's URL for every client surface: the
+// daemon-reported scheme, guarded against a never-deployed app (empty
+// hostname must never render "://").
+func TestAppURLFollowsTheDaemonReportedScheme(t *testing.T) {
+	for _, tc := range []struct{ name, host, scheme, want string }{
+		{"never deployed", "", "https", ""},
+		{"http box", "blog.piper.localhost", "http", "http://blog.piper.localhost"},
+		{"https box", "blog.example.dev", "https", "https://blog.example.dev"},
+	} {
+		a := App{App: store.App{Hostname: tc.host}, Scheme: tc.scheme}
+		if got := a.URL(); got != tc.want {
+			t.Errorf("%s: URL() = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestReservedNameRejected(t *testing.T) {
 	s := newTestStore(t)
 	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})
@@ -1001,10 +1017,11 @@ func TestDeploymentLogsEndpoint(t *testing.T) {
 }
 
 type fakeDomainManager struct {
-	status  domain.Status
-	setErr  error
-	gotSet  []string
-	removed bool
+	status   domain.Status
+	setErr   error
+	gotSet   []string
+	gotServe string
+	removed  bool
 
 	appStatuses    []domain.AppDomainStatus
 	addErr         error
@@ -1013,8 +1030,9 @@ type fakeDomainManager struct {
 	removedDomains []string
 }
 
-func (f *fakeDomainManager) Set(d, p, tok string) (domain.Status, error) {
+func (f *fakeDomainManager) Set(d, p, tok, serve string) (domain.Status, error) {
 	f.gotSet = []string{d, p, tok}
+	f.gotServe = serve
 	if f.setErr != nil {
 		return domain.Status{}, f.setErr
 	}
@@ -1122,14 +1140,54 @@ func TestDomainEndpointErrors(t *testing.T) {
 	}
 }
 
-func TestDomainEndpointsWithoutRelay(t *testing.T) {
+func TestPutDomainThreadsServe(t *testing.T) {
+	f := &fakeDomainManager{status: domain.Status{Domain: "shop.example.com", Serve: "direct"}}
+	s := newTestStore(t)
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, f, nil, nil, nil, AgentInfo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/domain",
+		strings.NewReader(`{"domain":"shop.example.com","dns_provider":"cloudflare","dns_token":"tok","serve":"direct"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT = %d: %s", rec.Code, rec.Body)
+	}
+	if f.gotServe != "direct" {
+		t.Fatalf("serve passed to manager = %q, want direct", f.gotServe)
+	}
+	if !strings.Contains(rec.Body.String(), `"serve":"direct"`) {
+		t.Fatalf("response missing serve: %s", rec.Body)
+	}
+}
+
+func TestPutDomainInvalidServeIs400(t *testing.T) {
+	f := &fakeDomainManager{setErr: domain.ErrInvalidServe}
+	s := newTestStore(t)
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, f, nil, nil, nil, AgentInfo{})
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPut, "/v1/domain",
+		strings.NewReader(`{"domain":"shop.example.com","dns_provider":"cloudflare","dns_token":"tok","serve":"bogus"}`))
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT invalid serve = %d, want 400", rec.Code)
+	}
+}
+
+// A box with no domain manager still answers every /v1/domain call, with a 409
+// that has to say what would give it one. "Connect to a relay" stopped being
+// the whole answer when a never-enrolled box could serve its own domain
+// directly (#507), and a reason that omits the route the operator has is worse
+// than no reason.
+func TestDomainEndpointsWithoutADomainManager(t *testing.T) {
 	s := newTestStore(t)
 	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil, AgentInfo{})
 	for _, m := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(m, "/v1/domain", strings.NewReader(`{}`)))
 		if rec.Code != http.StatusConflict {
-			t.Fatalf("%s without relay = %d, want 409", m, rec.Code)
+			t.Fatalf("%s without a domain manager = %d, want 409", m, rec.Code)
+		}
+		if body := rec.Body.String(); !strings.Contains(body, "relay") || !strings.Contains(body, "direct") {
+			t.Errorf("%s reason = %q, want both routes named", m, strings.TrimSpace(body))
 		}
 	}
 }
@@ -1293,6 +1351,28 @@ func TestAppDomainsUnknownAppAndDomain(t *testing.T) {
 	}
 	if len(fdm.removedDomains) != 0 {
 		t.Errorf("RemoveAppDomain reached: %v", fdm.removedDomains)
+	}
+}
+
+// A per-app domain POST on a direct box with no DNS-01 source is refused by
+// the manager at add time (#506); the API maps ErrNoDNSIssuer to 409 naming
+// the missing token, the way ErrBoxWideDomain conflicts do. A capable box
+// keeps its 201 (pinned by TestAppDomainsEndpoints).
+func TestAppDomainsPostConflictWithoutDNSIssuer(t *testing.T) {
+	s := newTestStore(t)
+	if _, err := s.CreateApp("blog", 8080); err != nil {
+		t.Fatal(err)
+	}
+	fdm := &fakeDomainManager{addErr: domain.ErrNoDNSIssuer}
+	h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, fdm, nil, nil, nil, AgentInfo{})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/apps/blog/domains",
+		strings.NewReader(`{"domain":"myshop.com"}`)))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("POST = %d, want 409 when the box has no DNS-01 source", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "DNS token") {
+		t.Errorf("409 body = %q, want it to name the missing DNS token", strings.TrimSpace(body))
 	}
 }
 
@@ -1618,6 +1698,56 @@ func TestAppEnvRejects(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body)))
 		if rec.Code != tc.want {
 			t.Errorf("%s: code = %d, want %d", tc.name, rec.Code, tc.want)
+		}
+	}
+}
+
+// Only the daemon knows whether its apps answer on TLS: the relay terminates
+// for a free-tier box, the box itself terminates for a BYO relay box and for a
+// never-enrolled direct box (#507). A client guessing from how it dialled gets
+// the last case backwards — it reaches a direct box over the LAN, so "not
+// remote" and "not HTTPS" stopped being the same question. So the daemon
+// states the scheme on every app it reports.
+func TestAppsReportTheSchemeTheyAreServedOn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		https bool
+		want  string
+	}{
+		{"apps on TLS", true, "https"},
+		{"LAN-only box", false, "http"},
+	} {
+		s := newTestStore(t)
+		h := New(s, &fakeDeployer{store: s}, "piper.localhost", "", nil, nil, nil, nil, nil,
+			AgentInfo{AppsOverHTTPS: tc.https})
+		if _, err := s.CreateApp("blog", 8080); err != nil {
+			t.Fatalf("%s: CreateApp: %v", tc.name, err)
+		}
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: list status = %d, body = %s", tc.name, rec.Code, rec.Body.String())
+		}
+		var list []struct{ Scheme string }
+		if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
+			t.Fatalf("%s: decode list: %v", tc.name, err)
+		}
+		if len(list) != 1 || list[0].Scheme != tc.want {
+			t.Errorf("%s: list scheme = %+v, want %q", tc.name, list, tc.want)
+		}
+
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/apps/blog", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: get status = %d, body = %s", tc.name, rec.Code, rec.Body.String())
+		}
+		var one struct{ Scheme string }
+		if err := json.NewDecoder(rec.Body).Decode(&one); err != nil {
+			t.Fatalf("%s: decode get: %v", tc.name, err)
+		}
+		if one.Scheme != tc.want {
+			t.Errorf("%s: get scheme = %q, want %q", tc.name, one.Scheme, tc.want)
 		}
 	}
 }

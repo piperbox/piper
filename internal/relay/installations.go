@@ -209,10 +209,16 @@ type Installation struct {
 // newest first. Empty (not an error) when the account has none. This is
 // ownership, not visibility — see InstallationsVisibleTo for what a user may
 // actually see and use.
+//
+// Ordered by id, not created_at: that column is written with
+// time.RFC3339Nano, which trims trailing fractional zeros, so ".1Z" sorts
+// after the later ".15Z" as text. The BIGSERIAL id is insertion order, and the
+// upsert above leaves created_at untouched on conflict, so it stays creation
+// order.
 func (s *Store) InstallationsForAccount(accountID string) ([]Installation, error) {
 	return s.installations(
 		`SELECT installation_id, target_type, target_login FROM github_installations
-		  WHERE account_id=$1 ORDER BY created_at DESC, id DESC`, accountID)
+		  WHERE account_id=$1 ORDER BY id DESC`, accountID)
 }
 
 // InstallationsVisibleTo lists the installations accountID may use: its own,
@@ -221,12 +227,14 @@ func (s *Store) InstallationsForAccount(accountID string) ([]Installation, error
 // owning an org-wide install — so ownership alone would hide it from every
 // human who could act on it. Membership is the same trust boundary
 // AgentsVisibleTo already draws for driving an org's boxes.
+//
+// Ordered by id for the reason InstallationsForAccount is.
 func (s *Store) InstallationsVisibleTo(accountID string) ([]Installation, error) {
 	return s.installations(
 		`SELECT installation_id, target_type, target_login FROM github_installations
 		  WHERE account_id = $1
 		     OR account_id IN (SELECT org_id FROM org_members WHERE account_id = $2)
-		  ORDER BY created_at DESC, id DESC`, accountID, accountID)
+		  ORDER BY id DESC`, accountID, accountID)
 }
 
 // InstallationVisibleTo reports whether accountID may use installationID. It is

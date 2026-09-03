@@ -1,0 +1,98 @@
+name: Bug report
+description: Something in piperd, the piper CLI, or piper-relay isn't working
+title: "[area] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Two things before you start:
+
+        - **Replace `[area]` in the title** with the tag matching the dropdown below — e.g. `[cli] deploy hangs on a private repo`.
+        - **Suspected security issue?** Don't file it here — [report it privately](https://github.com/piperbox/piper/security/advisories/new). See [SECURITY.md](https://github.com/piperbox/piper/blob/main/SECURITY.md).
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which surface does this touch? Use the same tag at the start of the title.
+      options:
+        - "[agent] piperd daemon: control-plane API, orchestration"
+        - "[cli] the piper CLI"
+        - "[deploy] build -> run -> health -> route -> retire flow"
+        - "[runtime] Docker build/run driver"
+        - "[proxy] Caddy routing, TLS"
+        - "[store] SQLite persistence"
+        - "[relay] piper-relay + outbound tunnel"
+        - "[repo] governance: CI, branch protection, tooling"
+        - "[docs] docs, design, README"
+        - "not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observable failure. Paste the real error text rather than paraphrasing it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. piper create myapp
+        2. git push piper main
+        3. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `piper version`. If the agent is the problem, include its version too.
+      placeholder: "0.18.0"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      description: Where piperd runs — that's usually the box, not your laptop.
+      placeholder: "Raspberry Pi OS 12, linux/arm64"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you installed it
+      options:
+        - install.sh
+        - Homebrew
+        - apt / .deb
+        - built from source
+        - container image
+        - other / not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: e.g. `journalctl -u piperd -n 100`, or `piper status <app>`. Scrub tokens and secrets first.
+      render: shell
+    validations:
+      required: false
