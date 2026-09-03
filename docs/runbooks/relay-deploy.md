@@ -399,22 +399,19 @@ Relay before agents, as always; nothing on the boxes changes.
    ```sh
    cd /opt/piper-relay && sudo docker compose up -d postgres && sudo docker compose ps
    ```
-3. **Rehearse the copier** against a copy before touching the live file:
-   `scp` `relay.db` to your workstation, open a forward with
-   `ssh -L 5432:127.0.0.1:5432 <box>`, run
-   `go run ./cmd/relay-sqlite-to-pg -sqlite relay.db -pg postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay`,
-   and check the per-table counts it prints. Then
-   `psql … -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'` so the real
-   run starts empty (the relay recreates the tables on start).
-4. Stop and disable the unit, take the final copy, run the copier for real:
+3. Bring the data across, if there is any to bring. A relay already on a host
+   Postgres moves with `pg_dump | psql` into the container's database. A relay
+   still on SQLite (v0.18.0 or older) starts empty: the one-off `relay.db`
+   copier existed only for the hosted relay's own cutover and was deleted
+   afterwards (#516), so per the pre-1.x policy its agents re-enroll.
+4. Stop and disable the unit:
 
    ```sh
    sudo systemctl disable --now piper-relay
-   sudo cp -a /var/lib/private/piper-relay/relay.db /var/lib/private/piper-relay/relay.db.pre-postgres.bak
    ```
 
-   Keep the old binary and that `.bak` together as the rollback pair — the
-   old binary needs the old file.
+   Keep the old binary — and `relay.db`, if it was still on SQLite — as the
+   rollback pair; the old binary needs its old store.
 5. Start the relay and verify:
 
    ```sh
@@ -422,7 +419,7 @@ Relay before agents, as always; nothing on the boxes changes.
    ```
 
    Expect the usual startup lines, every agent re-registering within a few
-   seconds (their tokens were copied), `/v1/github/status` still showing the
+   seconds (if their tokens came across), `/v1/github/status` still showing the
    linked App, and the app URLs serving. Check `ss -ltnp` shows the container
    holding `:443`, `:80`, `:7000`, `:8080`, and `127.0.0.1:9090`.
 6. Remove the certbot deploy hook that restarted `piper-relay.service`.
