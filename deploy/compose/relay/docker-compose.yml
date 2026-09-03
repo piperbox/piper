@@ -1,0 +1,50 @@
+# piper-relay + Postgres on one host that owns a public IP (the hosted relay's
+# Hetzner layout). Documented in docs/runbooks/relay-deploy.md, "Single host
+# with compose". For a bridge-networked / orchestrated deployment see the
+# generic example in that runbook's "Run as a container" section instead.
+#
+# Why host networking: the relay's :443/:80 are SNI passthrough and :7000 is a
+# raw TCP protocol, so it must see real client IPs (no PROXY protocol needed
+# on a direct public IP); its ops endpoint stays on the host's loopback where
+# `tailscale serve` already exposes it; and a colocated piperd is reachable on
+# 127.0.0.1. Host networking has no compose service DNS, so Postgres publishes
+# on the host loopback and the DSN in /etc/piper-relay.env says 127.0.0.1.
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: piper_relay
+      POSTGRES_DB: piper_relay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env next to this file}
+    ports:
+      - "127.0.0.1:5432:5432"   # loopback only: the relay, psql, and the cutover copier (via ssh -L)
+    volumes:
+      - relay_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piper_relay -d piper_relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  relay:
+    image: ghcr.io/piperbox/piper-relay:${PIPER_RELAY_VERSION:?set PIPER_RELAY_VERSION in .env (e.g. 0.19.0-rc.1)}
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Carries PIPER_RELAY_DB_URL (postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay),
+    # the GitHub App vars, PIPER_RELAY_TLS_CERT/KEY and PIPER_RELAY_GITHUB_APP_KEY
+    # pointing at the in-container paths mounted below.
+    env_file: /etc/piper-relay.env
+    volumes:
+      # Whole tree, not live/<domain>: certbot's live/ entries are symlinks into
+      # ../../archive/, which dangle if only live/ is mounted. The relay re-reads
+      # the pair on every handshake (#497), so renewals need no restart.
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      # 0600, root-owned; the relay refuses a world-readable key.
+      - /etc/piper-relay/github-app.pem:/etc/piper-relay/github-app.pem:ro
+
+volumes:
+  relay_pg:

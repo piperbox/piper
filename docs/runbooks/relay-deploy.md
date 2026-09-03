@@ -330,3 +330,110 @@ volumes:
   front, never an HTTP(S)-terminating one. Behind any L4 proxy the relay sees
   the proxy's IP ([#485](https://github.com/piperbox/piper/issues/485)); with
   a direct public IP (host networking) nothing is lost.
+
+## Single host with compose
+
+The generic compose above is written for bridge networking. A relay that owns a
+public IP — the hosted relay's Hetzner layout, with certbot on the host and a
+colocated `piperd` — wants four things done differently. The ready-made file is
+[`deploy/compose/relay/docker-compose.yml`](../../deploy/compose/relay/docker-compose.yml);
+this section explains it and walks the cutover from the systemd unit.
+
+**What differs from the generic example, and why**
+
+1. **`network_mode: host` for the relay.** `:443`/`:80` are SNI passthrough
+   and `:7000` is a raw TCP protocol, so the relay must see real client IPs —
+   host networking gives that without PROXY protocol. It also keeps the ops
+   endpoint on the host's `127.0.0.1:9090`, where `tailscale serve` already
+   fronts it, and keeps the passthrough dial to a colocated `piperd` on
+   `127.0.0.1` working. Host networking has no compose service DNS, so
+   Postgres publishes `127.0.0.1:5432` and `PIPER_RELAY_DB_URL` uses
+   `127.0.0.1`, not `postgres`. That same loopback port is what `psql`, the
+   nightly dump, and the cutover copier (through `ssh -L`) use.
+2. **Mount `/etc/letsencrypt` whole.** certbot's `live/<domain>/` entries are
+   symlinks into `../../archive/`; mounting only `live/` leaves them dangling
+   inside the container. Point `PIPER_RELAY_TLS_CERT`/`KEY` at the `live/`
+   paths. The relay re-reads the pair on every handshake, so the certbot
+   deploy hook that restarted the systemd unit is no longer needed — remove
+   it (or make it `docker compose restart relay`); do not leave it aimed at a
+   unit that no longer exists.
+3. **The GitHub App key is a plain read-only bind mount**, not a systemd
+   `LoadCredential`. Keep it `0600` root-owned — the relay only refuses
+   world-readable bits, and distroless runs as root — and set
+   `PIPER_RELAY_GITHUB_APP_KEY` to the in-container path.
+4. **Postgres durability is yours.** Pin `postgres:17` (a major bump does not
+   upgrade the data directory by itself) and add a nightly dump the box's
+   existing backups cover:
+
+   ```sh
+   # /etc/cron.d/piper-relay-pgdump
+   15 3 * * * root docker compose -f /opt/piper-relay/docker-compose.yml exec -T postgres \
+     pg_dump -U piper_relay piper_relay | gzip > /var/backups/piper-relay-$(date +\%F).sql.gz
+   ```
+
+`PIPER_RELAY_DATA_DIR` needs no mount: the image declares it as a volume and
+the relay only creates it. Everything it used to hold is addressed by the env
+vars above.
+
+**Cutover from the systemd unit**
+
+Relay before agents, as always; nothing on the boxes changes.
+
+1. Install the files:
+
+   ```sh
+   sudo mkdir -p /opt/piper-relay
+   sudo cp deploy/compose/relay/docker-compose.yml /opt/piper-relay/
+   sudo cp deploy/compose/relay/.env.example /opt/piper-relay/.env   # then edit both values
+   sudo chmod 600 /opt/piper-relay/.env
+   ```
+
+   In `/etc/piper-relay.env`, add
+   `PIPER_RELAY_DB_URL=postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay`
+   and repoint `PIPER_RELAY_TLS_CERT`, `PIPER_RELAY_TLS_KEY`, and
+   `PIPER_RELAY_GITHUB_APP_KEY` from their `/run/credentials/…` paths to
+   `/etc/letsencrypt/live/<domain>/fullchain.pem`, `…/privkey.pem`, and
+   `/etc/piper-relay/github-app.pem`.
+2. Start only Postgres and wait for it to report healthy:
+
+   ```sh
+   cd /opt/piper-relay && sudo docker compose up -d postgres && sudo docker compose ps
+   ```
+3. **Rehearse the copier** against a copy before touching the live file:
+   `scp` `relay.db` to your workstation, open a forward with
+   `ssh -L 5432:127.0.0.1:5432 <box>`, run
+   `go run ./cmd/relay-sqlite-to-pg -sqlite relay.db -postgres postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay`,
+   and check the per-table counts it prints. Then
+   `psql … -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'` so the real
+   run starts empty (the relay recreates the tables on start).
+4. Stop and disable the unit, take the final copy, run the copier for real:
+
+   ```sh
+   sudo systemctl disable --now piper-relay
+   sudo cp -a /var/lib/private/piper-relay/relay.db /var/lib/private/piper-relay/relay.db.pre-postgres.bak
+   ```
+
+   Keep the old binary and that `.bak` together as the rollback pair — the
+   old binary needs the old file.
+5. Start the relay and verify:
+
+   ```sh
+   sudo docker compose up -d relay && sudo docker compose logs -f relay
+   ```
+
+   Expect the usual startup lines, every agent re-registering within a few
+   seconds (their tokens were copied), `/v1/github/status` still showing the
+   linked App, and the app URLs serving. Check `ss -ltnp` shows the container
+   holding `:443`, `:80`, `:7000`, `:8080`, and `127.0.0.1:9090`.
+6. Remove the certbot deploy hook that restarted `piper-relay.service`.
+
+**Day-to-day afterwards**
+
+- `enroll` / `admin`: `sudo docker compose exec relay piper-relay admin …`.
+- Upgrade: set `PIPER_RELAY_VERSION` in `.env`, then
+  `sudo docker compose pull relay && sudo docker compose up -d relay`. For a
+  schema-change release, drop the named tables first with
+  `sudo docker compose exec postgres psql -U piper_relay piper_relay`.
+- Logs and metrics: unchanged — the ops endpoint is on the same loopback port.
+- Still exactly one replica, for the reasons above; this is a packaging
+  change, not a scaling one.
