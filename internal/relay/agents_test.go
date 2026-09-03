@@ -12,13 +12,13 @@ func bindAndPark(t *testing.T, st *Store, agentName string) {
 	t.Helper()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := st.db.Exec(
-		`INSERT INTO repo_bindings(agent_name, app, repo, branch, created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO repo_bindings(agent_name, app, repo, branch, created_at) VALUES($1,$2,$3,$4,$5)`,
 		agentName, "blog", "alice/blog", "main", now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.db.Exec(
 		`INSERT INTO pending_events(agent_name, app, ref, event, payload, created_at, attempts, next_try_at)
-		 VALUES(?,?,?,?,?,?,?,?)`,
+		 VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
 		agentName, "blog", "main", "push", []byte("{}"), now, 1, now); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestDeleteAgentClearsAgentAndItsChildRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	var name string
-	if err := st.db.QueryRow(`SELECT name FROM agents WHERE base_domain=?`, en.BaseDomain).Scan(&name); err != nil {
+	if err := st.db.QueryRow(`SELECT name FROM agents WHERE base_domain=$1`, en.BaseDomain).Scan(&name); err != nil {
 		t.Fatal(err)
 	}
 	bindAndPark(t, st, name)
@@ -54,13 +54,13 @@ func TestDeleteAgentClearsAgentAndItsChildRows(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM agents WHERE base_domain=?`, en.BaseDomain); n != 0 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM agents WHERE base_domain=$1`, en.BaseDomain); n != 0 {
 		t.Errorf("agents rows = %d, want 0", n)
 	}
-	if n := countRows(t, st, `SELECT COUNT(*) FROM repo_bindings WHERE agent_name=?`, name); n != 0 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM repo_bindings WHERE agent_name=$1`, name); n != 0 {
 		t.Errorf("repo_bindings rows = %d, want 0", n)
 	}
-	if n := countRows(t, st, `SELECT COUNT(*) FROM pending_events WHERE agent_name=?`, name); n != 0 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM pending_events WHERE agent_name=$1`, name); n != 0 {
 		t.Errorf("pending_events rows = %d, want 0", n)
 	}
 }
@@ -89,7 +89,7 @@ func TestDeleteAgentLeavesTheAccountsOtherAgentAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	var keeperName string
-	if err := st.db.QueryRow(`SELECT name FROM agents WHERE base_domain=?`, keeper.BaseDomain).Scan(&keeperName); err != nil {
+	if err := st.db.QueryRow(`SELECT name FROM agents WHERE base_domain=$1`, keeper.BaseDomain).Scan(&keeperName); err != nil {
 		t.Fatal(err)
 	}
 	bindAndPark(t, st, keeperName)
@@ -98,13 +98,13 @@ func TestDeleteAgentLeavesTheAccountsOtherAgentAlone(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM agents WHERE base_domain=?`, keeper.BaseDomain); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM agents WHERE base_domain=$1`, keeper.BaseDomain); n != 1 {
 		t.Errorf("keeper agent rows = %d, want 1", n)
 	}
-	if n := countRows(t, st, `SELECT COUNT(*) FROM repo_bindings WHERE agent_name=?`, keeperName); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM repo_bindings WHERE agent_name=$1`, keeperName); n != 1 {
 		t.Errorf("keeper repo_bindings = %d, want 1", n)
 	}
-	if n := countRows(t, st, `SELECT COUNT(*) FROM pending_events WHERE agent_name=?`, keeperName); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM pending_events WHERE agent_name=$1`, keeperName); n != 1 {
 		t.Errorf("keeper pending_events = %d, want 1", n)
 	}
 }
@@ -135,7 +135,7 @@ func TestDeleteAgentReclaimsItsHostnames(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 0 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=$1`, acc.ID); n != 0 {
 		t.Errorf("hostnames rows = %d, want 0 (removal must reclaim app slots)", n)
 	}
 }
@@ -170,11 +170,11 @@ func TestDeleteAgentClearsItsCustomDomains(t *testing.T) {
 		t.Fatalf("DeleteAgent: %v", err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM custom_domains WHERE agent_base=?`, doomed.BaseDomain); n != 0 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM custom_domains WHERE agent_base=$1`, doomed.BaseDomain); n != 0 {
 		t.Errorf("removed box left %d custom_domains rows, want 0", n)
 	}
 	// The surviving box keeps its domain.
-	if n := countRows(t, st, `SELECT COUNT(*) FROM custom_domains WHERE agent_base=?`, keeper.BaseDomain); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM custom_domains WHERE agent_base=$1`, keeper.BaseDomain); n != 1 {
 		t.Errorf("keeper custom_domains = %d, want 1", n)
 	}
 	// And the freed domain can be claimed again — the squat is gone.

@@ -446,7 +446,7 @@ func TestControlProxyRemoveAgent(t *testing.T) {
 		t.Fatalf("remove: %d, want 204 (body %q)", rr.Code, rr.Body.String())
 	}
 	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=$1`, base).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {
@@ -472,7 +472,7 @@ func TestControlProxyRemoveConnectedAgentIsRefused(t *testing.T) {
 		t.Fatalf("remove connected: %d, want 409", rr.Code)
 	}
 	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=$1`, base).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -489,7 +489,7 @@ func TestControlProxyRemoveForeignAgentIs404(t *testing.T) {
 		t.Fatalf("cross-tenant remove: %d, want 404", rr.Code)
 	}
 	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=$1`, base).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -507,7 +507,7 @@ func TestControlProxyRemoveOrgBoxMemberForbidden(t *testing.T) {
 		t.Fatalf("member remove: %d, want 403 (body %q)", rr.Code, rr.Body.String())
 	}
 	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=$1`, base).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
@@ -524,7 +524,7 @@ func TestControlProxyRemoveOrgBoxOwnerSucceeds(t *testing.T) {
 		t.Fatalf("owner remove: %d, want 204 (body %q)", rr.Code, rr.Body.String())
 	}
 	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=?`, base).Scan(&n); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE base_domain=$1`, base).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 0 {

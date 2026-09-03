@@ -193,7 +193,7 @@ func pendingRowID(t *testing.T, st *Store, agentName, app, ref string) int64 {
 	t.Helper()
 	var id int64
 	if err := st.db.QueryRow(
-		`SELECT rowid FROM pending_events WHERE agent_name=? AND app=? AND ref=?`,
+		`SELECT id FROM pending_events WHERE agent_name=$1 AND app=$2 AND ref=$3`,
 		agentName, app, ref).Scan(&id); err != nil {
 		t.Fatalf("query rowid: %v", err)
 	}
@@ -499,7 +499,7 @@ func TestDispatchAfterShutdownStillRuns(t *testing.T) {
 // setNextTryForTest makes every parked event for agentName due at t, standing
 // in for the passage of a real backoff period.
 func (s *Store) setNextTryForTest(agentName string, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE pending_events SET next_try_at=? WHERE agent_name=?`,
+	_, err := s.db.Exec(`UPDATE pending_events SET next_try_at=$1 WHERE agent_name=$2`,
 		at.UTC().Format(pendingTimeLayout), agentName)
 	return err
 }
@@ -507,7 +507,7 @@ func (s *Store) setNextTryForTest(agentName string, at time.Time) error {
 // setCreatedAtForTest ages one parked slot, standing in for the passage of the
 // TTL.
 func (s *Store) setCreatedAtForTest(agentName, ref string, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE pending_events SET created_at=? WHERE agent_name=? AND ref=?`,
+	_, err := s.db.Exec(`UPDATE pending_events SET created_at=$1 WHERE agent_name=$2 AND ref=$3`,
 		at.UTC().Format(pendingTimeLayout), agentName, ref)
 	return err
 }

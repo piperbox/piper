@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/piperbox/piper/internal/relay/relaytest"
 	"github.com/piperbox/piper/internal/tunnel"
 )
 
@@ -17,7 +18,7 @@ import (
 // goroutine) runs, so it does not race the goroutines that read it.
 func TestMain(m *testing.M) {
 	disabledPollInterval = 20 * time.Millisecond
-	os.Exit(m.Run())
+	os.Exit(relaytest.Main(m))
 }
 
 // waitCond polls pred until it returns true or timeout elapses.
@@ -140,7 +141,7 @@ func TestDeletedAgentWatchdogEvictsLiveSession(t *testing.T) {
 	})
 
 	// Delete the agent row mid-session: AgentDisabled now reads ErrUnknownAccount.
-	if _, err := st.db.Exec(`DELETE FROM agents WHERE base_domain=?`, en.BaseDomain); err != nil {
+	if _, err := st.db.Exec(`DELETE FROM agents WHERE base_domain=$1`, en.BaseDomain); err != nil {
 		t.Fatal(err)
 	}
 

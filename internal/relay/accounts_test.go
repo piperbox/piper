@@ -2,14 +2,15 @@ package relay
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+	st, err := Open(relaytest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +284,7 @@ func TestEnrollForAccountUpsertsByBoxID(t *testing.T) {
 	}
 	// One row, one quota slot.
 	var count int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id=?`, acc.ID).Scan(&count); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id=$1`, acc.ID).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {

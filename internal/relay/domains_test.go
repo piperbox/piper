@@ -2,18 +2,13 @@ package relay
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 )
 
 func openDomainsStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := openTestStore(t)
 	if _, err := st.Enroll("alice", "alice.example.com"); err != nil {
 		t.Fatal(err)
 	}

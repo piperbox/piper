@@ -1,4 +1,14 @@
+-- Postgres DDL, applied on every start with IF NOT EXISTS. This file is
+-- always the complete current shape: a schema change edits it directly
+-- (pre-1.x policy, no migrations). Timestamps are TEXT on purpose — RFC3339Nano
+-- (or the fixed-width pendingTimeLayout) compared as strings, as the Go code
+-- has always done.
+--
+-- id BIGSERIAL columns stand in for SQLite's rowid where the code orders or
+-- dedupes by insertion order; they are never exposed.
+
 CREATE TABLE IF NOT EXISTS agents (
+    id             BIGSERIAL,
     name           TEXT PRIMARY KEY,
     token_hash     TEXT NOT NULL UNIQUE,
     base_domain    TEXT NOT NULL,
@@ -18,7 +28,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS agents_base_domain_unique
 
 CREATE UNIQUE INDEX IF NOT EXISTS agents_account_box_unique
     ON agents(account_id, box_id)
-    WHERE box_id IS NOT NULL AND box_id != '';
+    WHERE box_id IS NOT NULL AND box_id <> '';
 
 -- username is unique per type, not globally: users and orgs hold separate
 -- namespaces, so an org can never take a GitHub login out from under the user
@@ -30,7 +40,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     github_login TEXT,
     username     TEXT NOT NULL,
     type         TEXT NOT NULL DEFAULT 'user',
-    disabled     INTEGER NOT NULL DEFAULT 0,
+    disabled     BOOLEAN NOT NULL DEFAULT false,
     created_at   TEXT NOT NULL,
     UNIQUE(username, type)
 );
@@ -56,6 +66,7 @@ CREATE TABLE IF NOT EXISTS hostnames (
 );
 
 CREATE TABLE IF NOT EXISTS org_members (
+    id         BIGSERIAL,
     org_id     TEXT NOT NULL REFERENCES accounts(id),
     account_id TEXT NOT NULL REFERENCES accounts(id),
     role       TEXT NOT NULL,
@@ -64,6 +75,7 @@ CREATE TABLE IF NOT EXISTS org_members (
 );
 
 CREATE TABLE IF NOT EXISTS org_invites (
+    id           BIGSERIAL,
     org_id       TEXT NOT NULL REFERENCES accounts(id),
     github_login TEXT NOT NULL,
     invited_by   TEXT NOT NULL REFERENCES accounts(id),
@@ -81,6 +93,7 @@ CREATE TABLE IF NOT EXISTS custom_domains (
 CREATE INDEX IF NOT EXISTS custom_domains_agent_base ON custom_domains(agent_base);
 
 CREATE TABLE IF NOT EXISTS github_installations (
+    id              BIGSERIAL,
     installation_id TEXT PRIMARY KEY,
     account_id      TEXT NOT NULL REFERENCES accounts(id),
     target_type     TEXT NOT NULL,
@@ -108,11 +121,12 @@ CREATE INDEX IF NOT EXISTS repo_bindings_repo ON repo_bindings(repo);
 -- instead of being retried every sweep forever. Both use the fixed-width
 -- pendingTimeLayout, so string comparison is chronological.
 CREATE TABLE IF NOT EXISTS pending_events (
+    id          BIGSERIAL,
     agent_name  TEXT NOT NULL REFERENCES agents(name),
     app         TEXT NOT NULL,
     ref         TEXT NOT NULL,
     event       TEXT NOT NULL,
-    payload     BLOB NOT NULL,
+    payload     BYTEA NOT NULL,
     created_at  TEXT NOT NULL,
     attempts    INTEGER NOT NULL,
     next_try_at TEXT NOT NULL,

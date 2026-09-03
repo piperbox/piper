@@ -186,7 +186,7 @@ func addMember(t *testing.T, st *Store, orgID, accountID, role string) {
 	t.Helper()
 	if _, err := st.db.Exec(
 		`INSERT INTO org_members(org_id, account_id, role, created_at)
-		 VALUES(?,?,?,'2026-01-01T00:00:00Z')`, orgID, accountID, role); err != nil {
+		 VALUES($1,$2,$3,'2026-01-01T00:00:00Z')`, orgID, accountID, role); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -428,7 +428,7 @@ func TestDeleteOrgRefusedWhileAgentsExist(t *testing.T) {
 	}
 
 	// Clear the agent, then deletion sweeps members, invites, and the slug.
-	if _, err := st.db.Exec(`DELETE FROM agents WHERE account_id=?`, org.ID); err != nil {
+	if _, err := st.db.Exec(`DELETE FROM agents WHERE account_id=$1`, org.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.DeleteOrg(org.ID); err != nil {
@@ -451,7 +451,7 @@ func TestDeleteOrgRefusesNonOrgAccounts(t *testing.T) {
 	alice, _ := st.UpsertAccount("gh-alice", "alice")
 
 	if _, err := st.db.Exec(
-		`INSERT INTO hostnames(hostname, agent_name, account_id, app, created_at) VALUES(?,?,?,?,?)`,
+		`INSERT INTO hostnames(hostname, agent_name, account_id, app, created_at) VALUES($1,$2,$3,$4,$5)`,
 		"alice-app.piper.localhost", "alice-box", alice.ID, "app",
 		time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
@@ -465,7 +465,7 @@ func TestDeleteOrgRefusesNonOrgAccounts(t *testing.T) {
 	}
 
 	var n int
-	if err := st.db.QueryRow(`SELECT COUNT(*) FROM hostnames WHERE account_id=?`, alice.ID).Scan(&n); err != nil {
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM hostnames WHERE account_id=$1`, alice.ID).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
