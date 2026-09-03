@@ -6,11 +6,14 @@ import (
 	"testing"
 
 	"github.com/piperbox/piper/internal/relay"
+	"github.com/piperbox/piper/internal/relay/relaytest"
 	"github.com/piperbox/piper/internal/version"
 )
 
+func TestMain(m *testing.M) { os.Exit(relaytest.Main(m)) }
+
 func TestRunAdminDisable(t *testing.T) {
-	st, err := relay.Open(filepath.Join(t.TempDir(), "relay.db"))
+	st, err := relay.Open(relaytest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +34,7 @@ func TestRunAdminDisable(t *testing.T) {
 }
 
 func TestRunAdminDisableOrg(t *testing.T) {
-	st, err := relay.Open(filepath.Join(t.TempDir(), "relay.db"))
+	st, err := relay.Open(relaytest.DSN(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +58,7 @@ func TestRunAdminDisableOrg(t *testing.T) {
 }
 
 func TestRunAdminUsage(t *testing.T) {
-	st, _ := relay.Open(filepath.Join(t.TempDir(), "relay.db"))
+	st, _ := relay.Open(relaytest.DSN(t))
 	defer st.Close()
 	if err := runAdmin(st, []string{"disable"}); err == nil {
 		t.Fatal("runAdmin with no username succeeded, want usage error")
