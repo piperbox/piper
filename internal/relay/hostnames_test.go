@@ -257,7 +257,7 @@ func TestReconcileHostnamesPrunesAppsTheBoxNoLongerHas(t *testing.T) {
 	if len(live) != 1 || live[0].Hostname != kept {
 		t.Fatalf("live = %v, want [%s]", live, kept)
 	}
-	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=$1`, acc.ID); n != 1 {
 		t.Fatalf("rows = %d, want 1 (shop's row must be pruned)", n)
 	}
 }
@@ -336,7 +336,7 @@ func TestReconcileHostnamesLeavesOtherBoxesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=$1`, acc.ID); n != 1 {
 		t.Fatalf("rows = %d, want box B's row untouched", n)
 	}
 }
