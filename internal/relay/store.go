@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 //go:embed schema.sql
@@ -68,15 +68,20 @@ func (s *Store) maxAgentsOrDefault() int {
 	return s.maxAgents
 }
 
-func Open(path string) (*Store, error) {
-	// busy_timeout makes a second writer (e.g. an overlapping control API
-	// request) wait for the lock instead of failing immediately with
-	// SQLITE_BUSY. _txlock=immediate serializes write transactions from the
-	// start, closing COUNT-then-INSERT races (e.g. EnrollForAccount cap check).
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_txlock=immediate")
+// Open connects to the Postgres database at dsn (a postgres:// URL) and
+// applies schema.sql. Several relay processes may share one database; the
+// store relies on row locks, not on being the only writer.
+func Open(dsn string) (*Store, error) {
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, err
 	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("connect: %w", err)
+	}
+	// No arguments ⇒ pgx uses the simple protocol, which accepts the
+	// multi-statement schema in one round trip.
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
@@ -100,7 +105,7 @@ func (s *Store) Enroll(name, baseDomain string) (string, error) {
 	}
 	tok := hex.EncodeToString(raw)
 	_, err := s.db.Exec(
-		`INSERT INTO agents(name, token_hash, base_domain, created_at) VALUES(?,?,?,?)`,
+		`INSERT INTO agents(name, token_hash, base_domain, created_at) VALUES($1,$2,$3,$4)`,
 		name, hashToken(tok), baseDomain, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return "", err
@@ -112,11 +117,11 @@ func (s *Store) Enroll(name, baseDomain string) (string, error) {
 // whose owning account has been disabled is rejected as ErrBadToken.
 func (s *Store) Authenticate(token string) (Agent, error) {
 	var ag Agent
-	var disabled sql.NullInt64
+	var disabled sql.NullBool
 	err := s.db.QueryRow(
 		`SELECT ag.name, ag.base_domain, acc.disabled
 		   FROM agents ag LEFT JOIN accounts acc ON acc.id = ag.account_id
-		  WHERE ag.token_hash = ?`, hashToken(token)).
+		  WHERE ag.token_hash = $1`, hashToken(token)).
 		Scan(&ag.Name, &ag.BaseDomain, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Agent{}, ErrBadToken
@@ -124,7 +129,7 @@ func (s *Store) Authenticate(token string) (Agent, error) {
 	if err != nil {
 		return Agent{}, err
 	}
-	if disabled.Valid && disabled.Int64 != 0 {
+	if disabled.Valid && disabled.Bool {
 		return Agent{}, ErrBadToken
 	}
 	return ag, nil
@@ -134,7 +139,7 @@ func (s *Store) Authenticate(token string) (Agent, error) {
 // this enrollment. Plaintext by necessity: the relay must present it verbatim
 // on forwarded control requests (see the control-stream routing design).
 func (s *Store) SetControlToken(baseDomain, token string) error {
-	res, err := s.db.Exec(`UPDATE agents SET control_token=? WHERE base_domain=?`, token, baseDomain)
+	res, err := s.db.Exec(`UPDATE agents SET control_token=$1 WHERE base_domain=$2`, token, baseDomain)
 	if err != nil {
 		return err
 	}
@@ -148,7 +153,7 @@ func (s *Store) SetControlToken(baseDomain, token string) error {
 // never provisioned one. Unknown agents are ErrBadToken.
 func (s *Store) ControlToken(baseDomain string) (string, error) {
 	var tok sql.NullString
-	err := s.db.QueryRow(`SELECT control_token FROM agents WHERE base_domain=?`, baseDomain).Scan(&tok)
+	err := s.db.QueryRow(`SELECT control_token FROM agents WHERE base_domain=$1`, baseDomain).Scan(&tok)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrBadToken
 	}
@@ -162,7 +167,7 @@ func (s *Store) ControlToken(baseDomain string) (string, error) {
 // deliveries to agentName with. Unknown agents are ErrBadToken.
 func (s *Store) AgentWebhookSecret(agentName string) (string, error) {
 	var sec sql.NullString
-	err := s.db.QueryRow(`SELECT webhook_secret FROM agents WHERE name=?`, agentName).Scan(&sec)
+	err := s.db.QueryRow(`SELECT webhook_secret FROM agents WHERE name=$1`, agentName).Scan(&sec)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrBadToken
 	}

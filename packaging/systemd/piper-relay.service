@@ -2,6 +2,13 @@
 Description=Piper relay (SNI passthrough and tunnel server)
 After=network-online.target
 Wants=network-online.target
+# Ordering hint for a single-host layout where Postgres runs on the same box;
+# harmless (systemd ignores it) when the unit doesn't exist.
+After=postgresql.service
+# The relay log.Fatals if it can't reach Postgres at startup; never give up
+# restarting a DB that's merely slow to come up (default StartLimitBurst would
+# otherwise leave the unit permanently failed after a handful of tries).
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

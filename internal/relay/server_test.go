@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -20,11 +19,7 @@ import (
 // stand-in) address, the agent base domain, the store, and the router.
 func startTestRelay(t *testing.T, tlsCfg *tls.Config, ctrl http.Handler) (*tunnel.Session, string, string, string, *Store, *Router) {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, _ := st.UpsertAccount("sub-1", "alice")
 	en, _ := st.EnrollForAccount(acc.ID, "")
@@ -404,11 +399,7 @@ func TestDomainLifecycleControlOps(t *testing.T) {
 // expired pending squats; a rival claim over an expired squat overwrites the
 // router mapping in place.
 func TestReconnectRederivesCustomDomains(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	now := time.Now()
 	st.nowFunc = func() time.Time { return now }

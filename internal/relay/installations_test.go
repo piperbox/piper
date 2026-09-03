@@ -198,7 +198,7 @@ func TestInstallationsForAccountReturnsAllNewestFirst(t *testing.T) {
 func stampInstallation(t *testing.T, st *Store, installationID, created string) {
 	t.Helper()
 	res, err := st.db.Exec(
-		`UPDATE github_installations SET created_at=? WHERE installation_id=?`,
+		`UPDATE github_installations SET created_at=$1 WHERE installation_id=$2`,
 		created, installationID)
 	if err != nil {
 		t.Fatalf("stamp %s: %v", installationID, err)

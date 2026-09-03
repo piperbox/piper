@@ -38,21 +38,21 @@ func (s *Store) DeleteAgent(baseDomain string) error {
 	defer tx.Rollback()
 
 	var name string
-	err = tx.QueryRow(`SELECT name FROM agents WHERE base_domain = ?`, baseDomain).Scan(&name)
+	err = tx.QueryRow(`SELECT name FROM agents WHERE base_domain = $1`, baseDomain).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrUnknownAgent
 	}
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM custom_domains WHERE agent_base = ?`, baseDomain); err != nil {
+	if _, err := tx.Exec(`DELETE FROM custom_domains WHERE agent_base = $1`, baseDomain); err != nil {
 		return err
 	}
 	for _, stmt := range []string{
-		`DELETE FROM hostnames WHERE agent_name = ?`,
-		`DELETE FROM pending_events WHERE agent_name = ?`,
-		`DELETE FROM repo_bindings WHERE agent_name = ?`,
-		`DELETE FROM agents WHERE name = ?`,
+		`DELETE FROM hostnames WHERE agent_name = $1`,
+		`DELETE FROM pending_events WHERE agent_name = $1`,
+		`DELETE FROM repo_bindings WHERE agent_name = $1`,
+		`DELETE FROM agents WHERE name = $1`,
 	} {
 		if _, err := tx.Exec(stmt, name); err != nil {
 			return err

@@ -2,7 +2,6 @@ package relay
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,11 +10,7 @@ import (
 
 func newAccountAgent(t *testing.T) (*Store, string) {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	acc, err := st.UpsertAccount("gh-1", "alice")
 	if err != nil {
@@ -262,7 +257,7 @@ func TestReconcileHostnamesPrunesAppsTheBoxNoLongerHas(t *testing.T) {
 	if len(live) != 1 || live[0].Hostname != kept {
 		t.Fatalf("live = %v, want [%s]", live, kept)
 	}
-	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=$1`, acc.ID); n != 1 {
 		t.Fatalf("rows = %d, want 1 (shop's row must be pruned)", n)
 	}
 }
@@ -341,7 +336,7 @@ func TestReconcileHostnamesLeavesOtherBoxesAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=?`, acc.ID); n != 1 {
+	if n := countRows(t, st, `SELECT COUNT(*) FROM hostnames WHERE account_id=$1`, acc.ID); n != 1 {
 		t.Fatalf("rows = %d, want box B's row untouched", n)
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 // TestRelayCustomDomainSelfService proves the free-tier box can self-serve a
@@ -44,9 +46,11 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	t.Cleanup(cancel)
 
 	relayData := t.TempDir()
+	relayDB := relaytest.DSN(t)
 	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
 	relay.Env = append(os.Environ(),
 		"PIPER_RELAY_DATA_DIR="+relayData,
+		"PIPER_RELAY_DB_URL="+relayDB,
 		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
 		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
 		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
@@ -207,7 +211,7 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	}
 
 	// Coexistence: the shared-domain URL still serves.
-	hostname := terminatedHostname(t, relayData)
+	hostname := terminatedHostname(t, relayDB)
 	d := &tls.Dialer{Config: &tls.Config{ServerName: hostname, InsecureSkipVerify: true}}
 	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
 	if err != nil {
@@ -249,9 +253,11 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	t.Cleanup(cancel)
 
 	relayData := t.TempDir()
+	relayDB := relaytest.DSN(t)
 	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
 	relay.Env = append(os.Environ(),
 		"PIPER_RELAY_DATA_DIR="+relayData,
+		"PIPER_RELAY_DB_URL="+relayDB,
 		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
 		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
 		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
@@ -427,7 +433,7 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	}
 
 	// Coexistence: the shared-domain URL still serves.
-	hostname := terminatedHostname(t, relayData)
+	hostname := terminatedHostname(t, relayDB)
 	d := &tls.Dialer{Config: &tls.Config{ServerName: hostname, InsecureSkipVerify: true}}
 	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
 	if err != nil {

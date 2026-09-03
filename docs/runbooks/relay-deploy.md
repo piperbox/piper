@@ -19,19 +19,22 @@ Linux host with a public IP and systemd; for container platforms see
 | --- | --- |
 | `/usr/local/bin/piper-relay` | the binary |
 | `/etc/systemd/system/piper-relay.service` | the shipped unit (`DynamicUser`, `StateDirectory=piper-relay`) |
-| `/var/lib/piper-relay/relay.db` | **all relay state** — agents, tokens, accounts, domains (SQLite) |
-| `/etc/piper-relay.env` | optional env overrides, read by the unit (`EnvironmentFile=-`) |
+| `/var/lib/piper-relay/` | TLS wildcard pair and (via a credential drop-in) the GitHub App key — no database lives here |
+| `/etc/piper-relay.env` | env overrides read by the unit (`EnvironmentFile=-`); **must** carry `PIPER_RELAY_DB_URL` |
+| Postgres, at `PIPER_RELAY_DB_URL` | **all relay state** — agents, tokens, accounts, orgs, domains, installations, parked webhooks |
 
-The store applies `schema.sql` with `CREATE TABLE IF NOT EXISTS` and there are
-**no migrations** (pre-1.x policy): a release that adds a *table* upgrades in
-place; a release that adds a *column to an existing table* needs a fresh
-`relay.db`. Each release's notes say which case it is — or check yourself:
+The store applies `schema.sql` with `CREATE TABLE IF NOT EXISTS` on every start
+and there are **no migrations** (pre-1.x policy): a release that adds a *table*
+upgrades in place; a release that changes an *existing table* needs that table
+dropped (or the database recreated) before the new binary starts. Each
+release's notes say which case it is — or check yourself:
 
 ```bash
 git diff <old-tag>..<new-tag> -- internal/relay/schema.sql
 ```
 
-New `CREATE TABLE` → in-place. Changed `CREATE TABLE` body → fresh DB.
+New `CREATE TABLE` → in-place. Changed `CREATE TABLE` body → drop that table (see
+[Upgrade across a schema change](#upgrade-across-a-schema-change)).
 
 ---
 
@@ -54,7 +57,31 @@ sudo systemctl daemon-reload
 
 ### 2. Configure
 
-Defaults work for a passthrough-only relay. Anything else goes in
+The relay needs a Postgres database (13 or newer; 17 is what the tests run).
+On a single host the distribution package is the simplest pairing with a
+systemd-run relay:
+
+```bash
+sudo apt install postgresql
+sudo -u postgres psql -c "CREATE ROLE piper_relay LOGIN PASSWORD '<password>'"
+sudo -u postgres psql -c "CREATE DATABASE piper_relay OWNER piper_relay"
+```
+
+Then, **required**, in `/etc/piper-relay.env`:
+
+```bash
+PIPER_RELAY_DB_URL=postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay
+```
+
+The relay creates its tables on first start. Any `admin` / `enroll` invocation
+needs the same variable — the transient-unit commands below pass it with
+`--setenv`.
+
+The shipped systemd unit orders itself after `postgresql.service` and retries
+indefinitely (no start-limit) if the database isn't reachable yet, so a slow
+Postgres on boot doesn't leave the relay permanently failed.
+
+Defaults work for a passthrough-only relay otherwise. Anything else goes in
 `/etc/piper-relay.env`:
 
 ```bash
@@ -146,26 +173,43 @@ is reinstall + restart.
 ## Upgrade across a schema change
 
 Example: v0.16.0 added `agents.box_id` — a column on an existing table, so an
-old `relay.db` will not gain it and the new binary's queries against it fail.
+old database will not gain it and the new binary's queries against it fail.
 
 **Order matters: relay first, then agents.** The agent side (one-command login,
 daemon-owned enrollment) expects the new relay's enroll semantics; upgrading
 agents against an old relay leaves them creating duplicate rows instead of
 upserting.
 
-This resets **all** relay state — every agent row, token, account link, and
-custom domain. Boxes re-enroll afterwards; that is the designed recovery path,
-not an accident to engineer around.
+Path (b) below resets **all** relay state — every agent row, token, account
+link, and custom domain — and boxes re-enroll afterwards; that is the designed
+recovery path, not an accident to engineer around, and the rest of this
+section describes recovering from it. Path (a) resets nothing except the
+dropped table(s): for the self-healing tables it names, the data it holds
+comes back on its own once boxes reconnect, so there's no broader recovery to
+walk through.
 
 ```bash
 sudo systemctl stop piper-relay
 sudo cp /usr/local/bin/piper-relay /usr/local/bin/piper-relay.prev
-# install the new binary as in the same-schema upgrade, then:
-sudo mv /var/lib/piper-relay/relay.db "/var/lib/piper-relay/relay.db.pre-$(date +%Y%m%d)"
+sudo -u postgres pg_dump piper_relay > "relay-$(date +%Y%m%d).sql"   # rollback point
+# install the new binary as in the same-schema upgrade, then EITHER
+# (a) drop only the changed table(s) — the release notes name them:
+sudo -u postgres psql piper_relay -c "DROP TABLE <table>"
+# OR (b) start from empty, which resets ALL relay state:
+sudo -u postgres psql -c "DROP DATABASE piper_relay" -c "CREATE DATABASE piper_relay OWNER piper_relay"
 sudo systemctl start piper-relay
 ```
 
-The fresh DB materializes on first start. Then, per box:
+Prefer (a) whenever the changed table is one the boxes repopulate on
+reconnect (`hostnames`, `repo_bindings`, `custom_domains`, `pending_events`)
+or one you can rebuild by hand in `psql`; fall back to (b) otherwise.
+
+The bare `DROP TABLE <table>` above works as-is for those four leaf tables.
+With foreign keys enforced, a parent table (`agents`, `accounts`) refuses a
+bare drop; it needs `DROP TABLE <table> CASCADE`, which also drops every
+child row across the schema — at that point prefer path (b) instead.
+
+The fresh tables materialize on first start after (b). Then, per box:
 
 - **Self-service boxes:** upgrade piperd, then `piper login --re-enroll`
   (re-claims the box; base domain is re-minted).
@@ -209,17 +253,17 @@ dots. It is bounded (ten minutes) and exits 0 regardless; enrollment already
 succeeded by the time it runs, so dots are never a hung enrollment.
 
 Rollback within the window: stop the service, restore `piper-relay.prev` and
-the moved `relay.db.pre-*`, start. Old tokens become valid again; boxes that
-already re-enrolled against the new DB must `piper login --re-enroll` once
-more.
+restore the `pg_dump` (`psql piper_relay < relay-<date>.sql` into a freshly
+created database), start. Old tokens become valid again; boxes that already
+re-enrolled against the new DB must `piper login --re-enroll` once more.
 
 ---
 
 ## Ops surface
 
 - Logs: `journalctl -u piper-relay -f`
-- Admin CLI (runs against the same data dir): `piper-relay admin …` via the
-  same transient-unit pattern as `enroll`
+- Admin CLI (runs against the same `PIPER_RELAY_DB_URL`): `piper-relay admin …`
+  via the same transient-unit pattern as `enroll`
 - Optional ops listener on `127.0.0.1:9090` (`PIPER_RELAY_OPS_ADDR`);
   `PIPER_RELAY_METRICS=1` / `PIPER_RELAY_LOGS=1` to enable metrics/log
   endpoints
@@ -233,28 +277,54 @@ Every release also publishes a multi-arch (amd64/arm64) image to
 `:latest` for finals only. It is the same binary on a distroless base; all the
 env vars above apply unchanged.
 
-```bash
-docker run -d --name piper-relay --restart unless-stopped \
-  -v piper-relay-data:/var/lib/piper-relay \
-  --env-file piper-relay.env \
-  -p 443:443 -p 80:80 -p 7000:7000 -p 8080:8080 \
-  ghcr.io/piperbox/piper-relay:<version>
+The standard self-host path is one compose file — relay plus Postgres:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: piper_relay
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: piper_relay
+    volumes:
+      - relay_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piper_relay -d piper_relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  relay:
+    image: ghcr.io/piperbox/piper-relay:<version>
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: piper-relay.env
+    environment:
+      PIPER_RELAY_DB_URL: postgres://piper_relay:change-me@postgres:5432/piper_relay
+    ports: ["443:443", "80:80", "7000:7000", "8080:8080"]
+    volumes:
+      - ./certs:/var/lib/piper-relay:ro
+volumes:
+  relay_pg:
 ```
 
-- **State** is the single SQLite file at `/var/lib/piper-relay/relay.db` — keep
-  it on a volume (a PVC / EBS volume on K8s/ECS).
-- **Certs and the GitHub App key** are file mounts; mount them into the data
-  dir (or anywhere, with the env vars pointing at them). The App key must not
-  be world-readable — the relay refuses it (mount `0600`).
-- **Admin/enroll** run in the same container against the same DB:
-  `docker exec piper-relay piper-relay admin …` (distroless has no shell; the
-  binary is invoked directly).
-- **Upgrade** = pull the new tag, recreate the container, same volume. The
-  schema-change caveats above apply identically — a schema-change release
-  still means moving `relay.db` aside and re-enrolling boxes.
-- **Exactly one replica.** All state is one SQLite file and the tunnel router
-  lives in process memory; two relay instances behind one address split-brain
-  agents and routes. Scale up, never out.
+- **State** lives in Postgres. On K8s/ECS point `PIPER_RELAY_DB_URL` at a
+  managed instance and give the relay no volume at all beyond its certs.
+- **Certs and the GitHub App key** are file mounts, as before; the key must
+  not be world-readable (mount `0600`).
+- **Admin/enroll** run in the relay container against the same database:
+  `docker compose exec relay piper-relay admin …`.
+- **Upgrade** = pull the new tag, recreate the relay container. The
+  schema-change caveats above apply identically — drop the named table(s) in
+  `psql` first for a schema-change release.
+- **Still exactly one replica.** The database is no longer the reason, but two
+  remain: each agent's tunnel lives in one relay process's memory (traffic for
+  it must reach that process), and in-flight logins (device-flow polls,
+  browser-login state) are per-process. Both are tracked follow-ups; until
+  they land, scale up, never out.
 - **Fronting:** custom-domain :443 is SNI passthrough (certs live on the
   boxes) and :7000 is a raw TCP protocol — only an L4/TCP ingress can sit in
   front, never an HTTP(S)-terminating one. Behind any L4 proxy the relay sees

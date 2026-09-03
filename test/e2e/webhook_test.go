@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/piperbox/piper/internal/client"
+	"github.com/piperbox/piper/internal/relay/relaytest"
 	"github.com/piperbox/piper/internal/store"
 )
 
@@ -93,8 +94,9 @@ func TestWebhookPushAndPreview(t *testing.T) {
 
 	// Enroll an agent, capture the token, start the relay (as TestRelayLoopback).
 	relayData := t.TempDir()
+	relayDB := relaytest.DSN(t)
 	enroll := exec.Command(filepath.Join(binDir, "piper-relay"), "enroll", "alice", "--domain", base)
-	enroll.Env = append(os.Environ(), "PIPER_RELAY_DATA_DIR="+relayData)
+	enroll.Env = append(os.Environ(), "PIPER_RELAY_DATA_DIR="+relayData, "PIPER_RELAY_DB_URL="+relayDB)
 	out, err := enroll.CombinedOutput()
 	if err != nil {
 		t.Fatalf("enroll: %v\n%s", err, out)
@@ -104,6 +106,7 @@ func TestWebhookPushAndPreview(t *testing.T) {
 	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
 	relay.Env = append(os.Environ(),
 		"PIPER_RELAY_DATA_DIR="+relayData,
+		"PIPER_RELAY_DB_URL="+relayDB,
 		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
 		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
 		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",

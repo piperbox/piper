@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"log"
 	"net"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -14,11 +13,7 @@ import (
 )
 
 func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 
 	acc, err := st.UpsertAccount("sub-1", "alice")
@@ -144,11 +139,7 @@ func (b *syncLogBuffer) String() string {
 // logged nothing at all, making the ops /logs endpoint useless for diagnosing
 // exactly the case it most needed to explain.
 func TestServeTunnelLogsRejectedHandshake(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 
 	var logged syncLogBuffer

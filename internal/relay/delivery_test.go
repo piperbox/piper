@@ -158,25 +158,15 @@ func TestDrainForReplaysOnlyTheNewestPerRef(t *testing.T) {
 // TestDrainForBailsWhileOffline pins the bail at the top of DrainFor: it must
 // never reach the store while the agent has no live session. DrainEvents is
 // destructive — delete then re-insert — so a drain-and-re-park round trip
-// necessarily changes the parked row's rowid; an unchanged rowid after
-// DrainFor is therefore proof the bail fired and the store was never
-// touched. A decoy row parked for a second agent AFTER base's, and never
-// touched by DrainFor(base), pins the comparison: SQLite assigns a deleted
-// row's replacement the table's current max rowid plus one, so a decoy with
-// a higher rowid than base's original guarantees any drain-and-re-park
-// round trip lands base's row on a strictly larger rowid than before (parking
-// the decoy first would let the reinsert innocuously reclaim base's exact
-// original number and mask the very mutation this test exists to catch).
+// necessarily changes the parked row's id; ids are BIGSERIAL and never reused,
+// so an unchanged id after DrainFor is proof the bail fired and the store was
+// never touched.
 func TestDrainForBailsWhileOffline(t *testing.T) {
 	st := openTestStore(t)
 	_, base := enrolledAgent(t, st, "1001", "alice")
-	_, other := enrolledAgent(t, st, "1002", "bob")
 	router := NewRouter() // no session registered: base is offline
 
 	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{}`)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.ParkEvent(other, "blog", "main", "push", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	before := pendingRowID(t, st, base, "blog", "main")
@@ -193,7 +183,7 @@ func pendingRowID(t *testing.T, st *Store, agentName, app, ref string) int64 {
 	t.Helper()
 	var id int64
 	if err := st.db.QueryRow(
-		`SELECT rowid FROM pending_events WHERE agent_name=? AND app=? AND ref=?`,
+		`SELECT id FROM pending_events WHERE agent_name=$1 AND app=$2 AND ref=$3`,
 		agentName, app, ref).Scan(&id); err != nil {
 		t.Fatalf("query rowid: %v", err)
 	}
@@ -499,7 +489,7 @@ func TestDispatchAfterShutdownStillRuns(t *testing.T) {
 // setNextTryForTest makes every parked event for agentName due at t, standing
 // in for the passage of a real backoff period.
 func (s *Store) setNextTryForTest(agentName string, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE pending_events SET next_try_at=? WHERE agent_name=?`,
+	_, err := s.db.Exec(`UPDATE pending_events SET next_try_at=$1 WHERE agent_name=$2`,
 		at.UTC().Format(pendingTimeLayout), agentName)
 	return err
 }
@@ -507,7 +497,7 @@ func (s *Store) setNextTryForTest(agentName string, at time.Time) error {
 // setCreatedAtForTest ages one parked slot, standing in for the passage of the
 // TTL.
 func (s *Store) setCreatedAtForTest(agentName, ref string, at time.Time) error {
-	_, err := s.db.Exec(`UPDATE pending_events SET created_at=? WHERE agent_name=? AND ref=?`,
+	_, err := s.db.Exec(`UPDATE pending_events SET created_at=$1 WHERE agent_name=$2 AND ref=$3`,
 		at.UTC().Format(pendingTimeLayout), agentName, ref)
 	return err
 }

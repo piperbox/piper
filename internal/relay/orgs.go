@@ -30,7 +30,7 @@ var ErrOrgNameTaken = errors.New("org name taken")
 // users hold their own namespace (#411) — and makes the creator its sole owner.
 func (s *Store) CreateOrg(creatorID, name string) (Org, error) {
 	var ctype string
-	err := s.db.QueryRow(`SELECT type FROM accounts WHERE id=?`, creatorID).Scan(&ctype)
+	err := s.db.QueryRow(`SELECT type FROM accounts WHERE id=$1`, creatorID).Scan(&ctype)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Org{}, ErrBadCredential
 	}
@@ -51,14 +51,14 @@ func (s *Store) CreateOrg(creatorID, name string) (Org, error) {
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`INSERT INTO accounts(id, github_id, github_login, username, type, disabled, created_at)
-		 VALUES(?,NULL,NULL,?,'org',0,?)`, id, slug, now); err != nil {
+		 VALUES($1,NULL,NULL,$2,'org',false,$3)`, id, slug, now); err != nil {
 		if isUniqueViolation(err) {
 			return Org{}, ErrOrgNameTaken
 		}
 		return Org{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO org_members(org_id, account_id, role, created_at) VALUES(?,?,'owner',?)`,
+		`INSERT INTO org_members(org_id, account_id, role, created_at) VALUES($1,$2,'owner',$3)`,
 		id, creatorID, now); err != nil {
 		return Org{}, err
 	}
@@ -73,7 +73,7 @@ func (s *Store) OrgsForAccount(accountID string) ([]Org, error) {
 	rows, err := s.db.Query(
 		`SELECT o.id, o.username, m.role
 		   FROM org_members m JOIN accounts o ON o.id = m.org_id
-		  WHERE m.account_id = ? ORDER BY m.rowid`, accountID)
+		  WHERE m.account_id = $1 ORDER BY m.id`, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -95,8 +95,8 @@ func (s *Store) OrgsForAccount(accountID string) ([]Org, error) {
 func (s *Store) OrgRole(slug, accountID string) (orgID, role string, err error) {
 	err = s.db.QueryRow(
 		`SELECT o.id, m.role
-		   FROM accounts o JOIN org_members m ON m.org_id = o.id AND m.account_id = ?
-		  WHERE o.username = ? AND o.type = 'org'`, accountID, slug).
+		   FROM accounts o JOIN org_members m ON m.org_id = o.id AND m.account_id = $1
+		  WHERE o.username = $2 AND o.type = 'org'`, accountID, slug).
 		Scan(&orgID, &role)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", ErrNoOrg
@@ -125,7 +125,7 @@ func (s *Store) Members(orgID string) ([]Member, error) {
 	rows, err := s.db.Query(
 		`SELECT a.username, m.role
 		   FROM org_members m JOIN accounts a ON a.id = m.account_id
-		  WHERE m.org_id = ? ORDER BY m.rowid`, orgID)
+		  WHERE m.org_id = $1 ORDER BY m.id`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +148,7 @@ func memberForUpdate(tx *sql.Tx, orgID, username string, dropsOwner func(cur str
 	err = tx.QueryRow(
 		`SELECT a.id, m.role
 		   FROM org_members m JOIN accounts a ON a.id = m.account_id
-		  WHERE m.org_id = ? AND a.username = ?`, orgID, username).
+		  WHERE m.org_id = $1 AND a.username = $2`, orgID, username).
 		Scan(&targetID, &cur)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotMember
@@ -159,7 +159,7 @@ func memberForUpdate(tx *sql.Tx, orgID, username string, dropsOwner func(cur str
 	if dropsOwner(cur) {
 		var owners int
 		if err := tx.QueryRow(
-			`SELECT COUNT(*) FROM org_members WHERE org_id = ? AND role = 'owner'`, orgID).
+			`SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND role = 'owner'`, orgID).
 			Scan(&owners); err != nil {
 			return "", err
 		}
@@ -184,7 +184,7 @@ func (s *Store) SetMemberRole(orgID, username, role string) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		`UPDATE org_members SET role=? WHERE org_id=? AND account_id=?`, role, orgID, targetID); err != nil {
+		`UPDATE org_members SET role=$1 WHERE org_id=$2 AND account_id=$3`, role, orgID, targetID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -205,7 +205,7 @@ func (s *Store) RemoveMember(orgID, username string) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		`DELETE FROM org_members WHERE org_id=? AND account_id=?`, orgID, targetID); err != nil {
+		`DELETE FROM org_members WHERE org_id=$1 AND account_id=$2`, orgID, targetID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -227,14 +227,14 @@ func (s *Store) CreateInvite(orgID, githubLogin, inviterID string) error {
 	var n int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM org_members m JOIN accounts a ON a.id = m.account_id
-		  WHERE m.org_id = ? AND lower(a.github_login) = ?`, orgID, login).Scan(&n); err != nil {
+		  WHERE m.org_id = $1 AND lower(a.github_login) = $2`, orgID, login).Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
 		return ErrAlreadyMember
 	}
 	_, err := s.db.Exec(
-		`INSERT INTO org_invites(org_id, github_login, invited_by, created_at) VALUES(?,?,?,?)`,
+		`INSERT INTO org_invites(org_id, github_login, invited_by, created_at) VALUES($1,$2,$3,$4)`,
 		orgID, login, inviterID, time.Now().UTC().Format(time.RFC3339Nano))
 	if isUniqueViolation(err) {
 		return nil // an identical pending invite already exists
@@ -245,7 +245,7 @@ func (s *Store) CreateInvite(orgID, githubLogin, inviterID string) error {
 // OrgInvites lists an org's pending invite logins, oldest first.
 func (s *Store) OrgInvites(orgID string) ([]string, error) {
 	rows, err := s.db.Query(
-		`SELECT github_login FROM org_invites WHERE org_id = ? ORDER BY rowid`, orgID)
+		`SELECT github_login FROM org_invites WHERE org_id = $1 ORDER BY id`, orgID)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +264,7 @@ func (s *Store) OrgInvites(orgID string) ([]string, error) {
 // RevokeInvite withdraws a pending invite. ErrNoInvite if none matches.
 func (s *Store) RevokeInvite(orgID, githubLogin string) error {
 	res, err := s.db.Exec(
-		`DELETE FROM org_invites WHERE org_id = ? AND github_login = ?`,
+		`DELETE FROM org_invites WHERE org_id = $1 AND github_login = $2`,
 		orgID, strings.ToLower(githubLogin))
 	if err != nil {
 		return err
@@ -281,7 +281,7 @@ func (s *Store) RevokeInvite(orgID, githubLogin string) error {
 func (s *Store) InvitesForAccount(accountID string) ([]string, error) {
 	var login sql.NullString
 	if err := s.db.QueryRow(
-		`SELECT github_login FROM accounts WHERE id = ?`, accountID).Scan(&login); err != nil {
+		`SELECT github_login FROM accounts WHERE id = $1`, accountID).Scan(&login); err != nil {
 		return nil, err
 	}
 	if !login.Valid || login.String == "" {
@@ -289,7 +289,7 @@ func (s *Store) InvitesForAccount(accountID string) ([]string, error) {
 	}
 	rows, err := s.db.Query(
 		`SELECT o.username FROM org_invites i JOIN accounts o ON o.id = i.org_id
-		  WHERE i.github_login = ? ORDER BY i.rowid`, strings.ToLower(login.String))
+		  WHERE i.github_login = $1 ORDER BY i.id`, strings.ToLower(login.String))
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +310,7 @@ func (s *Store) InvitesForAccount(accountID string) ([]string, error) {
 // Any miss — unknown org, no stored login, no invite — is ErrNoInvite.
 func takeInvite(tx *sql.Tx, accountID, orgSlug string) (orgID string, err error) {
 	err = tx.QueryRow(
-		`SELECT id FROM accounts WHERE username = ? AND type = 'org'`, orgSlug).Scan(&orgID)
+		`SELECT id FROM accounts WHERE username = $1 AND type = 'org'`, orgSlug).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoInvite
 	}
@@ -319,14 +319,14 @@ func takeInvite(tx *sql.Tx, accountID, orgSlug string) (orgID string, err error)
 	}
 	var login sql.NullString
 	if err := tx.QueryRow(
-		`SELECT github_login FROM accounts WHERE id = ?`, accountID).Scan(&login); err != nil {
+		`SELECT github_login FROM accounts WHERE id = $1`, accountID).Scan(&login); err != nil {
 		return "", err
 	}
 	if !login.Valid || login.String == "" {
 		return "", ErrNoInvite
 	}
 	res, err := tx.Exec(
-		`DELETE FROM org_invites WHERE org_id = ? AND github_login = ?`,
+		`DELETE FROM org_invites WHERE org_id = $1 AND github_login = $2`,
 		orgID, strings.ToLower(login.String))
 	if err != nil {
 		return "", err
@@ -350,7 +350,8 @@ func (s *Store) AcceptInvite(accountID, orgSlug string) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		`INSERT OR IGNORE INTO org_members(org_id, account_id, role, created_at) VALUES(?,?,'member',?)`,
+		`INSERT INTO org_members(org_id, account_id, role, created_at) VALUES($1,$2,'member',$3)
+		 ON CONFLICT (org_id, account_id) DO NOTHING`,
 		orgID, accountID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
@@ -379,7 +380,7 @@ func (s *Store) CanControl(callerID, ownerID string) (bool, error) {
 	}
 	var n int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM org_members WHERE org_id = ? AND account_id = ?`,
+		`SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND account_id = $2`,
 		ownerID, callerID).Scan(&n)
 	return n > 0, err
 }
@@ -395,7 +396,7 @@ func (s *Store) CanManage(callerID, ownerID string) (bool, error) {
 	}
 	var n int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM org_members WHERE org_id = ? AND account_id = ? AND role = 'owner'`,
+		`SELECT COUNT(*) FROM org_members WHERE org_id = $1 AND account_id = $2 AND role = 'owner'`,
 		ownerID, callerID).Scan(&n)
 	return n > 0, err
 }
@@ -413,9 +414,9 @@ func (s *Store) AgentsVisibleTo(accountID string) ([]OwnedAgent, error) {
 	rows, err := s.db.Query(
 		`SELECT ag.base_domain, ag.name, acc.username
 		   FROM agents ag JOIN accounts acc ON acc.id = ag.account_id
-		  WHERE ag.account_id = ?
-		     OR ag.account_id IN (SELECT org_id FROM org_members WHERE account_id = ?)
-		  ORDER BY ag.rowid`, accountID, accountID)
+		  WHERE ag.account_id = $1
+		     OR ag.account_id IN (SELECT org_id FROM org_members WHERE account_id = $2)
+		  ORDER BY ag.id`, accountID, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +437,8 @@ func (s *Store) AgentsVisibleTo(accountID string) ([]OwnedAgent, error) {
 var ErrOrgHasAgents = errors.New("org still owns agents")
 
 // DeleteOrg removes an empty org: its memberships, pending invites, hostname
-// rows, and the account row itself. Refused while the org owns agents.
+// rows, GitHub App installations, and the account row itself. Refused while
+// the org owns agents.
 func (s *Store) DeleteOrg(orgID string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -444,7 +446,7 @@ func (s *Store) DeleteOrg(orgID string) error {
 	}
 	defer tx.Rollback()
 	var otype string
-	err = tx.QueryRow(`SELECT type FROM accounts WHERE id = ?`, orgID).Scan(&otype)
+	err = tx.QueryRow(`SELECT type FROM accounts WHERE id = $1 FOR UPDATE`, orgID).Scan(&otype)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNoOrg
 	}
@@ -455,17 +457,19 @@ func (s *Store) DeleteOrg(orgID string) error {
 		return ErrNoOrg
 	}
 	var agents int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id = ?`, orgID).Scan(&agents); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id = $1`, orgID).Scan(&agents); err != nil {
 		return err
 	}
 	if agents > 0 {
 		return ErrOrgHasAgents
 	}
+	// Every table that REFERENCES accounts(id) for this org, then the row.
 	for _, stmt := range []string{
-		`DELETE FROM org_invites WHERE org_id = ?`,
-		`DELETE FROM org_members WHERE org_id = ?`,
-		`DELETE FROM hostnames WHERE account_id = ?`,
-		`DELETE FROM accounts WHERE id = ? AND type = 'org'`,
+		`DELETE FROM org_invites WHERE org_id = $1`,
+		`DELETE FROM org_members WHERE org_id = $1`,
+		`DELETE FROM hostnames WHERE account_id = $1`,
+		`DELETE FROM github_installations WHERE account_id = $1`,
+		`DELETE FROM accounts WHERE id = $1 AND type = 'org'`,
 	} {
 		if _, err := tx.Exec(stmt, orgID); err != nil {
 			return err

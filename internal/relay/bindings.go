@@ -22,7 +22,7 @@ func normalizeRepo(repo string) string { return strings.ToLower(strings.TrimSpac
 func (s *Store) BindRepo(agentName, app, repo, branch string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO repo_bindings(agent_name, app, repo, branch, created_at)
-		 VALUES(?,?,?,?,?)
+		 VALUES($1,$2,$3,$4,$5)
 		 ON CONFLICT(agent_name, app) DO UPDATE SET
 		     repo = excluded.repo, branch = excluded.branch`,
 		agentName, app, normalizeRepo(repo), branch,
@@ -32,7 +32,7 @@ func (s *Store) BindRepo(agentName, app, repo, branch string) error {
 
 // UnbindRepo removes an app's binding. Removing an absent binding is not an error.
 func (s *Store) UnbindRepo(agentName, app string) error {
-	_, err := s.db.Exec(`DELETE FROM repo_bindings WHERE agent_name=? AND app=?`, agentName, app)
+	_, err := s.db.Exec(`DELETE FROM repo_bindings WHERE agent_name=$1 AND app=$2`, agentName, app)
 	return err
 }
 
@@ -43,7 +43,7 @@ func (s *Store) BindingsForRepo(accountID, repo string) ([]Binding, error) {
 	rows, err := s.db.Query(
 		`SELECT b.agent_name, b.app, b.repo, b.branch
 		   FROM repo_bindings b JOIN agents a ON a.name = b.agent_name
-		  WHERE b.repo = ? AND a.account_id = ?`,
+		  WHERE b.repo = $1 AND a.account_id = $2`,
 		normalizeRepo(repo), accountID)
 	if err != nil {
 		return nil, err
@@ -67,7 +67,7 @@ func (s *Store) BindingsForRepo(accountID, repo string) ([]Binding, error) {
 func (s *Store) AgentBoundToRepo(agentName, repo string) (bool, error) {
 	var n int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM repo_bindings WHERE agent_name=? AND repo=?`,
+		`SELECT COUNT(*) FROM repo_bindings WHERE agent_name=$1 AND repo=$2`,
 		agentName, normalizeRepo(repo)).Scan(&n)
 	return n > 0, err
 }

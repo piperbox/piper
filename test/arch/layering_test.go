@@ -29,17 +29,18 @@ const internalPrefix = "github.com/piperbox/piper/internal/"
 // rather than something that happens by accident.
 var layer = map[string]int{
 	// 0 — leaves. Each owns exactly one concern and depends on no sibling.
-	"caddy":       0,
-	"certs":       0,
-	"config":      0,
-	"enrollapi":   0,
-	"ghjwt":       0,
-	"relayclient": 0,
-	"runtime":     0,
-	"source":      0,
-	"store":       0,
-	"tunnel":      0,
-	"version":     0,
+	"caddy":           0,
+	"certs":           0,
+	"config":          0,
+	"enrollapi":       0,
+	"ghjwt":           0,
+	"relay/relaytest": 0,
+	"relayclient":     0,
+	"runtime":         0,
+	"source":          0,
+	"store":           0,
+	"tunnel":          0,
+	"version":         0,
 
 	// 1 — single-purpose services composed from the leaves.
 	"agent":         1,

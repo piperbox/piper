@@ -64,3 +64,35 @@ func TestOrgForGitHubInstallUnknownOrg(t *testing.T) {
 		t.Fatalf("unknown = %v, want ErrNoOrg", err)
 	}
 }
+
+// When an org is pinned to a GitHub id and a second, unrelated org merely
+// declares the same login, the pinned org must win the tie-break — not the
+// unpinned one. (Regression for the Postgres NULL-ordering flip: NULLS FIRST
+// under DESC let the unpinned org's NULL github_id sort ahead of the pinned
+// org's true match.)
+func TestOrgForGitHubInstallPrefersPinnedOverUnpinnedLoginMatch(t *testing.T) {
+	st := openTestStore(t)
+	alice, _ := st.UpsertAccount("1001", "alice") // owner of both orgs ⇒ member of both
+
+	pinned, _ := st.CreateOrg(alice.ID, "acme-pinned")
+	if err := st.SetOrgGitHub(pinned.ID, "acme"); err != nil {
+		t.Fatal(err)
+	}
+	// Pin "5000" to this org via a first install — only it has the login yet.
+	got, err := st.OrgForGitHubInstall("5000", "acme", "1001")
+	if err != nil || got != pinned.ID {
+		t.Fatalf("initial pin = (%q,%v), want %q", got, err, pinned.ID)
+	}
+
+	unpinned, _ := st.CreateOrg(alice.ID, "acme-unpinned")
+	if err := st.SetOrgGitHub(unpinned.ID, "acme"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now two orgs match on login "acme"; only `pinned` matches on github_id
+	// "5000". The pinned org must win.
+	got, err = st.OrgForGitHubInstall("5000", "acme", "1001")
+	if err != nil || got != pinned.ID {
+		t.Fatalf("tie-break = (%q,%v), want pinned org %q", got, err, pinned.ID)
+	}
+}

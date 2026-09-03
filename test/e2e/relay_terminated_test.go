@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 // TestRelayTerminatedSelfService proves the full free-tier loop:
@@ -47,9 +47,11 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	t.Cleanup(cancel)
 
 	relayData := t.TempDir()
+	relayDB := relaytest.DSN(t)
 	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
 	relay.Env = append(os.Environ(),
 		"PIPER_RELAY_DATA_DIR="+relayData,
+		"PIPER_RELAY_DB_URL="+relayDB,
 		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
 		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
 		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
@@ -141,7 +143,7 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 
 	// The relay assigned <hash>-e2e.public.localhost; read it back from the relay's
 	// hostnames registry (the box never composes the name).
-	hostname := terminatedHostname(t, relayData)
+	hostname := terminatedHostname(t, relayDB)
 	if !strings.HasSuffix(hostname, "."+apex) {
 		t.Fatalf("assigned hostname %q not under %q", hostname, apex)
 	}
@@ -169,7 +171,7 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	fmt.Printf("terminated e2e response:\n%s\n", body)
 
 	// ---- Remote control plane through the relay (#73) ----
-	base := agentBaseDomain(t, relayData)
+	base := agentBaseDomain(t, relayDB)
 	cred := accountCredential(t, home)
 
 	// Owner's credential → the box's real, Token-B-gated /v1/apps.
@@ -182,7 +184,7 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base+"/v1/apps", "bogus-cred", http.StatusUnauthorized, 10*time.Second)
 
 	// Another tenant → 404 at the relay: never reaches the box, existence not leaked.
-	mcred := insertSecondAccount(t, relayData)
+	mcred := insertSecondAccount(t, relayDB)
 	controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base+"/v1/apps", mcred, http.StatusNotFound, 10*time.Second)
 
 	// ---- Health/metrics surface (#75) ----
@@ -196,11 +198,11 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 }
 
 // terminatedHostname reads the single registered hostname from the relay's
-// SQLite store. The relay owns naming, so this is the authoritative source for
+// Postgres store. The relay owns naming, so this is the authoritative source for
 // the assigned public hostname the box was given.
-func terminatedHostname(t *testing.T, relayData string) string {
+func terminatedHostname(t *testing.T, relayDB string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(relayData, "relay.db")+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("pgx", relayDB)
 	if err != nil {
 		t.Fatalf("open relay db: %v", err)
 	}
@@ -213,9 +215,9 @@ func terminatedHostname(t *testing.T, relayData string) string {
 }
 
 // agentBaseDomain reads the enrolled agent's base domain from the relay store.
-func agentBaseDomain(t *testing.T, relayData string) string {
+func agentBaseDomain(t *testing.T, relayDB string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(relayData, "relay.db")+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("pgx", relayDB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,23 +267,24 @@ func accountCredential(t *testing.T, home string) string {
 // insertSecondAccount plants a second tenant directly in the relay store (the
 // auto-approve verifier always yields the same account, so cross-tenant denial
 // needs a hand-made one) and returns its plaintext credential.
-func insertSecondAccount(t *testing.T, relayData string) string {
+func insertSecondAccount(t *testing.T, relayDB string) string {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(relayData, "relay.db")+"?_pragma=busy_timeout(5000)")
+	db, err := sql.Open("pgx", relayDB)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(
-		`INSERT INTO accounts(id, github_id, username, disabled, created_at) VALUES('mallory-id','mallory-sub','mallory',0,?)`, now); err != nil {
+		`INSERT INTO accounts(id, github_id, username, disabled, created_at) VALUES($1,$2,$3,$4,$5)`,
+		"mallory-id", "mallory-sub", "mallory", false, now); err != nil {
 		t.Fatal(err)
 	}
 	cred := "mallory-cred-e2e"
 	sum := sha256.Sum256([]byte(cred))
 	if _, err := db.Exec(
-		`INSERT INTO account_creds(token_hash, account_id, created_at) VALUES(?,'mallory-id',?)`,
-		hex.EncodeToString(sum[:]), now); err != nil {
+		`INSERT INTO account_creds(token_hash, account_id, created_at) VALUES($1,$2,$3)`,
+		hex.EncodeToString(sum[:]), "mallory-id", now); err != nil {
 		t.Fatal(err)
 	}
 	return cred

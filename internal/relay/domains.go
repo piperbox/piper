@@ -3,7 +3,6 @@ package relay
 import (
 	"database/sql"
 	"errors"
-	"strings"
 	"time"
 )
 
@@ -67,8 +66,10 @@ func (s *Store) AddCustomDomain(baseDomain, domain string) error {
 		return err
 	}
 	defer tx.Rollback()
+	// The per-agent domain cap is enforced under the agent row's lock so two
+	// claims for one agent, on any relay, count in sequence.
 	var one int
-	if err := tx.QueryRow(`SELECT 1 FROM agents WHERE base_domain=?`, baseDomain).Scan(&one); err != nil {
+	if err := tx.QueryRow(`SELECT 1 FROM agents WHERE base_domain=$1 FOR UPDATE`, baseDomain).Scan(&one); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrBadToken
 		}
@@ -76,12 +77,12 @@ func (s *Store) AddCustomDomain(baseDomain, domain string) error {
 	}
 	var owner, status, created string
 	err = tx.QueryRow(
-		`SELECT agent_base, status, created_at FROM custom_domains WHERE domain=?`, domain).
+		`SELECT agent_base, status, created_at FROM custom_domains WHERE domain=$1`, domain).
 		Scan(&owner, &status, &created)
 	switch {
 	case err == nil && owner == baseDomain:
 		if status == "pending" {
-			if _, err := tx.Exec(`UPDATE custom_domains SET created_at=? WHERE domain=?`,
+			if _, err := tx.Exec(`UPDATE custom_domains SET created_at=$1 WHERE domain=$2`,
 				now.Format(time.RFC3339Nano), domain); err != nil {
 				return err
 			}
@@ -92,7 +93,7 @@ func (s *Store) AddCustomDomain(baseDomain, domain string) error {
 			return ErrDomainTaken
 		}
 		// Expired pending claim by another agent: evict and claim below.
-		if _, err := tx.Exec(`DELETE FROM custom_domains WHERE domain=?`, domain); err != nil {
+		if _, err := tx.Exec(`DELETE FROM custom_domains WHERE domain=$1`, domain); err != nil {
 			return err
 		}
 	case !errors.Is(err, sql.ErrNoRows):
@@ -106,9 +107,9 @@ func (s *Store) AddCustomDomain(baseDomain, domain string) error {
 		return ErrQuotaExceeded
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO custom_domains(domain, agent_base, status, created_at) VALUES(?, ?, 'pending', ?)`,
+		`INSERT INTO custom_domains(domain, agent_base, status, created_at) VALUES($1, $2, 'pending', $3)`,
 		domain, baseDomain, now.Format(time.RFC3339Nano)); err != nil {
-		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		if isUniqueViolation(err) {
 			return ErrDomainTaken // PK backstop: lost the FCFS race
 		}
 		return err
@@ -119,7 +120,7 @@ func (s *Store) AddCustomDomain(baseDomain, domain string) error {
 // countLive counts the agent's live rows inside tx (cap enforcement).
 func countLive(tx *sql.Tx, baseDomain string, now time.Time) (int, error) {
 	rows, err := tx.Query(
-		`SELECT status, created_at FROM custom_domains WHERE agent_base=?`, baseDomain)
+		`SELECT status, created_at FROM custom_domains WHERE agent_base=$1`, baseDomain)
 	if err != nil {
 		return 0, err
 	}
@@ -143,7 +144,7 @@ func countLive(tx *sql.Tx, baseDomain string, now time.Time) (int, error) {
 // never contested.
 func (s *Store) CustomDomains(baseDomain string) ([]string, error) {
 	rows, err := s.db.Query(
-		`SELECT domain, status, created_at FROM custom_domains WHERE agent_base=? ORDER BY domain`,
+		`SELECT domain, status, created_at FROM custom_domains WHERE agent_base=$1 ORDER BY domain`,
 		baseDomain)
 	if err != nil {
 		return nil, err
@@ -170,7 +171,7 @@ func (s *Store) CustomDomains(baseDomain string) ([]string, error) {
 // contested the name. Idempotent on active rows.
 func (s *Store) ConfirmCustomDomain(baseDomain, domain string) error {
 	res, err := s.db.Exec(
-		`UPDATE custom_domains SET status='active' WHERE domain=? AND agent_base=?`,
+		`UPDATE custom_domains SET status='active' WHERE domain=$1 AND agent_base=$2`,
 		domain, baseDomain)
 	if err != nil {
 		return err
@@ -201,7 +202,7 @@ func (s *Store) RemoveCustomDomain(baseDomain, domain string) error {
 // that would let any authenticated agent DoS a tenant it doesn't own.
 func (s *Store) removeCustomDomainOwned(baseDomain, domain string) (bool, error) {
 	res, err := s.db.Exec(
-		`DELETE FROM custom_domains WHERE domain=? AND agent_base=?`, domain, baseDomain)
+		`DELETE FROM custom_domains WHERE domain=$1 AND agent_base=$2`, domain, baseDomain)
 	if err != nil {
 		return false, err
 	}

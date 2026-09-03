@@ -395,7 +395,7 @@ func TestOrgDeleteEndpoint(t *testing.T) {
 	if rr := apiReq(t, api, "DELETE", "/v1/orgs/acme", aliceCred, ""); rr.Code != http.StatusConflict {
 		t.Fatalf("delete with agents: %d, want 409", rr.Code)
 	}
-	if _, err := st.db.Exec(`DELETE FROM agents WHERE account_id=?`, org); err != nil {
+	if _, err := st.db.Exec(`DELETE FROM agents WHERE account_id=$1`, org); err != nil {
 		t.Fatal(err)
 	}
 	if rr := apiReq(t, api, "DELETE", "/v1/orgs/acme", aliceCred, ""); rr.Code != http.StatusOK {

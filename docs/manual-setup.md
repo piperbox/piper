@@ -113,6 +113,10 @@ sudo install -m 0644 packaging/systemd/piper-relay.service \
 sudo systemctl daemon-reload
 ```
 
+The relay stores everything in Postgres; create a database and put its URL in
+`/etc/piper-relay.env` as `PIPER_RELAY_DB_URL` first (see the
+[relay runbook](runbooks/relay-deploy.md#2-configure)).
+
 Enroll the box before starting the service, then enable it at boot:
 
 ```bash
@@ -120,6 +124,7 @@ sudo systemd-run --pipe --wait --collect \
   --property=DynamicUser=yes \
   --property=StateDirectory=piper-relay \
   --setenv=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay \
+  --setenv=PIPER_RELAY_DB_URL=postgres://… \
   /usr/local/bin/piper-relay enroll <name> --domain <base-domain>
 sudo systemctl enable --now piper-relay
 ```

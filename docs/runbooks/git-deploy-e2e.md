@@ -102,6 +102,10 @@ sudo install -m 0644 packaging/systemd/piper-relay.service \
 sudo systemctl daemon-reload
 ```
 
+The relay stores everything in Postgres; create a database and put its URL in
+`/etc/piper-relay.env` as `PIPER_RELAY_DB_URL` before enrolling or starting the
+service (see [relay runbook §2 Configure](relay-deploy.md#2-configure)).
+
 Enrollment is a separate one-shot command, not the service. Run it through a
 transient unit so it writes to the same systemd-managed state directory as the
 service:
@@ -111,14 +115,11 @@ sudo systemd-run --pipe --wait --collect \
   --property=DynamicUser=yes \
   --property=StateDirectory=piper-relay \
   --setenv=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay \
+  --setenv=PIPER_RELAY_DB_URL=postgres://… \
   /usr/local/bin/piper-relay enroll alice --domain <base>
 #   enrolled alice for <base>
 #   token: rlyt_XXXXXXXXXXXXXXXX      ← copy this
 ```
-
-Do not run enrollment directly as root with
-`PIPER_RELAY_DATA_DIR=/var/lib/piper-relay`; a root-owned `relay.db` may prevent the
-dynamic service user from opening it.
 
 Enable the relay at boot and start it now:
 
@@ -132,8 +133,9 @@ sudo ss -lnt '( sport = :443 or sport = :7000 )'
 The final command must show listeners on `:443` and `:7000`. Open inbound TCP ports
 `443` and `7000` in both the host firewall and the VPS provider firewall.
 
-To override listener addresses, create `/etc/piper-relay.env` before starting the
-service:
+To override listener addresses, add them to the `/etc/piper-relay.env` file
+created above (it already carries `PIPER_RELAY_DB_URL` and is mandatory, not
+optional):
 
 ```bash
 PIPER_RELAY_TLS_ADDR=:443

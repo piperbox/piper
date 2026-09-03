@@ -2,16 +2,13 @@ package relay
 
 import (
 	"errors"
-	"path/filepath"
 	"testing"
+
+	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 func TestEnrollAndAuthenticate(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	st := openTestStore(t)
 
 	tok, err := st.Enroll("alice", "alice.example.com")
 	if err != nil {
@@ -32,28 +29,34 @@ func TestEnrollAndAuthenticate(t *testing.T) {
 	}
 }
 
-func TestOpenSetsBusyTimeout(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
+// Open applies schema.sql with CREATE … IF NOT EXISTS, so a second Open on
+// the same database — every relay restart, every extra replica — is a no-op.
+func TestOpenIsIdempotent(t *testing.T) {
+	dsn := relaytest.DSN(t)
+	first, err := Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
-
-	var timeout int
-	if err := st.db.QueryRow(`PRAGMA busy_timeout`).Scan(&timeout); err != nil {
-		t.Fatalf("PRAGMA busy_timeout: %v", err)
+	if _, err := first.Enroll("alice", "alice.example.com"); err != nil {
+		t.Fatal(err)
 	}
-	if timeout != 5000 {
-		t.Errorf("busy_timeout = %d, want 5000", timeout)
+	first.Close()
+	second, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer second.Close()
+	if _, err := second.Authenticate("bogus"); !errors.Is(err, ErrBadToken) {
+		t.Fatalf("store not usable after reopen: %v", err)
+	}
+	var n int
+	if err := second.db.QueryRow(`SELECT COUNT(*) FROM agents`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("agents after reopen = %d, %v; want 1 (schema re-apply must not drop rows)", n, err)
 	}
 }
 
 func TestEnrollRejectsDuplicateBaseDomain(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := openTestStore(t)
 	if _, err := st.Enroll("alice", "shared.example.com"); err != nil {
 		t.Fatalf("first Enroll: %v", err)
 	}
@@ -104,11 +107,7 @@ func TestControlTokenRoundTrip(t *testing.T) {
 // "custom domain": another agent's base domain (SNI hijack), the apex, a
 // DNS-label parent/child of either, or its own base domain.
 func TestAddCustomDomainRejectsRelayNamespace(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "relay.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
+	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	if _, err := st.Enroll("alice", "alice.example.com"); err != nil {
 		t.Fatal(err)

@@ -12,7 +12,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -146,7 +145,11 @@ func main() {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		log.Fatalf("data dir: %v", err)
 	}
-	st, err := relay.Open(filepath.Join(dataDir, "relay.db"))
+	dsn := os.Getenv("PIPER_RELAY_DB_URL")
+	if dsn == "" {
+		log.Fatal("PIPER_RELAY_DB_URL is required (postgres://user:password@host/dbname)")
+	}
+	st, err := relay.Open(dsn)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}

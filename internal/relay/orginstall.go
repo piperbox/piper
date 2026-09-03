@@ -13,7 +13,7 @@ import (
 // an org account.
 func (s *Store) SetOrgGitHub(orgID, githubLogin string) error {
 	res, err := s.db.Exec(
-		`UPDATE accounts SET github_login=? WHERE id=? AND type='org'`,
+		`UPDATE accounts SET github_login=$1 WHERE id=$2 AND type='org'`,
 		strings.ToLower(strings.TrimSpace(githubLogin)), orgID)
 	if err != nil {
 		return err
@@ -37,8 +37,8 @@ func (s *Store) OrgForGitHubInstall(orgGitHubID, orgGitHubLogin, senderGitHubID 
 	var orgID string
 	err := s.db.QueryRow(
 		`SELECT id FROM accounts
-		  WHERE type='org' AND (github_id=? OR lower(github_login)=?)
-		  ORDER BY (github_id=?) DESC LIMIT 1`,
+		  WHERE type='org' AND (github_id=$1 OR lower(github_login)=$2)
+		  ORDER BY (github_id=$3) DESC NULLS LAST LIMIT 1`,
 		orgGitHubID, login, orgGitHubID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoOrg
@@ -49,7 +49,7 @@ func (s *Store) OrgForGitHubInstall(orgGitHubID, orgGitHubLogin, senderGitHubID 
 	var member int
 	if err := s.db.QueryRow(
 		`SELECT COUNT(*) FROM org_members m JOIN accounts a ON a.id=m.account_id
-		  WHERE m.org_id=? AND a.github_id=?`, orgID, senderGitHubID).Scan(&member); err != nil {
+		  WHERE m.org_id=$1 AND a.github_id=$2`, orgID, senderGitHubID).Scan(&member); err != nil {
 		return "", err
 	}
 	if member == 0 {
@@ -58,7 +58,7 @@ func (s *Store) OrgForGitHubInstall(orgGitHubID, orgGitHubLogin, senderGitHubID 
 	// Pin the stable id for future events (best-effort; a unique-violation means
 	// another org already claimed it, which the login match above did not hit).
 	_, _ = s.db.Exec(
-		`UPDATE accounts SET github_id=? WHERE id=? AND (github_id IS NULL OR github_id='')`,
+		`UPDATE accounts SET github_id=$1 WHERE id=$2 AND (github_id IS NULL OR github_id='')`,
 		orgGitHubID, orgID)
 	return orgID, nil
 }
