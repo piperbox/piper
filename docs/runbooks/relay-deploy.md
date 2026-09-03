@@ -168,9 +168,13 @@ daemon-owned enrollment) expects the new relay's enroll semantics; upgrading
 agents against an old relay leaves them creating duplicate rows instead of
 upserting.
 
-This resets **all** relay state — every agent row, token, account link, and
-custom domain. Boxes re-enroll afterwards; that is the designed recovery path,
-not an accident to engineer around.
+Path (b) below resets **all** relay state — every agent row, token, account
+link, and custom domain — and boxes re-enroll afterwards; that is the designed
+recovery path, not an accident to engineer around, and the rest of this
+section describes recovering from it. Path (a) resets nothing except the
+dropped table(s): for the self-healing tables it names, the data it holds
+comes back on its own once boxes reconnect, so there's no broader recovery to
+walk through.
 
 ```bash
 sudo systemctl stop piper-relay
@@ -186,8 +190,7 @@ sudo systemctl start piper-relay
 
 Prefer (a) whenever the changed table is one the boxes repopulate on
 reconnect (`hostnames`, `repo_bindings`, `custom_domains`, `pending_events`)
-or one you can rebuild by hand in `psql`; (b) is the documented full reset
-and the rest of this section describes recovering from it.
+or one you can rebuild by hand in `psql`; fall back to (b) otherwise.
 
 The fresh tables materialize on first start after (b). Then, per box:
 
