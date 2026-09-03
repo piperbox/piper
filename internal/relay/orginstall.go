@@ -38,7 +38,7 @@ func (s *Store) OrgForGitHubInstall(orgGitHubID, orgGitHubLogin, senderGitHubID 
 	err := s.db.QueryRow(
 		`SELECT id FROM accounts
 		  WHERE type='org' AND (github_id=$1 OR lower(github_login)=$2)
-		  ORDER BY (github_id=$3) DESC LIMIT 1`,
+		  ORDER BY (github_id=$3) DESC NULLS LAST LIMIT 1`,
 		orgGitHubID, login, orgGitHubID).Scan(&orgID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNoOrg

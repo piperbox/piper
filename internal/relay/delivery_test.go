@@ -158,25 +158,15 @@ func TestDrainForReplaysOnlyTheNewestPerRef(t *testing.T) {
 // TestDrainForBailsWhileOffline pins the bail at the top of DrainFor: it must
 // never reach the store while the agent has no live session. DrainEvents is
 // destructive — delete then re-insert — so a drain-and-re-park round trip
-// necessarily changes the parked row's rowid; an unchanged rowid after
-// DrainFor is therefore proof the bail fired and the store was never
-// touched. A decoy row parked for a second agent AFTER base's, and never
-// touched by DrainFor(base), pins the comparison: SQLite assigns a deleted
-// row's replacement the table's current max rowid plus one, so a decoy with
-// a higher rowid than base's original guarantees any drain-and-re-park
-// round trip lands base's row on a strictly larger rowid than before (parking
-// the decoy first would let the reinsert innocuously reclaim base's exact
-// original number and mask the very mutation this test exists to catch).
+// necessarily changes the parked row's id; ids are BIGSERIAL and never reused,
+// so an unchanged id after DrainFor is proof the bail fired and the store was
+// never touched.
 func TestDrainForBailsWhileOffline(t *testing.T) {
 	st := openTestStore(t)
 	_, base := enrolledAgent(t, st, "1001", "alice")
-	_, other := enrolledAgent(t, st, "1002", "bob")
 	router := NewRouter() // no session registered: base is offline
 
 	if err := st.ParkEvent(base, "blog", "main", "push", []byte(`{}`)); err != nil {
-		t.Fatal(err)
-	}
-	if err := st.ParkEvent(other, "blog", "main", "push", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	before := pendingRowID(t, st, base, "blog", "main")
