@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // Account is a relay tenant. One account owns many agents.
@@ -52,17 +53,17 @@ func deriveUsername(login string) string {
 // githubID.
 func (s *Store) UpsertAccount(githubID, login string) (Account, error) {
 	var acc Account
-	var disabled int
+	var disabled bool
 	var storedLogin sql.NullString
 	err := s.db.QueryRow(
-		`SELECT id, username, disabled, github_login FROM accounts WHERE github_id=?`, githubID).
+		`SELECT id, username, disabled, github_login FROM accounts WHERE github_id=$1`, githubID).
 		Scan(&acc.ID, &acc.Username, &disabled, &storedLogin)
 	if err == nil {
-		acc.Disabled = disabled != 0
+		acc.Disabled = disabled
 		acc.GithubLogin = login
 		if storedLogin.String != login {
 			// GitHub logins can be renamed; keep the invite-matching login fresh.
-			if _, err := s.db.Exec(`UPDATE accounts SET github_login=? WHERE id=?`, login, acc.ID); err != nil {
+			if _, err := s.db.Exec(`UPDATE accounts SET github_login=$1 WHERE id=$2`, login, acc.ID); err != nil {
 				return Account{}, err
 			}
 		}
@@ -82,7 +83,7 @@ func (s *Store) UpsertAccount(githubID, login string) (Account, error) {
 		}
 		_, err := s.db.Exec(
 			`INSERT INTO accounts(id, github_id, github_login, username, type, disabled, created_at)
-			 VALUES(?,?,?,?,'user',0,?)`,
+			 VALUES($1,$2,$3,$4,'user',false,$5)`,
 			id, githubID, login, username, now)
 		if err == nil {
 			return Account{ID: id, Username: username, GithubLogin: login}, nil
@@ -97,9 +98,11 @@ func (s *Store) UpsertAccount(githubID, login string) (Account, error) {
 	}
 }
 
-// isUniqueViolation reports whether err is a SQLite UNIQUE constraint failure.
+// isUniqueViolation reports whether err is a Postgres unique-constraint
+// failure (SQLSTATE 23505) — a primary key, UNIQUE column, or unique index.
 func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }
 
 // ErrBadCredential is returned for an unknown account credential or one whose
@@ -116,7 +119,7 @@ func (s *Store) MintAccountCredential(accountID string) (string, error) {
 	// Orgs are inert principals: they never hold credentials, so they can
 	// never authenticate (belt-and-braces on top of the NULL github_id).
 	var typ string
-	if err := s.db.QueryRow(`SELECT type FROM accounts WHERE id=?`, accountID).Scan(&typ); err != nil {
+	if err := s.db.QueryRow(`SELECT type FROM accounts WHERE id=$1`, accountID).Scan(&typ); err != nil {
 		return "", err
 	}
 	if typ != "user" {
@@ -129,7 +132,7 @@ func (s *Store) MintAccountCredential(accountID string) (string, error) {
 	}
 	cred := hex.EncodeToString(raw)
 	_, err := s.db.Exec(
-		`INSERT INTO account_creds(token_hash, account_id, created_at) VALUES(?,?,?)`,
+		`INSERT INTO account_creds(token_hash, account_id, created_at) VALUES($1,$2,$3)`,
 		hashToken(cred), accountID, time.Now().UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return "", err
@@ -141,12 +144,12 @@ func (s *Store) MintAccountCredential(accountID string) (string, error) {
 // account is treated as unauthenticated (ErrBadCredential).
 func (s *Store) AuthenticateAccount(cred string) (Account, error) {
 	var acc Account
-	var disabled int
+	var disabled bool
 	var gl, gid sql.NullString
 	err := s.db.QueryRow(
 		`SELECT a.id, a.username, a.github_id, a.github_login, a.disabled
 		   FROM account_creds c JOIN accounts a ON a.id = c.account_id
-		  WHERE c.token_hash = ?`, hashToken(cred)).
+		  WHERE c.token_hash = $1`, hashToken(cred)).
 		Scan(&acc.ID, &acc.Username, &gid, &gl, &disabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrBadCredential
@@ -154,7 +157,7 @@ func (s *Store) AuthenticateAccount(cred string) (Account, error) {
 	if err != nil {
 		return Account{}, err
 	}
-	if disabled != 0 {
+	if disabled {
 		return Account{}, ErrBadCredential
 	}
 	acc.GithubID, acc.GithubLogin = gid.String, gl.String
@@ -174,7 +177,7 @@ func (s *Store) AuthenticateAccount(cred string) (Account, error) {
 // the other.
 func (s *Store) DisableAccount(username, accountType string) error {
 	res, err := s.db.Exec(
-		`UPDATE accounts SET disabled=1 WHERE username=? AND type=?`, username, accountType)
+		`UPDATE accounts SET disabled=true WHERE username=$1 AND type=$2`, username, accountType)
 	if err != nil {
 		return err
 	}
@@ -206,16 +209,17 @@ var ErrQuotaExceeded = errors.New("account agent quota exceeded")
 // stops authenticating). An empty boxID keeps insert-per-call semantics for
 // operator/legacy enrolls.
 func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
-	// The immediate transaction (see Open) serializes the cap check and insert
-	// so concurrent enrollments cannot overshoot the cap.
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Enrollment{}, err
 	}
 	defer tx.Rollback()
 
+	// Locking the account row serializes the cap check and the insert across
+	// every relay process sharing this database: a second enroll for the same
+	// account waits here until this one commits, then counts the new row.
 	var username string
-	if err := tx.QueryRow(`SELECT username FROM accounts WHERE id=?`, accountID).Scan(&username); err != nil {
+	if err := tx.QueryRow(`SELECT username FROM accounts WHERE id=$1 FOR UPDATE`, accountID).Scan(&username); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Enrollment{}, ErrUnknownAccount
 		}
@@ -225,7 +229,7 @@ func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
 	if boxID != "" {
 		var base, secret string
 		err := tx.QueryRow(
-			`SELECT base_domain, webhook_secret FROM agents WHERE account_id=? AND box_id=?`,
+			`SELECT base_domain, webhook_secret FROM agents WHERE account_id=$1 AND box_id=$2`,
 			accountID, boxID).Scan(&base, &secret)
 		if err == nil {
 			raw := make([]byte, 32)
@@ -234,7 +238,7 @@ func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
 			}
 			tok := hex.EncodeToString(raw)
 			if _, err := tx.Exec(
-				`UPDATE agents SET token_hash=? WHERE account_id=? AND box_id=?`,
+				`UPDATE agents SET token_hash=$1 WHERE account_id=$2 AND box_id=$3`,
 				hashToken(tok), accountID, boxID); err != nil {
 				return Enrollment{}, err
 			}
@@ -249,7 +253,7 @@ func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
 	}
 
 	var count int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id=?`, accountID).Scan(&count); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM agents WHERE account_id=$1`, accountID).Scan(&count); err != nil {
 		return Enrollment{}, err
 	}
 	if count >= s.maxAgentsOrDefault() {
@@ -276,9 +280,12 @@ func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
 		}
 		secret := hex.EncodeToString(rawSecret)
 
+		if _, err := tx.Exec(`SAVEPOINT try`); err != nil {
+			return Enrollment{}, err
+		}
 		_, err := tx.Exec(
 			`INSERT INTO agents(name, token_hash, base_domain, account_id, box_id, webhook_secret, created_at)
-			 VALUES(?,?,?,?,?,?,?)`,
+			 VALUES($1,$2,$3,$4,$5,$6,$7)`,
 			base, hashToken(tok), base, accountID, nullIfEmpty(boxID), secret, now)
 		if err == nil {
 			if err := tx.Commit(); err != nil {
@@ -287,6 +294,11 @@ func (s *Store) EnrollForAccount(accountID, boxID string) (Enrollment, error) {
 			return Enrollment{Token: tok, BaseDomain: base, WebhookSecret: secret}, nil
 		}
 		if isUniqueViolation(err) {
+			// A failed statement aborts a Postgres transaction; roll back to
+			// the savepoint so the next attempt's INSERT can run.
+			if _, err := tx.Exec(`ROLLBACK TO SAVEPOINT try`); err != nil {
+				return Enrollment{}, err
+			}
 			continue // hash collided with an existing base_domain; retry
 		}
 		return Enrollment{}, err
