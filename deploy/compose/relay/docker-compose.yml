@@ -1,14 +1,14 @@
-# piper-relay + Postgres on one host that owns a public IP (the hosted relay's
-# Hetzner layout). Documented in docs/runbooks/relay-deploy.md, "Single host
-# with compose". For a bridge-networked / orchestrated deployment see the
-# generic example in that runbook's "Run as a container" section instead.
+# piper-edge + N piper-relay + Postgres on one host that owns a public IP (the
+# hosted relay's Hetzner layout). Documented in docs/runbooks/relay-deploy.md,
+# "Scale out".
 #
-# Why host networking: the relay's :443/:80 are SNI passthrough and :7000 is a
-# raw TCP protocol, so it must see real client IPs (no PROXY protocol needed
-# on a direct public IP); its ops endpoint stays on the host's loopback where
-# `tailscale serve` already exposes it; and a colocated piperd is reachable on
-# 127.0.0.1. Host networking has no compose service DNS, so Postgres publishes
-# on the host loopback and the DSN in /etc/piper-relay.env says 127.0.0.1.
+# The edge owns the public ports (:443/:80/:7000) on the host network and
+# routes each connection to the relay that owns the agent's tunnel, adding a
+# PROXY v2 header so relays still see real client IPs. Relays run on the
+# bridge network with no published ports (reachable only through the edge)
+# and scale with `docker compose up -d --scale relay=N`. Host networking has
+# no compose service DNS, so Postgres publishes on the host loopback for the
+# edge; relays reach it by service name.
 services:
   postgres:
     image: postgres:17
@@ -18,7 +18,7 @@ services:
       POSTGRES_DB: piper_relay
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env next to this file}
     ports:
-      - "127.0.0.1:5432:5432"   # loopback only: the relay, psql, and the cutover copier (via ssh -L)
+      - "127.0.0.1:5432:5432"   # loopback only: the host-networked edge, psql, pg_dump
     volumes:
       - relay_pg:/var/lib/postgresql/data
     healthcheck:
@@ -27,17 +27,43 @@ services:
       timeout: 3s
       retries: 10
 
-  relay:
-    image: ghcr.io/piperbox/piper-relay:${PIPER_RELAY_VERSION:?set PIPER_RELAY_VERSION in .env (e.g. 0.19.0-rc.1)}
+  edge:
+    image: ghcr.io/piperbox/piper-edge:${PIPER_EDGE_VERSION:?set PIPER_EDGE_VERSION in .env (e.g. 0.20.0)}
     restart: unless-stopped
     network_mode: host
     depends_on:
       postgres:
         condition: service_healthy
-    # Carries PIPER_RELAY_DB_URL (postgres://piper_relay:<password>@127.0.0.1:5432/piper_relay),
-    # the GitHub App vars, PIPER_RELAY_TLS_CERT/KEY and PIPER_RELAY_GITHUB_APP_KEY
-    # pointing at the in-container paths mounted below.
+    environment:
+      PIPER_EDGE_DB_URL: postgres://piper_relay:${POSTGRES_PASSWORD}@127.0.0.1:5432/piper_relay
+      PIPER_EDGE_APEX: public.getpiper.dev
+      # Ops endpoint on the host loopback, where `tailscale serve` exposes it
+      # (the same 127.0.0.1:9090 the single relay used to hold).
+      PIPER_EDGE_METRICS: "1"
+      PIPER_EDGE_LOGS: "1"
+
+  relay:
+    image: ghcr.io/piperbox/piper-relay:${PIPER_RELAY_VERSION:?set PIPER_RELAY_VERSION in .env (e.g. 0.20.0)}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Carries the GitHub App vars, PIPER_RELAY_TLS_CERT/KEY and
+    # PIPER_RELAY_GITHUB_APP_KEY pointing at the in-container paths mounted
+    # below. The values overridden here are the ones that differ on the bridge.
     env_file: /etc/piper-relay.env
+    environment:
+      PIPER_RELAY_DB_URL: postgres://piper_relay:${POSTGRES_PASSWORD}@postgres:5432/piper_relay
+      # Every connection arrives from the edge with a PROXY v2 header.
+      PIPER_RELAY_PROXY_PROTOCOL: "1"
+      # The control hop between relays dials :8080 on the bridge; the env file
+      # pins it to loopback for the old host-networked layout.
+      PIPER_RELAY_API_ADDR: ":8080"
+      # Per-replica ops endpoint on the container IP:
+      #   curl http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' piper-relay-relay-1):9090/logs
+      PIPER_RELAY_OPS_ADDR: ":9090"
+      # PIPER_RELAY_ADVERTISE_HOST is left unset: the default (first
+      # non-loopback IPv4 = the container's bridge IP) is what the edge dials.
     volumes:
       # Whole tree, not live/<domain>: certbot's live/ entries are symlinks into
       # ../../archive/, which dangle if only live/ is mounted. The relay re-reads

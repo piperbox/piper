@@ -452,15 +452,20 @@ this section explains it and walks the cutover from the systemd unit.
 
 **What differs from the generic example, and why**
 
-1. **`network_mode: host` for the relay.** `:443`/`:80` are SNI passthrough
-   and `:7000` is a raw TCP protocol, so the relay must see real client IPs —
-   host networking gives that without PROXY protocol. It also keeps the ops
-   endpoint on the host's `127.0.0.1:9090`, where `tailscale serve` already
-   fronts it, and keeps the passthrough dial to a colocated `piperd` on
-   `127.0.0.1` working. Host networking has no compose service DNS, so
-   Postgres publishes `127.0.0.1:5432` and `PIPER_RELAY_DB_URL` uses
-   `127.0.0.1`, not `postgres`. That same loopback port is what `psql`, the
-   nightly dump, and the cutover copier (through `ssh -L`) use.
+1. **`piper-edge` on the host network, relays on the bridge.** The edge owns
+   `:443`/`:80`/`:7000` on the host network so it sees real client IPs, and
+   passes them to the relays in a PROXY v2 header; the relays run with
+   `PIPER_RELAY_PROXY_PROTOCOL=1` on the bridge network with no published
+   ports and scale with `--scale relay=N`. Two relay values from
+   `/etc/piper-relay.env` are overridden in the compose file because they
+   only fit the old host-networked layout: `PIPER_RELAY_DB_URL` (relays reach
+   Postgres by service name, the host-networked edge by `127.0.0.1:5432`,
+   which is why Postgres publishes that loopback port — also what `psql` and
+   the nightly dump use) and `PIPER_RELAY_API_ADDR` (`:8080`, so the control
+   hop between relays can reach it). The host's `127.0.0.1:9090`, where
+   `tailscale serve` already fronts an ops endpoint, is now the **edge's**;
+   each relay's is on its container IP. A colocated `piperd` keeps working
+   unchanged: it dials the public tunnel address, which the edge answers.
 2. **Mount `/etc/letsencrypt` whole.** certbot's `live/<domain>/` entries are
    symlinks into `../../archive/`; mounting only `live/` leaves them dangling
    inside the container. Point `PIPER_RELAY_TLS_CERT`/`KEY` at the `live/`
@@ -495,7 +500,7 @@ Relay before agents, as always; nothing on the boxes changes.
    ```sh
    sudo mkdir -p /opt/piper-relay
    sudo cp deploy/compose/relay/docker-compose.yml /opt/piper-relay/
-   sudo cp deploy/compose/relay/.env.example /opt/piper-relay/.env   # then edit both values
+   sudo cp deploy/compose/relay/.env.example /opt/piper-relay/.env   # then edit all three values
    sudo chmod 600 /opt/piper-relay/.env
    ```
 
@@ -523,25 +528,30 @@ Relay before agents, as always; nothing on the boxes changes.
 
    Keep the old binary — and `relay.db`, if it was still on SQLite — as the
    rollback pair; the old binary needs its old store.
-5. Start the relay and verify:
+5. Start the edge and the relays and verify:
 
    ```sh
-   sudo docker compose up -d relay && sudo docker compose logs -f relay
+   sudo docker compose up -d --scale relay=2 && sudo docker compose logs -f
    ```
 
    Expect the usual startup lines, every agent re-registering within a few
    seconds (if their tokens came across), `/v1/github/status` still showing the
-   linked App, and the app URLs serving. Check `ss -ltnp` shows the container
-   holding `:443`, `:80`, `:7000`, `:8080`, and `127.0.0.1:9090`.
+   linked App, and the app URLs serving. Check `ss -ltnp` shows `piper-edge`
+   holding `:443`, `:80`, `:7000`, and `127.0.0.1:9090`, and that
+   `relay_instances` has one live row per replica.
 6. Remove the certbot deploy hook that restarted `piper-relay.service`.
 
 **Day-to-day afterwards**
 
 - `enroll` / `admin`: `sudo docker compose exec relay piper-relay admin …`.
-- Upgrade: set `PIPER_RELAY_VERSION` in `.env`, then
-  `sudo docker compose pull relay && sudo docker compose up -d relay`. For a
+- Upgrade: set `PIPER_RELAY_VERSION` and `PIPER_EDGE_VERSION` in `.env`, then
+  `sudo docker compose pull && sudo docker compose up -d --scale relay=2`.
+  Restarting a relay drops its tunnels (agents redial onto a survivor);
+  restarting the edge drops every tunnel until it is back. For a
   schema-change release, drop the named tables first with
   `sudo docker compose exec postgres psql -U piper_relay piper_relay`.
-- Logs and metrics: unchanged — the ops endpoint is on the same loopback port.
+- Logs and metrics: `127.0.0.1:9090` (and the `tailscale serve` in front of
+  it) is the edge's ops endpoint. A relay's is on its container IP:
+  `curl http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' piper-relay-relay-1):9090/logs`.
 - Scaling out is a separate step ([Scale out](#scale-out)); the file as
   shipped is still one relay.
