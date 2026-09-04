@@ -178,3 +178,43 @@ func (s *Store) Owners() (map[string]string, error) {
 	}
 	return out, rows.Err()
 }
+
+// AgentForHost resolves a public hostname to the base domain of the agent
+// that serves it, in the order handlePublic routes: an exact relay-terminated
+// hostname, then a BYO custom domain (exact or subdomain), then an agent base
+// domain (exact or subdomain). Longest match wins within a class.
+func (s *Store) AgentForHost(host string) (string, bool, error) {
+	if base, ok, err := s.scanOne(
+		`SELECT a.base_domain FROM hostnames h JOIN agents a ON a.name = h.agent_name WHERE h.hostname=$1`, host); ok || err != nil {
+		return base, ok, err
+	}
+	if base, ok, err := s.AgentForCustomHost(host); ok || err != nil {
+		return base, ok, err
+	}
+	return s.scanOne(
+		`SELECT base_domain FROM agents
+		  WHERE base_domain=$1 OR right($1, length(base_domain)+1) = '.' || base_domain
+		  ORDER BY length(base_domain) DESC LIMIT 1`, host)
+}
+
+// AgentForCustomHost is AgentForHost restricted to custom domains — the :80
+// rule (Router.LookupCustom), so shared-domain hosts never route over plain
+// HTTP.
+func (s *Store) AgentForCustomHost(host string) (string, bool, error) {
+	return s.scanOne(
+		`SELECT agent_base FROM custom_domains
+		  WHERE domain=$1 OR right($1, length(domain)+1) = '.' || domain
+		  ORDER BY length(domain) DESC LIMIT 1`, host)
+}
+
+func (s *Store) scanOne(query, arg string) (string, bool, error) {
+	var v string
+	err := s.db.QueryRow(query, arg).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return v, true, nil
+}

@@ -194,3 +194,55 @@ func TestDeleteAgentDropsItsOwnerRow(t *testing.T) {
 		t.Fatalf("DeleteAgent with an owner row: %v", err)
 	}
 }
+
+func TestAgentForHostPrecedence(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	base := en.BaseDomain
+	host, err := st.RegisterHostname(base, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddCustomDomain(base, "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name string
+		host string
+		want string
+		ok   bool
+	}{
+		{"terminated hostname", host, base, true},
+		{"custom exact", "shop.example.com", base, true},
+		{"custom subdomain", "www.shop.example.com", base, true},
+		{"base exact", base, base, true},
+		{"base subdomain", "app." + base, base, true},
+		{"unknown", "nobody.example.net", "", false},
+		{"suffix without dot", "x" + base, "", false},
+	}
+	for _, c := range cases {
+		got, ok, err := st.AgentForHost(c.host)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got != c.want || ok != c.ok {
+			t.Errorf("%s: AgentForHost(%q) = %q,%v want %q,%v", c.name, c.host, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestAgentForCustomHostMatchesCustomDomainsOnly(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	base := en.BaseDomain
+	if err := st.AddCustomDomain(base, "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok, _ := st.AgentForCustomHost("www.shop.example.com"); !ok || got != base {
+		t.Fatalf("custom subdomain = %q,%v want %q,true", got, ok, base)
+	}
+	if _, ok, _ := st.AgentForCustomHost("app." + base); ok {
+		t.Fatal("shared-domain host matched the :80 rule")
+	}
+}
