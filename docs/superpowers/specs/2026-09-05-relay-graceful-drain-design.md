@@ -140,9 +140,10 @@ Behaviour:
 
 An idle session closes immediately. Agents with nothing in flight redial at
 once, which is as short as their blip can be before #530. A session with
-work in flight lives until that work ends or the deadline fires. A stream
-that opens between the zero read and the `Close` is lost; the window is one
-tick and #530's owner skip removes it.
+work in flight lives until that work ends or the deadline fires. The window
+that is lost is any connection the relay has accepted but not yet turned
+into a stream (still inside the SNI/Host peek), plus the tick between the
+zero read and the `Close`; #530's owner skip removes it.
 
 Two small exports make this possible:
 
@@ -238,10 +239,9 @@ All relay tests run against Postgres via the existing `openTestStore`.
 
 ## Deploy order
 
-Drop the two ephemeral tables, roll the relays, then the edge. The order is
-mandatory in one direction: a new edge selects the `draining` column, and a
-table created by old relays does not have it, so an edge upgraded first
-fails every pool read until a new relay has re-created the table. The other
-direction is safe: an old edge lists only the columns it knows, so under it
-a draining relay merely keeps receiving placements it refuses until the
-edge is upgraded.
+Drop the two ephemeral tables; that step is mandatory and is the only thing
+that matters for this release. Both `piper-relay` and `piper-edge` apply
+the same `schema.sql`, so after the drop whichever binary opens the store
+first re-creates the tables with the new `draining` column — roll order is
+irrelevant. Skip the drop and every new relay's heartbeat fails, leaving no
+relay placeable no matter which binary was rolled first.

@@ -167,6 +167,10 @@ the row is deleted and in-flight webhook deliveries park (up to 35 s more).
 Give it a 60 s stop timeout: systemd's default `TimeoutStopSec` (90 s)
 already covers it; on compose that is `stop_grace_period: 60s`, on ECS
 `stopTimeout: 60`, on Kubernetes `terminationGracePeriodSeconds: 60`.
+The relay reads the signal channel once, so a second SIGTERM (another
+`docker stop` or Ctrl-C) during the drain changes nothing — the only
+escalation is SIGKILL, which the orchestrator sends once the stop timeout
+elapses.
 Tunnels still drop when their session closes and agents reconnect on their
 own (piperd's tunnel client retries in the background) until #530 gives
 each agent a second session. Verify: `journalctl -u piper-relay -f` shows
@@ -202,8 +206,11 @@ so a release that changes either is dropped with
 `DROP TABLE agent_owners, relay_instances;`, both together. Dropping only
 `relay_instances` with `CASCADE` would remove the foreign key from
 `agent_owners`, and `CREATE TABLE IF NOT EXISTS` would never put it back.
-Roll relays before the edge: the edge selects columns of these tables that
-only a new relay creates.
+The drop is mandatory and is the only thing that matters for this release:
+both `piper-relay` and `piper-edge` apply the same `schema.sql`, so after
+the drop whichever binary opens the store first re-creates the tables with
+the new column. Skip the drop and every new relay's heartbeat fails,
+leaving the whole pool unplaceable regardless of roll order.
 
 ```bash
 sudo systemctl stop piper-relay
