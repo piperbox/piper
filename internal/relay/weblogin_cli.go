@@ -2,7 +2,6 @@ package relay
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"html"
@@ -12,26 +11,6 @@ import (
 	"strings"
 	"time"
 )
-
-// cliLogin is one in-flight brokered CLI browser login (#291).
-//
-// Two bindings keep it safe on a public relay. The user code, shown only in the
-// caller's terminal, must be entered in the browser before the flow proceeds —
-// so an attacker who phishes a victim into authorizing cannot also supply the
-// code, exactly the device-flow trust model. The cookie set at that moment then
-// binds the same browser through to the callback. Nothing here links an
-// installation — that stays on the HMAC-signed webhook; the callback only reads
-// whether one exists yet, to decide whether to bounce the browser to install.
-type cliLogin struct {
-	userCode  string
-	expires   time.Time
-	confirmed bool // the user entered the code in the browser
-	// Set once the callback completes; collected by the CLI's poll.
-	done       bool
-	credential string
-	username   string
-	installURL string // "" once the account already has an installation
-}
 
 const cliLoginTTL = 10 * time.Minute
 
@@ -68,16 +47,11 @@ func (a *api) cliLoginStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "brokered login not configured", http.StatusServiceUnavailable)
 		return
 	}
-	now := time.Now()
-	a.mu.Lock()
-	for h, s := range a.cliStates {
-		if now.After(s.expires) {
-			delete(a.cliStates, h)
-		}
-	}
 	handle, code := randToken(16), userCode()
-	a.cliStates[handle] = &cliLogin{userCode: code, expires: now.Add(cliLoginTTL)}
-	a.mu.Unlock()
+	if err := a.st.PutCLIHandle(handle, code, cliLoginTTL); err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"handle": handle, "user_code": code})
 }
 
@@ -124,24 +98,12 @@ func (a *api) cliLoginConfirm(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
-	entered := normalizeCode(r.PostFormValue("code"))
-	now := time.Now()
-	var handle string
-	a.mu.Lock()
-	for h, s := range a.cliStates {
-		if now.After(s.expires) {
-			delete(a.cliStates, h)
-			continue
-		}
-		if !s.confirmed && entered != "" &&
-			subtle.ConstantTimeCompare([]byte(normalizeCode(s.userCode)), []byte(entered)) == 1 {
-			s.confirmed = true
-			handle = h
-			break
-		}
+	handle, ok, err := a.st.ConfirmCLIHandle(r.PostFormValue("code"))
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
 	}
-	a.mu.Unlock()
-	if handle == "" {
+	if !ok {
 		a.renderCLILoginPage(w, "That code didn't match. Check your terminal and try again.")
 		return
 	}
@@ -161,16 +123,18 @@ func (a *api) cliCallback(w http.ResponseWriter, r *http.Request) bool {
 	if state == "" {
 		return false
 	}
-	a.mu.Lock()
-	s, ok := a.cliStates[state]
-	a.mu.Unlock()
+	h, ok, err := a.st.CLIHandle(state)
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return true
+	}
 	if !ok {
 		return false // not a CLI handle — let the dashboard flow try
 	}
 
 	code := r.URL.Query().Get("code")
 	c, err := r.Cookie(stateCookie)
-	if !s.confirmed || code == "" || err != nil || c.Value != state || time.Now().After(s.expires) {
+	if !h.Confirmed || code == "" || err != nil || c.Value != state {
 		http.Error(w, "bad state", http.StatusBadRequest)
 		return true
 	}
@@ -188,19 +152,16 @@ func (a *api) cliCallback(w http.ResponseWriter, r *http.Request) bool {
 	if denyDisabled(w, acc) {
 		return true
 	}
-	cred, err := a.st.MintAccountCredential(acc.ID)
-	if err != nil {
-		http.Error(w, "credential error", http.StatusInternalServerError)
+	// Record who logged in; the credential is minted by the poll that
+	// collects it, so no secret sits in the handle row (#522).
+	if err := a.st.FinishCLIHandle(state, acc.ID); err != nil {
+		http.Error(w, "bad state", http.StatusBadRequest)
 		return true
 	}
 	installURL := ""
 	if insts, _ := a.st.InstallationsForAccount(acc.ID); len(insts) == 0 {
 		installURL = a.ghApp.InstallURL()
 	}
-
-	a.mu.Lock()
-	s.done, s.credential, s.username, s.installURL = true, cred, acc.Username, installURL
-	a.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: "", MaxAge: -1, Path: "/v1/login",
@@ -228,32 +189,33 @@ func (a *api) cliLoginPoll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	a.mu.Lock()
-	s, ok := a.cliStates[req.Handle]
-	if !ok {
-		a.mu.Unlock()
+	accountID, username, state, err := a.st.TakeFinishedCLIHandle(req.Handle)
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	switch state {
+	case cliHandleUnknown:
 		http.Error(w, "unknown or expired handle", http.StatusBadRequest)
 		return
-	}
-	if s.done {
-		delete(a.cliStates, req.Handle) // single use
-		out := map[string]string{
-			"account_credential": s.credential,
-			"username":           s.username,
-			"install_url":        s.installURL,
-		}
-		a.mu.Unlock()
-		writeJSON(w, http.StatusOK, out)
+	case cliHandlePending:
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": "authorization_pending"})
 		return
 	}
-	expired := time.Now().After(s.expires)
-	if expired {
-		delete(a.cliStates, req.Handle)
-	}
-	a.mu.Unlock()
-	if expired {
-		http.Error(w, "login expired", http.StatusBadRequest)
+	// Done: this relay mints. The row is already gone, so a retry after a
+	// mint failure restarts the flow — the same thing a 500 here always meant.
+	cred, err := a.st.MintAccountCredential(accountID)
+	if err != nil {
+		http.Error(w, "credential error", http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "authorization_pending"})
+	installURL := ""
+	if insts, _ := a.st.InstallationsForAccount(accountID); len(insts) == 0 && a.ghApp != nil {
+		installURL = a.ghApp.InstallURL()
+	}
+	writeJSON(w, http.StatusOK, map[string]string{
+		"account_credential": cred,
+		"username":           username,
+		"install_url":        installURL,
+	})
 }

@@ -38,9 +38,9 @@ func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Rout
 // deliberately keeps private (the reconcile clock).
 func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp, self *Instance) (*api, http.Handler) {
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
-		webRedirects: webRedirects,
-		cliStates:    map[string]*cliLogin{}, lastReconcile: map[string]time.Time{},
-		now: time.Now, ghApp: ghApp}
+		webRedirects:  webRedirects,
+		lastReconcile: map[string]time.Time{},
+		now:           time.Now, ghApp: ghApp}
 	if wv, ok := v.(WebVerifier); ok {
 		a.webv = wv
 	}
@@ -79,7 +79,6 @@ type api struct {
 	now func() time.Time // clock seam for the reconcile throttle; tests override
 
 	mu            sync.Mutex
-	cliStates     map[string]*cliLogin // handle → pending CLI browser login (#291)
 	lastReconcile map[string]time.Time // account id → last installation reconcile (#470)
 
 	// Shared per-IP bucket for the two unauthenticated login endpoints (#106):
