@@ -140,3 +140,54 @@ func TestLoginHitCountsWithinWindowAndResets(t *testing.T) {
 		t.Fatalf("login_rate rows = %d, want 1 (stale windows swept)", n)
 	}
 }
+
+// makeDue moves a device flow's next poll into the past.
+func makeDue(t *testing.T, st *Store, handle string) {
+	t.Helper()
+	if _, err := st.db.Exec(`UPDATE login_device_flows SET next_poll_at = now() WHERE handle = $1`, handle); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDeviceFlowDueAndDefer(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.PutDeviceFlow("h1", "dc-1", 5, 15*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	fl, ok, err := st.DeviceFlow("h1")
+	if err != nil || !ok || fl.DeviceCode != "dc-1" || fl.Interval != 5 || fl.Due {
+		t.Fatalf("fresh flow = %+v ok=%v err=%v, want not yet due", fl, ok, err)
+	}
+	makeDue(t, st, "h1")
+	if fl, _, _ := st.DeviceFlow("h1"); !fl.Due {
+		t.Fatal("flow not due after next_poll_at passed")
+	}
+	if err := st.DeferDeviceFlow("h1", 10*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if fl, _, _ := st.DeviceFlow("h1"); fl.Due {
+		t.Fatal("flow still due after defer")
+	}
+	if err := st.DeleteDeviceFlow("h1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.DeviceFlow("h1"); ok {
+		t.Fatal("flow readable after delete")
+	}
+}
+
+func TestDeviceFlowExpiredIsInvisibleAndSwept(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.PutDeviceFlow("stale", "dc-0", 5, -time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.DeviceFlow("stale"); ok {
+		t.Fatal("expired flow readable")
+	}
+	if err := st.PutDeviceFlow("fresh", "dc-1", 5, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, st, `SELECT COUNT(*) FROM login_device_flows`); n != 1 {
+		t.Fatalf("rows after sweep = %d, want 1", n)
+	}
+}

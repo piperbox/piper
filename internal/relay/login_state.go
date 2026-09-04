@@ -171,6 +171,56 @@ func (s *Store) TakeFinishedCLIHandle(handle string) (string, string, cliHandleS
 	return "", "", cliHandleUnknown, nil
 }
 
+// DeviceFlow is one GitHub device-code login as the poll sees it.
+type DeviceFlow struct {
+	DeviceCode string
+	Interval   int  // seconds between upstream polls, as GitHub asked
+	Due        bool // next_poll_at has passed: the caller may ask GitHub now
+}
+
+// PutDeviceFlow records a started device flow. The first upstream poll is
+// due one interval from now, as GitHub's protocol requires.
+func (s *Store) PutDeviceFlow(handle, deviceCode string, interval int, ttl time.Duration) error {
+	if _, err := s.db.Exec(`DELETE FROM login_device_flows WHERE expires_at <= now()`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO login_device_flows(handle, device_code, interval_secs, next_poll_at, expires_at)
+		 VALUES($1, $2, $3, now() + make_interval(secs => $4), now() + make_interval(secs => $5))`,
+		handle, deviceCode, interval, float64(interval), ttl.Seconds())
+	return err
+}
+
+// DeviceFlow reads one unexpired flow; Due is evaluated on the server clock.
+func (s *Store) DeviceFlow(handle string) (DeviceFlow, bool, error) {
+	var fl DeviceFlow
+	err := s.db.QueryRow(
+		`SELECT device_code, interval_secs, next_poll_at <= now()
+		   FROM login_device_flows WHERE handle = $1 AND expires_at > now()`,
+		handle).Scan(&fl.DeviceCode, &fl.Interval, &fl.Due)
+	if errors.Is(err, sql.ErrNoRows) {
+		return DeviceFlow{}, false, nil
+	}
+	if err != nil {
+		return DeviceFlow{}, false, err
+	}
+	return fl, true, nil
+}
+
+// DeferDeviceFlow pushes the next upstream poll `by` into the future.
+func (s *Store) DeferDeviceFlow(handle string, by time.Duration) error {
+	_, err := s.db.Exec(
+		`UPDATE login_device_flows SET next_poll_at = now() + make_interval(secs => $2) WHERE handle = $1`,
+		handle, by.Seconds())
+	return err
+}
+
+// DeleteDeviceFlow retires a flow once its outcome has been handed out.
+func (s *Store) DeleteDeviceFlow(handle string) error {
+	_, err := s.db.Exec(`DELETE FROM login_device_flows WHERE handle = $1`, handle)
+	return err
+}
+
 // LoginHit records one login request from key and returns how many the
 // current fixed window has seen, including this one. now is the caller's
 // clock (a test seam); window is the fixed window length. Windows an hour
