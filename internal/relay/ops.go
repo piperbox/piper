@@ -22,47 +22,63 @@ type Metrics struct {
 	connsRouted   *prometheus.CounterVec
 	connsUnrouted *prometheus.CounterVec
 	activeStreams prometheus.Gauge
+	dialFailures  *prometheus.CounterVec
 }
 
-func NewMetrics(router *Router) *Metrics {
+// NewMetrics builds the relay's instruments: traffic counters plus topology
+// gauges read from router at scrape time.
+func NewMetrics(router *Router) *Metrics { return newMetrics("piper_relay", router) }
+
+// NewEdgeMetrics builds piper-edge's instruments: the same traffic counters
+// under the piper_edge prefix plus backend dial failures. The edge holds no
+// sessions, so there are no topology gauges.
+func NewEdgeMetrics() *Metrics { return newMetrics("piper_edge", nil) }
+
+func newMetrics(prefix string, router *Router) *Metrics {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
-	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "piper_relay_agents_connected",
-		Help: "Agent tunnel sessions currently registered.",
-	}, func() float64 { a, _, _ := router.Counts(); return float64(a) }))
-	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "piper_relay_hostnames_routed",
-		Help: "Relay-terminated app hostnames currently routed.",
-	}, func() float64 { _, h, _ := router.Counts(); return float64(h) }))
-	reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-		Name: "piper_relay_custom_domains_routed",
-		Help: "BYO custom domains currently routed.",
-	}, func() float64 { _, _, c := router.Counts(); return float64(c) }))
+	if router != nil {
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: prefix + "_agents_connected",
+			Help: "Agent tunnel sessions currently registered.",
+		}, func() float64 { a, _, _ := router.Counts(); return float64(a) }))
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: prefix + "_hostnames_routed",
+			Help: "Relay-terminated app hostnames currently routed.",
+		}, func() float64 { _, h, _ := router.Counts(); return float64(h) }))
+		reg.MustRegister(prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: prefix + "_custom_domains_routed",
+			Help: "BYO custom domains currently routed.",
+		}, func() float64 { _, _, c := router.Counts(); return float64(c) }))
+	}
 
 	m := &Metrics{
 		reg: reg,
 		connsAccepted: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "piper_relay_conns_accepted_total",
+			Name: prefix + "_conns_accepted_total",
 			Help: "Connections accepted, by public listener.",
 		}, []string{"listener"}),
 		connsRouted: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "piper_relay_conns_routed_total",
+			Name: prefix + "_conns_routed_total",
 			Help: "Connections whose SNI/Host matched a registered session.",
 		}, []string{"listener"}),
 		connsUnrouted: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "piper_relay_conns_unrouted_total",
+			Name: prefix + "_conns_unrouted_total",
 			Help: "Connections that completed a head read but matched no session.",
 		}, []string{"listener"}),
 		activeStreams: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "piper_relay_active_streams",
-			Help: "Connections currently being spliced down an agent tunnel.",
+			Name: prefix + "_active_streams",
+			Help: "Connections currently being spliced.",
 		}),
+		dialFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_backend_dial_failures_total",
+			Help: "Backend relay dials that failed, by public listener (edge only).",
+		}, []string{"listener"}),
 	}
-	reg.MustRegister(m.connsAccepted, m.connsRouted, m.connsUnrouted, m.activeStreams)
+	reg.MustRegister(m.connsAccepted, m.connsRouted, m.connsUnrouted, m.activeStreams, m.dialFailures)
 	return m
 }
 
@@ -88,6 +104,13 @@ func (m *Metrics) ConnUnrouted(listener string) {
 		return
 	}
 	m.connsUnrouted.WithLabelValues(listener).Inc()
+}
+
+func (m *Metrics) DialFailed(listener string) {
+	if m == nil {
+		return
+	}
+	m.dialFailures.WithLabelValues(listener).Inc()
 }
 
 func (m *Metrics) StreamStart() {

@@ -306,7 +306,10 @@ func (s *Store) ParkEvent(agentName, app, ref, event string, payload []byte) err
 		agentName, app, ref, event, payload, stamp, next); err != nil {
 		return err
 	}
-	return s.evictOldestPending(agentName)
+	if err := s.evictOldestPending(agentName); err != nil {
+		return err
+	}
+	return notify(s.db, chanEvents, agentName)
 }
 
 // evictOldestPending trims agentName's parked events down to the newest

@@ -177,3 +177,14 @@ func TestReadAppKeyMissing(t *testing.T) {
 		t.Fatal("missing key file accepted")
 	}
 }
+
+func TestAdvertiseHostEnvIsHonoured(t *testing.T) {
+	t.Setenv("PIPER_RELAY_ADVERTISE_HOST", "10.9.8.7")
+	inst, err := relay.NewInstance(env("PIPER_RELAY_ADVERTISE_HOST", ""), ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.TunnelAddr != "10.9.8.7:7000" {
+		t.Fatalf("tunnel addr = %q", inst.TunnelAddr)
+	}
+}

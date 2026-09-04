@@ -32,7 +32,7 @@ func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
 	defer ln.Close()
 
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil, testInstance(t, st))
 
 	customDomain := "app.example.com"
 
@@ -153,7 +153,7 @@ func TestServeTunnelLogsRejectedHandshake(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	go acceptTunnels(ln, st, NewRouter(), nil, nil, nil)
+	go acceptTunnels(ln, st, NewRouter(), nil, nil, nil, testInstance(t, st))
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {

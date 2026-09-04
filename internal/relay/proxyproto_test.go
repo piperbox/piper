@@ -278,7 +278,7 @@ func TestServeWrapsPublicListenersWhenProxyProtocolEnabled(t *testing.T) {
 	tlsAddr, httpAddr, tunnelAddr := freeTCPAddr(t), freeTCPAddr(t), freeTCPAddr(t)
 	serveErr := make(chan error, 1)
 	go func() {
-		serveErr <- Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, nil, nil, nil, true)
+		serveErr <- Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, nil, nil, nil, testInstance(t, st), true)
 	}()
 
 	// dial waits out Serve's startup and fails fast if Serve itself died. It
@@ -463,7 +463,7 @@ func TestProxyProtocolTunnelRejectionNamesHeaderSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	go acceptTunnels(proxyV2Listener(raw), st, NewRouter(), nil, nil, nil)
+	go acceptTunnels(proxyV2Listener(raw), st, NewRouter(), nil, nil, nil, testInstance(t, st))
 
 	conn, err := net.Dial("tcp", raw.Addr().String())
 	if err != nil {
@@ -495,7 +495,7 @@ func TestProxyProtocolDisabledIgnoresSpoofedHeader(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	go acceptTunnels(raw, st, NewRouter(), nil, nil, nil) // unwrapped: feature off
+	go acceptTunnels(raw, st, NewRouter(), nil, nil, nil, testInstance(t, st)) // unwrapped: feature off
 
 	conn, err := net.Dial("tcp", raw.Addr().String())
 	if err != nil {

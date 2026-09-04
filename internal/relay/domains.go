@@ -114,6 +114,9 @@ func (s *Store) AddCustomDomain(baseDomain, domain string) error {
 		}
 		return err
 	}
+	if err := notify(tx, chanHostnames, domain); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -183,7 +186,7 @@ func (s *Store) ConfirmCustomDomain(baseDomain, domain string) error {
 	if n == 0 {
 		return ErrDomainNotFound
 	}
-	return nil
+	return notify(s.db, chanHostnames, domain)
 }
 
 // RemoveCustomDomain drops the agent's own claim on domain. Idempotent —
@@ -210,5 +213,8 @@ func (s *Store) removeCustomDomainOwned(baseDomain, domain string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	return n > 0, nil
+	if n == 0 {
+		return false, nil
+	}
+	return true, notify(s.db, chanHostnames, domain)
 }

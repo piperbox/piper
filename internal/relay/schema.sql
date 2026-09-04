@@ -137,3 +137,30 @@ CREATE TABLE IF NOT EXISTS pending_events (
     next_try_at TEXT NOT NULL,
     PRIMARY KEY (agent_name, app, ref)
 );
+
+-- relay_instances is the pool of live relay processes an edge can dial. A
+-- row is live while last_seen is within instanceTTL (heartbeat every 5 s);
+-- liveness is a read-side predicate, so a crashed relay drops out of routing
+-- without anyone deleting anything. Whoever reads a dead row deletes it. The
+-- four addrs are what an edge dials for each of the relay's listeners.
+-- TIMESTAMPTZ here (unlike the TEXT stamps above) because the liveness
+-- predicate compares against the server's now(), never a relay's clock.
+CREATE TABLE IF NOT EXISTS relay_instances (
+    id          TEXT PRIMARY KEY,
+    started_at  TIMESTAMPTZ NOT NULL,
+    last_seen   TIMESTAMPTZ NOT NULL,
+    sessions    INTEGER NOT NULL DEFAULT 0,
+    tls_addr    TEXT NOT NULL,
+    http_addr   TEXT NOT NULL,
+    tunnel_addr TEXT NOT NULL,
+    api_addr    TEXT NOT NULL
+);
+
+-- agent_owners says which instance terminates an agent's tunnel. The
+-- instance cascade takes ownership down with a deleted instance row; the
+-- agents cascade lets DeleteAgent stay unchanged.
+CREATE TABLE IF NOT EXISTS agent_owners (
+    agent_name  TEXT PRIMARY KEY REFERENCES agents(name) ON DELETE CASCADE,
+    instance_id TEXT NOT NULL REFERENCES relay_instances(id) ON DELETE CASCADE,
+    since       TIMESTAMPTZ NOT NULL
+);

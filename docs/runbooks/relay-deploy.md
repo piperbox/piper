@@ -320,16 +320,127 @@ volumes:
 - **Upgrade** = pull the new tag, recreate the relay container. The
   schema-change caveats above apply identically — drop the named table(s) in
   `psql` first for a schema-change release.
-- **Still exactly one replica.** The database is no longer the reason, but two
-  remain: each agent's tunnel lives in one relay process's memory (traffic for
-  it must reach that process), and in-flight logins (device-flow polls,
-  browser-login state) are per-process. Both are tracked follow-ups; until
-  they land, scale up, never out.
+- **More than one replica:** put `piper-edge` in front — see [Scale out](#scale-out).
+  Without it, scale up, never out: each agent's tunnel lives in one relay
+  process's memory and traffic for it must reach that process.
 - **Fronting:** custom-domain :443 is SNI passthrough (certs live on the
   boxes) and :7000 is a raw TCP protocol — only an L4/TCP ingress can sit in
   front, never an HTTP(S)-terminating one. Behind any L4 proxy the relay sees
   the proxy's IP ([#485](https://github.com/piperbox/piper/issues/485)); with
   a direct public IP (host networking) nothing is lost.
+
+## Scale out
+
+`piper-edge` is the only public entrypoint; `piper-relay` runs as N processes
+behind it and nothing else changes. Design:
+[`docs/superpowers/specs/2026-09-04-relay-edge-ownership-design.md`](../superpowers/specs/2026-09-04-relay-edge-ownership-design.md).
+
+**How it routes.** Each agent's tunnel is terminated by exactly one relay,
+which records itself as the owner in Postgres (`relay_instances` with a 5 s
+heartbeat, `agent_owners`). The edge keeps an in-memory copy, refreshed by
+LISTEN/NOTIFY and a 15 s poll, and forwards raw bytes:
+
+| Listener | Decision |
+| --- | --- |
+| `:443` | SNI → agent → owner relay. `api.<apex>` is pinned to the earliest-started relay until login-flow state moves to Postgres. |
+| `:80` | Host → custom domain → owner relay (custom domains only, as today). |
+| `:7000` | the live relay with the fewest sessions. |
+
+Control-API calls that land on a non-owner relay hop to the owner over the
+internal `:8080`; webhooks parked by any relay wake the owner. Relays never
+forward data traffic to each other.
+
+**Client IP chain.** The edge writes a PROXY v2 header on every backend
+connection, so every relay behind an edge **must** run with
+`PIPER_RELAY_PROXY_PROTOCOL=1` (and must not be reachable except through the
+edge). If a cloud balancer that speaks PROXY protocol sits in front of the
+edge, set `PIPER_EDGE_PROXY_PROTOCOL=1` on the edge too.
+
+**Edge configuration.** `PIPER_EDGE_DB_URL` (the relays' database) and
+`PIPER_EDGE_APEX` are required; `PIPER_EDGE_TLS_ADDR` / `HTTP_ADDR` /
+`TUNNEL_ADDR` default to `:443` / `:80` / `:7000`; `PIPER_EDGE_OPS_ADDR`,
+`PIPER_EDGE_METRICS`, `PIPER_EDGE_LOGS` mirror the relay's ops surface. The
+edge holds no certificate, no GitHub App and no relay env: a relay env file
+handed to it fails on the missing `PIPER_EDGE_*` names.
+
+**Relay configuration.** `PIPER_RELAY_ADVERTISE_HOST` is the host edges dial;
+it defaults to the first non-loopback IPv4 (the container or pod IP), which
+is right on a bridge network and in a pod. Ports are the relay's own listener
+ports.
+
+**Single host (compose).** The edge owns the public ports on the host
+network; relays scale on the bridge network with no published ports:
+
+```yaml
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: piper_relay
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: piper_relay
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - relay_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piper_relay -d piper_relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  edge:
+    image: ghcr.io/piperbox/piper-edge:<version>
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PIPER_EDGE_DB_URL: postgres://piper_relay:change-me@127.0.0.1:5432/piper_relay
+      PIPER_EDGE_APEX: public.getpiper.dev
+  relay:
+    image: ghcr.io/piperbox/piper-relay:<version>
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: piper-relay.env
+    environment:
+      PIPER_RELAY_DB_URL: postgres://piper_relay:change-me@postgres:5432/piper_relay
+      PIPER_RELAY_PROXY_PROTOCOL: "1"
+      PIPER_RELAY_API_ADDR: ":8080"
+    volumes:
+      - ./certs:/var/lib/piper-relay:ro
+volumes:
+  relay_pg:
+```
+
+Postgres must publish `127.0.0.1:5432` for the host-networked edge (the
+snippet above and the Hetzner file both do). Add capacity with
+`docker compose up -d --scale relay=3`; nothing is configured. The relay's
+`:8080` is reachable only on the bridge network, which is what the control hop
+relies on. Each relay's ops endpoint is on its own container IP; scrape it
+there or publish it per replica.
+
+**Kubernetes.** `piper-edge` as a Deployment behind a TCP Service that holds
+the public IP (or a cloud NLB with PROXY protocol and
+`PIPER_EDGE_PROXY_PROTOCOL=1`; otherwise `externalTrafficPolicy: Local`).
+`piper-relay` as a Deployment with `PIPER_RELAY_ADVERTISE_HOST` from the
+downward API (`status.podIP`), `PIPER_RELAY_PROXY_PROTOCOL=1`, and a
+NetworkPolicy admitting only edge pods and other relays. An L7 ingress may
+terminate `api.<apex>` with a cert-manager certificate and route it to the
+relays' `:8080` Service — that port is plain HTTP written to be fronted with
+TLS — with DNS pointing `api.<apex>` at the ingress and the wildcard at the
+edge. The ingress must never take the wildcard: per-hostname routing to the
+owning pod is the dynamic map the edge exists to hold, and box-held
+certificates need L4 passthrough anyway.
+
+**What still drops.** Restarting a relay drops its tunnels; agents redial
+from a 1 s backoff and the edge places them on a survivor. Restarting the
+edge on a single host drops every tunnel through it (on Kubernetes the
+Service holds the port across a rolling restart). Both are closed by the
+graceful-drain follow-up in the scale-out epic.
 
 ## Single host with compose
 
@@ -432,5 +543,5 @@ Relay before agents, as always; nothing on the boxes changes.
   schema-change release, drop the named tables first with
   `sudo docker compose exec postgres psql -U piper_relay piper_relay`.
 - Logs and metrics: unchanged — the ops endpoint is on the same loopback port.
-- Still exactly one replica, for the reasons above; this is a packaging
-  change, not a scaling one.
+- Scaling out is a separate step ([Scale out](#scale-out)); the file as
+  shipped is still one relay.

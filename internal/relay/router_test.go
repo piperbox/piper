@@ -236,3 +236,20 @@ func TestRouterCounts(t *testing.T) {
 		t.Fatalf("after Unregister: Counts() = %d,%d,%d; want 1,0,0", a, h, c)
 	}
 }
+
+func TestHoldsIsExactAndBasesListsAgentsOnly(t *testing.T) {
+	r := NewRouter()
+	relaySess, _ := pipeSession(t, "box.public.getpiper.co")
+	r.Register(relaySess)
+	r.RegisterCustom("shop.example.com", relaySess)
+
+	if _, ok := r.Holds("box.public.getpiper.co"); !ok {
+		t.Fatal("Holds missed the registered base")
+	}
+	if _, ok := r.Holds("app.box.public.getpiper.co"); ok {
+		t.Fatal("Holds walked a suffix; it must be exact")
+	}
+	if got := r.Bases(); len(got) != 1 || got[0] != "box.public.getpiper.co" {
+		t.Fatalf("Bases() = %v, want the one agent base", got)
+	}
+}

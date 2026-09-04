@@ -29,6 +29,8 @@ type Agent struct {
 }
 
 type Store struct {
+	// dsn is what listen dials for LISTEN; the pool cannot.
+	dsn        string
 	db         *sql.DB
 	apex       string
 	maxAgents  int
@@ -86,7 +88,7 @@ func Open(dsn string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}
-	return &Store{db: db, nowFunc: time.Now}, nil
+	return &Store{db: db, dsn: dsn, nowFunc: time.Now}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

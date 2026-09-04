@@ -50,6 +50,23 @@ func routeFromContext(ctx context.Context) *proxyRoute {
 	return rt
 }
 
+// hopHeaderName marks a request that has already been forwarded once by
+// another relay's control hop. A router miss on a request carrying this
+// header must not hop again — see the NewControlProxy doc comment.
+const hopHeaderName = "X-Piper-Hop"
+
+// hopCtxKey carries the owner relay's api_addr for a hopped request.
+type hopCtxKey struct{}
+
+func withHop(ctx context.Context, apiAddr string) context.Context {
+	return context.WithValue(ctx, hopCtxKey{}, apiAddr)
+}
+
+func hopFromContext(ctx context.Context) string {
+	addr, _ := ctx.Value(hopCtxKey{}).(string)
+	return addr
+}
+
 // tunnelDialer opens a control-API stream on a live session. *tunnel.Session
 // satisfies it; tests inject a blocking opener to exercise dial cancellation.
 type tunnelDialer interface {
@@ -95,7 +112,25 @@ func dialControlStream(ctx context.Context, d tunnelDialer) (net.Conn, error) {
 // relay hop grants nothing at the box. Unknown and unowned agents are both
 // 404 so existence is never leaked across tenants. Bare /agents lists the
 // caller's own enrolled agents with liveness (#98).
-func NewControlProxy(st *Store, router *Router) http.Handler {
+//
+// With N relays an agent's tunnel may live in another process. self is this
+// process's pool identity; when the router misses and Postgres names a live
+// owner that is not self, the request is forwarded unchanged — original
+// path, original Authorization — to that relay's control API over plain
+// HTTP on the internal network (:8080 is documented as "front with TLS"),
+// where it is authenticated and rewritten exactly as here. The hop marks the
+// outbound request with the hopHeaderName header; a relay that sees that
+// header on a router miss never hops it again, answering 503 instead
+// exactly like the dead-owner case. That header — not the owner.ID != self.ID
+// check alone — is what bounds the hop to one level: the owner row is a live
+// upsert a reconnecting agent can move at any moment, so by the time a hop
+// lands the owner may no longer name the sender, and without the header a
+// flapping agent could ping-pong the request between relays indefinitely.
+// Liveness answers (GET /agents, GET /agents/<base>, the DELETE refusal)
+// count a live owner row as connected, and fail closed — 500, not a false
+// "not connected" — when the owner lookup itself errors.
+// self == nil is single-process mode: no hop, router-only liveness.
+func NewControlProxy(st *Store, router *Router, self *Instance) http.Handler {
 	// One Transport + ReverseProxy for the whole control proxy, reused across
 	// every request (the control proxy is built once per relay API / Router, so
 	// this is effectively a per-router singleton). The transport carries no
@@ -128,6 +163,8 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 			if rt.boxToken != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+rt.boxToken)
 			}
+			// Relay-internal bookkeeping; the box has no use for it.
+			pr.Out.Header.Del(hopHeaderName)
 		},
 		Transport:     transport,
 		FlushInterval: -1,
@@ -141,6 +178,53 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 			log.Printf("relay: control proxy to %s failed: %v", base, err)
 			http.Error(w, "box unreachable", http.StatusBadGateway)
 		},
+	}
+	hop := &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "http"
+			pr.Out.URL.Host = hopFromContext(pr.Out.Context())
+			pr.Out.Host = pr.In.Host
+			pr.Out.Header.Set(hopHeaderName, "1")
+			// Everything else — path, query, Authorization — travels as is.
+		},
+		// The dial needs its own bound: ResponseHeaderTimeout starts once the
+		// connection is up, so a hop to a node that is gone (SYN blackholed)
+		// would otherwise hold the caller for the OS SYN-retry budget — the
+		// same 2 s the edge gives a relay.
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: edgeDialTimeout}).DialContext,
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		},
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			log.Printf("relay: control hop to %s failed: %v", hopFromContext(r.Context()), err)
+			http.Error(w, "owner relay unreachable", http.StatusBadGateway)
+		},
+	}
+
+	// liveOwner is the cluster half of liveness: the live instance holding
+	// base, if it is not this process. The error surfaces a broken lookup to
+	// the caller instead of swallowing it — a query-level failure here must
+	// not be silently read as "nobody owns it".
+	liveOwner := func(base string) (InstanceRow, bool, error) {
+		if self == nil {
+			return InstanceRow{}, false, nil
+		}
+		owner, ok, err := st.OwnerOf(base)
+		if err != nil {
+			return InstanceRow{}, false, err
+		}
+		return owner, ok && owner.ID != self.ID, nil
+	}
+	connected := func(base string) (bool, error) {
+		if _, ok := router.Lookup(base); ok {
+			return true, nil
+		}
+		_, ok, err := liveOwner(base)
+		if err != nil {
+			return false, err
+		}
+		return ok, nil
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cred, ok := bearerToken(r)
@@ -173,8 +257,13 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 			}
 			agents := make([]map[string]any, 0, len(visible))
 			for _, a := range visible {
-				_, connected := router.Lookup(a.BaseDomain)
-				agents = append(agents, map[string]any{"agent": a.BaseDomain, "name": a.Name, "owner": a.Owner, "connected": connected})
+				up, err := connected(a.BaseDomain)
+				if err != nil {
+					log.Printf("relay: liveness check for %s: %v", a.BaseDomain, err)
+					http.Error(w, "list failed", http.StatusInternalServerError)
+					return
+				}
+				agents = append(agents, map[string]any{"agent": a.BaseDomain, "name": a.Name, "owner": a.Owner, "connected": up})
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 			return
@@ -196,9 +285,16 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 			case http.MethodGet:
 				// Liveness: answered by the relay itself from its in-memory
 				// session map — never opens a tunnel stream. Offline is an
-				// answer, not an error: 200 with connected:false.
-				_, connected := router.Lookup(base)
-				writeJSON(w, http.StatusOK, map[string]any{"agent": base, "connected": connected})
+				// answer, not an error: 200 with connected:false. A broken
+				// lookup is not offline, though — fail closed instead of
+				// reporting a possibly-live agent as disconnected.
+				up, err := connected(base)
+				if err != nil {
+					log.Printf("relay: liveness check for %s: %v", base, err)
+					http.Error(w, "liveness check failed", http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"agent": base, "connected": up})
 			case http.MethodDelete:
 				// Enrolling a box is owner-only (api.go); removing one must be
 				// too, or a plain member could permanently destroy a box
@@ -213,8 +309,17 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 				// Refuse while the box is live. Removal is irreversible — the
 				// enrollment token is gone and the box must re-enroll — so a
 				// mistyped base domain must not be able to retire a running
-				// box. The caller stops piperd on it and retries.
-				if _, connected := router.Lookup(base); connected {
+				// box. The caller stops piperd on it and retries. A broken
+				// liveness lookup must fail closed here too: proceeding to
+				// delete on an error could destroy a box that is live on
+				// another relay.
+				up, err := connected(base)
+				if err != nil {
+					log.Printf("relay: liveness check for %s: %v", base, err)
+					http.Error(w, "liveness check failed", http.StatusInternalServerError)
+					return
+				}
+				if up {
 					http.Error(w, "box is connected; stop piperd on it first", http.StatusConflict)
 					return
 				}
@@ -241,6 +346,20 @@ func NewControlProxy(st *Store, router *Router) http.Handler {
 
 		sess, ok := router.Lookup(base)
 		if !ok {
+			// A request that already hopped once must never hop again — see
+			// the doc comment above. Answer exactly like the dead-owner case.
+			if r.Header.Get(hopHeaderName) == "" {
+				owner, live, err := liveOwner(base)
+				if err != nil {
+					log.Printf("relay: owner lookup for %s: %v", base, err)
+					http.Error(w, "agent lookup failed", http.StatusInternalServerError)
+					return
+				}
+				if live {
+					hop.ServeHTTP(w, r.WithContext(withHop(r.Context(), owner.APIAddr)))
+					return
+				}
+			}
 			http.Error(w, "agent not connected", http.StatusServiceUnavailable)
 			return
 		}

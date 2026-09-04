@@ -190,3 +190,23 @@ func TestCountersAcceptedHTTP(t *testing.T) {
 	defer conn.Close()
 	waitForScrape(t, m, `piper_relay_conns_accepted_total{listener="http"} 1`)
 }
+
+func TestEdgeMetricsUseTheEdgePrefixAndCountDialFailures(t *testing.T) {
+	m := NewEdgeMetrics()
+	m.ConnAccepted("tls")
+	m.DialFailed("tunnel")
+	rr := httptest.NewRecorder()
+	NewOpsHandler(m, nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rr.Body.String()
+	for _, want := range []string{
+		`piper_edge_conns_accepted_total{listener="tls"} 1`,
+		`piper_edge_backend_dial_failures_total{listener="tunnel"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	if strings.Contains(body, "piper_edge_agents_connected") {
+		t.Error("edge exposes a router gauge it has no router for")
+	}
+}

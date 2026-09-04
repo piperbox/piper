@@ -15,23 +15,28 @@ import (
 
 // NewAPI returns the account API without a tunnel endpoint, control proxy, or
 // web login (tests / LAN). Use NewAPIWithTunnel in production.
-func NewAPI(st *Store, v Verifier) http.Handler { return NewAPIWithTunnel(st, v, "", nil, nil, nil) }
+func NewAPI(st *Store, v Verifier) http.Handler {
+	return NewAPIWithTunnel(st, v, "", nil, nil, nil, nil)
+}
 
 // NewAPIWithTunnel is the full account-facing API: device login, browser
 // (authorization-code) login, enroll, and — when router is non-nil — the
 // /agents/ control proxy (#73). webRedirects is the allowlist of redirect_uri
 // prefixes for the browser flow; empty disables web login (503). ghApp is nil
 // when the relay holds no GitHub App, in which case enroll advertises
-// "github_app": false and boxes stay on the BYO path.
-func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) http.Handler {
-	_, h := newAPI(st, v, tunnelEndpoint, router, webRedirects, ghApp)
+// "github_app": false and boxes stay on the BYO path. self is this process's
+// pool identity, threaded to the control proxy so it can hop a request to
+// the relay that actually holds the agent's tunnel (#521); nil for
+// single-process mode.
+func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp, self *Instance) http.Handler {
+	_, h := newAPI(st, v, tunnelEndpoint, router, webRedirects, ghApp, self)
 	return h
 }
 
 // newAPI builds the account API and returns the concrete value alongside its
 // handler, so same-package tests can drive the seams the exported constructor
 // deliberately keeps private (the reconcile clock).
-func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp) (*api, http.Handler) {
+func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp, self *Instance) (*api, http.Handler) {
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
 		webRedirects: webRedirects, webStates: map[string]webState{},
 		cliStates: map[string]*cliLogin{}, lastReconcile: map[string]time.Time{},
@@ -53,7 +58,7 @@ func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRed
 	mux.HandleFunc("GET /v1/github/status", a.githubStatus)
 	a.registerOrgRoutes(mux)
 	if router != nil {
-		proxy := NewControlProxy(st, router)
+		proxy := NewControlProxy(st, router, self)
 		// Bare /agents (account's agent list, #98) plus the per-agent subtree;
 		// registering the exact path avoids ServeMux's implicit /agents → /agents/
 		// redirect.
