@@ -37,13 +37,13 @@ func waitCond(t *testing.T, timeout time.Duration, desc string, pred func() bool
 
 // serveTunnels is acceptTunnels with an injectable disabled-checker, letting a
 // test drive the watchdog with a store read that fails on demand.
-func serveTunnels(ln net.Listener, st *Store, router *Router, disabled func(string) (bool, error)) {
+func serveTunnels(ln net.Listener, st *Store, router *Router, disabled func(string) (bool, error), inst *Instance) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		go serveTunnel(conn, st, router, disabled, nil, nil)
+		go serveTunnel(conn, st, router, disabled, nil, nil, inst)
 	}
 }
 
@@ -83,7 +83,7 @@ func TestDisabledWatchdogEvictsLiveSession(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil, testInstance(t, st))
 
 	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
 	defer sess.Close()
@@ -131,7 +131,7 @@ func TestDeletedAgentWatchdogEvictsLiveSession(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil, testInstance(t, st))
 
 	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
 	defer sess.Close()
@@ -221,7 +221,7 @@ func TestPostDisableRedialRejected(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go acceptTunnels(ln, st, router, nil, nil, nil)
+	go acceptTunnels(ln, st, router, nil, nil, nil, testInstance(t, st))
 
 	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
@@ -269,7 +269,7 @@ func TestWatchdogTransientReadErrorKeepsSession(t *testing.T) {
 	}
 	defer ln.Close()
 	router := NewRouter()
-	go serveTunnels(ln, st, router, disabled)
+	go serveTunnels(ln, st, router, disabled, testInstance(t, st))
 
 	sess := dialAgent(t, ln.Addr().String(), en.Token, en.BaseDomain)
 	defer sess.Close()

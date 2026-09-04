@@ -197,6 +197,10 @@ func main() {
 	httpAddr := env("PIPER_RELAY_HTTP_ADDR", ":80")
 	tunnelAddr := env("PIPER_RELAY_TUNNEL_ADDR", ":7000")
 	apiAddr := env("PIPER_RELAY_API_ADDR", ":8080")
+	inst, err := relay.NewInstance(env("PIPER_RELAY_ADVERTISE_HOST", ""), tlsAddr, httpAddr, tunnelAddr, apiAddr)
+	if err != nil {
+		log.Fatalf("instance: %v", err)
+	}
 	tunnelPublic := env("PIPER_RELAY_TUNNEL_PUBLIC", "")
 
 	// Opt-in PROXY protocol v2 on the public listeners (#485), for a relay
@@ -331,5 +335,5 @@ func main() {
 	}
 
 	log.Printf("piper-relay: TLS %s, HTTP %s, tunnel %s", tlsAddr, httpAddr, tunnelAddr)
-	log.Fatal(relay.Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, ghApp, delivery, metrics, proxyProto))
+	log.Fatal(relay.Serve(tlsAddr, httpAddr, tunnelAddr, st, tlsCfg, router, ctrl, ghApp, delivery, metrics, inst, proxyProto))
 }

@@ -433,7 +433,7 @@ func TestReconnectRederivesCustomDomains(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tunLn.Close()
-	go acceptTunnels(tunLn, st, router, nil, nil, nil)
+	go acceptTunnels(tunLn, st, router, nil, nil, nil, testInstance(t, st))
 
 	dial := func(tok, base string) *tunnel.Session {
 		t.Helper()
@@ -608,5 +608,67 @@ func TestControlSyncAppsPrunesAndRoutes(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("hostname rows = %d, want 1", n)
+	}
+}
+
+// dialTestTunnel runs serveTunnel for inst on one end of a pipe and dials
+// the agent side, returning the agent's session once the relay holds it.
+func dialTestTunnel(t *testing.T, st *Store, router *Router, inst *Instance, en Enrollment) *tunnel.Session {
+	t.Helper()
+	cc, sc := net.Pipe()
+	t.Cleanup(func() { cc.Close(); sc.Close() })
+	go serveTunnel(sc, st, router, st.AgentDisabled, nil, nil, inst)
+	sess, err := tunnel.Dial(cc, en.Token, en.BaseDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 3*time.Second, "session registered", func() bool {
+		_, ok := router.Lookup(en.BaseDomain)
+		return ok
+	})
+	return sess
+}
+
+func TestServeTunnelRecordsAndClearsOwner(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+
+	sess := dialTestTunnel(t, st, router, inst, en)
+	waitCond(t, 3*time.Second, "owner row written", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == inst.ID
+	})
+	sess.Close()
+	waitCond(t, 3*time.Second, "owner row cleared", func() bool {
+		_, ok, _ := st.OwnerOf(en.BaseDomain)
+		return !ok
+	})
+}
+
+func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	mine := testInstance(t, st)
+	other := testInstance(t, st)
+	router := NewRouter()
+
+	sess := dialTestTunnel(t, st, router, mine, en)
+	waitCond(t, 3*time.Second, "owner row written", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == mine.ID
+	})
+	// The agent reconnected elsewhere while our half-open session lingers.
+	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	sess.Close()
+	waitCond(t, 3*time.Second, "stale session unregistered", func() bool {
+		_, ok := router.Lookup(en.BaseDomain)
+		return !ok
+	})
+	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
+		t.Fatalf("owner after stale unregister = %+v ok=%v, want %s", r, ok, other.ID)
 	}
 }

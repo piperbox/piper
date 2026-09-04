@@ -69,8 +69,10 @@ func (q *connQueue) push(c net.Conn) {
 // address becomes the conn's RemoteAddr for rate limiting and logs. It must
 // stay off unless such a proxy is the only path to the ports — a listener
 // that trusts PROXY headers from arbitrary peers lets anyone spoof their
-// source IP. Blocks until a listener fails.
-func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, router *Router, ctrl http.Handler, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics, proxyProto bool) error {
+// source IP. inst is this process's pool identity; every tunnel it registers
+// is recorded as owned by inst.ID so an edge can route to it. Blocks until a
+// listener fails.
+func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, router *Router, ctrl http.Handler, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics, inst *Instance, proxyProto bool) error {
 	var ctrlQ *connQueue
 	if ctrl != nil && tlsCfg != nil {
 		ctrlQ = newConnQueue()
@@ -92,7 +94,7 @@ func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, 
 	if proxyProto {
 		tunLn = proxyV2Listener(tunLn)
 	}
-	go acceptTunnels(tunLn, st, router, ghApp, delivery, m)
+	go acceptTunnels(tunLn, st, router, ghApp, delivery, m, inst)
 
 	httpLn, err := net.Listen("tcp", httpAddr)
 	if err != nil {
@@ -144,14 +146,14 @@ func tunnelAuth(st *Store) tunnel.Auth {
 	}
 }
 
-func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics) {
+func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp, delivery *TunnelDelivery, m *Metrics, inst *Instance) {
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
 		m.ConnAccepted("tunnel")
-		go serveTunnel(conn, st, router, st.AgentDisabled, ghApp, delivery)
+		go serveTunnel(conn, st, router, st.AgentDisabled, ghApp, delivery, inst)
 	}
 }
 
@@ -161,7 +163,7 @@ func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp,
 // to st.AgentDisabled) so tests can inject store-read failures. ghApp is
 // threaded through to serveControl for token-brokering control ops. delivery,
 // when non-nil, drains any webhooks parked while this box was disconnected.
-func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string) (bool, error), ghApp *GitHubApp, delivery *TunnelDelivery) {
+func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string) (bool, error), ghApp *GitHubApp, delivery *TunnelDelivery, inst *Instance) {
 	// Record what the peer claimed so a rejection can name it. Without this the
 	// relay closed the connection silently and a box with a stale enrollment was
 	// invisible from both sides at once — the agent reported itself connected
@@ -179,6 +181,9 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		return
 	}
 	router.Register(sess)
+	if err := st.SetOwner(sess.BaseDomain, inst.ID); err != nil {
+		log.Printf("agent %s: record owner: %v", sess.BaseDomain, err)
+	}
 	if delivery != nil {
 		delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, sess.BaseDomain) })
 	}
@@ -197,6 +202,7 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	// the fresh session up; the watchdog re-checks next tick.
 	if off, err := disabled(sess.BaseDomain); (err == nil && off) || errors.Is(err, ErrUnknownAccount) {
 		router.Unregister(sess)
+		clearOwner(st, sess.BaseDomain, inst)
 		sess.Close()
 		return
 	}
@@ -209,6 +215,7 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		select {
 		case <-sess.CloseChan():
 			router.Unregister(sess)
+			clearOwner(st, sess.BaseDomain, inst)
 			log.Printf("agent gone: %s", sess.BaseDomain)
 			return
 		case <-ticker.C:
@@ -233,6 +240,15 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 				sess.Close()
 			}
 		}
+	}
+}
+
+// clearOwner releases baseDomain's owner row if inst still holds it. The
+// store's WHERE instance_id = inst.ID is what makes a late unregister from a
+// half-open session harmless after the agent reconnected elsewhere.
+func clearOwner(st *Store, baseDomain string, inst *Instance) {
+	if err := st.ClearOwner(baseDomain, inst.ID); err != nil {
+		log.Printf("agent %s: release owner: %v", baseDomain, err)
 	}
 }
 
