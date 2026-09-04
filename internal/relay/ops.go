@@ -21,6 +21,7 @@ type Metrics struct {
 	connsAccepted *prometheus.CounterVec
 	connsRouted   *prometheus.CounterVec
 	connsUnrouted *prometheus.CounterVec
+	connsDropped  *prometheus.CounterVec
 	activeStreams prometheus.Gauge
 	dialFailures  *prometheus.CounterVec
 }
@@ -73,12 +74,16 @@ func newMetrics(prefix string, router *Router) *Metrics {
 			Name: prefix + "_active_streams",
 			Help: "Connections currently being spliced.",
 		}),
+		connsDropped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: prefix + "_conns_dropped_total",
+			Help: "Connections closed before a usable SNI/Host could be read (scanners, probes, idle timeouts; edge only).",
+		}, []string{"listener"}),
 		dialFailures: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: prefix + "_backend_dial_failures_total",
 			Help: "Backend relay dials that failed, by public listener (edge only).",
 		}, []string{"listener"}),
 	}
-	reg.MustRegister(m.connsAccepted, m.connsRouted, m.connsUnrouted, m.activeStreams, m.dialFailures)
+	reg.MustRegister(m.connsAccepted, m.connsRouted, m.connsUnrouted, m.connsDropped, m.activeStreams, m.dialFailures)
 	return m
 }
 
@@ -104,6 +109,13 @@ func (m *Metrics) ConnUnrouted(listener string) {
 		return
 	}
 	m.connsUnrouted.WithLabelValues(listener).Inc()
+}
+
+func (m *Metrics) ConnDropped(listener string) {
+	if m == nil {
+		return
+	}
+	m.connsDropped.WithLabelValues(listener).Inc()
 }
 
 func (m *Metrics) DialFailed(listener string) {

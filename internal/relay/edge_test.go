@@ -114,7 +114,7 @@ func startRelayBehindEdge(t *testing.T, st *Store, tlsCfg *tls.Config) *edgeRela
 func startEdge(t *testing.T, st *Store) (EdgeConfig, *edge) {
 	t.Helper()
 	cfg := EdgeConfig{Apex: "public.getpiper.co", TLSAddr: freeTCPAddr(t), HTTPAddr: freeTCPAddr(t), TunnelAddr: freeTCPAddr(t)}
-	e := newEdge(cfg, st, nil)
+	e := newEdge(cfg, st, NewEdgeMetrics())
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	errc := make(chan error, 1)
@@ -480,7 +480,7 @@ func TestEdgeNeverRetriesOnTLS(t *testing.T) {
 	if err := st.SetOwner(en.BaseDomain, "dead"); err != nil {
 		t.Fatal(err)
 	}
-	cfg, _ := startEdge(t, st)
+	cfg, e := startEdge(t, st)
 
 	accepted := acceptOne(liveLn)
 	conn := sendClientHello(t, cfg.TLSAddr, "app."+en.BaseDomain)
@@ -501,4 +501,56 @@ func TestEdgeNeverRetriesOnTLS(t *testing.T) {
 		rows, _ := st.LiveInstances()
 		return len(rows) == 1 && rows[0].ID == "live"
 	})
+	// The connection was accepted and matched an owner, but the owner was
+	// dead: it counts as unrouted so accepted decomposes into routed +
+	// unrouted + dropped on :443 the way it already does on :7000 (#526).
+	waitForScrape(t, e.m, `piper_edge_conns_unrouted_total{listener="tls"} 1`)
+}
+
+// TestEdgeCountsDroppedHeads pins the counter #526 asked for: a connection
+// that closes before a usable ClientHello or Host line arrives (a port
+// scanner, a probe) is dropped and counted as such, not left as an unexplained
+// gap between accepted and routed+unrouted.
+func TestEdgeCountsDroppedHeads(t *testing.T) {
+	st := openTestStore(t)
+	cfg, e := startEdge(t, st)
+	for _, addr := range []string{cfg.TLSAddr, cfg.HTTPAddr} {
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Not a TLS record and not an HTTP request line: readSNI/readHost
+		// both reject it, and the close ends any further read.
+		_, _ = conn.Write([]byte("\x00\x01\x02 not a hello\n"))
+		conn.Close()
+	}
+	// Every accepted connection (including startEdge's own readiness probe
+	// on :443) was dropped at the head read, so accepted must decompose
+	// fully into dropped with nothing left over.
+	for _, listener := range []string{"tls", "http"} {
+		accepted := `piper_edge_conns_accepted_total{listener="` + listener + `"}`
+		dropped := `piper_edge_conns_dropped_total{listener="` + listener + `"}`
+		waitCond(t, 2*time.Second, listener+" accepted == dropped", func() bool {
+			a := counterValue(t, e.m, accepted)
+			return a >= 1 && a == counterValue(t, e.m, dropped)
+		})
+	}
+	if got := scrapeMetrics(t, e.m); strings.Contains(got, "piper_edge_conns_unrouted_total") {
+		t.Fatalf("a dropped head must not count as unrouted:\n%s", got)
+	}
+}
+
+// counterValue reads one series from a scrape; 0 when it has not appeared yet.
+func counterValue(t *testing.T, m *Metrics, series string) float64 {
+	t.Helper()
+	for _, line := range strings.Split(scrapeMetrics(t, m), "\n") {
+		if rest, ok := strings.CutPrefix(line, series+" "); ok {
+			var v float64
+			if _, err := fmt.Sscanf(rest, "%g", &v); err != nil {
+				t.Fatalf("parse %q: %v", line, err)
+			}
+			return v
+		}
+	}
+	return 0
 }

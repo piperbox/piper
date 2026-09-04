@@ -236,6 +236,7 @@ func (e *edge) handleTLS(conn net.Conn) {
 	defer conn.Close()
 	sni, buffered, err := readSNI(conn)
 	if err != nil {
+		e.m.ConnDropped("tls")
 		return
 	}
 	var target InstanceRow
@@ -252,14 +253,18 @@ func (e *edge) handleTLS(conn net.Conn) {
 		return
 	}
 	// No retry here: the owner is unique. If it is dead the agent will
-	// reconnect and a new owner row will arrive.
-	_ = e.forward("tls", conn, buffered, target, target.TLSAddr)
+	// reconnect and a new owner row will arrive; meanwhile the connection
+	// went nowhere, so it counts as unrouted like :7000's exhausted retry.
+	if e.forward("tls", conn, buffered, target, target.TLSAddr) != nil {
+		e.m.ConnUnrouted("tls")
+	}
 }
 
 func (e *edge) handleHTTP(conn net.Conn) {
 	defer conn.Close()
 	host, buffered, err := readHost(conn)
 	if err != nil {
+		e.m.ConnDropped("http")
 		return
 	}
 	var target InstanceRow
@@ -271,7 +276,9 @@ func (e *edge) handleHTTP(conn net.Conn) {
 		e.m.ConnUnrouted("http")
 		return
 	}
-	_ = e.forward("http", conn, buffered, target, target.HTTPAddr)
+	if e.forward("http", conn, buffered, target, target.HTTPAddr) != nil {
+		e.m.ConnUnrouted("http")
+	}
 }
 
 // handleTunnel places a new agent on the least-loaded relay. A dial failure
