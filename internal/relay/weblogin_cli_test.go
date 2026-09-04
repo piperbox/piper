@@ -345,3 +345,38 @@ func TestCLILoginSpansTwoRelays(t *testing.T) {
 		t.Fatalf("handle rows after collect = %d, want 0", n)
 	}
 }
+
+// FinishCLIHandle returns the same sentinel error for a legitimate "handle
+// gone/unconfirmed/expired" no-op (the guarded UPDATE affects zero rows) and
+// for a genuine store failure — cliCallback must not conflate the two, the
+// way every other handler in this file distinguishes them (#522). A BEFORE
+// UPDATE trigger forces a real Postgres error out of the exact statement
+// FinishCLIHandle issues, without disturbing the earlier CLIHandle SELECT or
+// the ConfirmCLIHandle UPDATE that already ran during setup — so this is a
+// genuine store failure, not a mocked one.
+func TestCLILoginCallbackStoreErrorIsNotBadState(t *testing.T) {
+	api, fv, st := newCLILoginAPI(t, "piper-app")
+	handle, cookie := startCLILogin(t, api)
+
+	if _, err := st.db.Exec(`CREATE FUNCTION break_finish_cli_handle() RETURNS trigger AS $$
+		BEGIN
+			RAISE EXCEPTION 'forced failure for TestCLILoginCallbackStoreErrorIsNotBadState';
+		END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`CREATE TRIGGER break_finish_cli_handle
+		BEFORE UPDATE ON login_cli_handles
+		FOR EACH ROW EXECUTE FUNCTION break_finish_cli_handle()`); err != nil {
+		t.Fatal(err)
+	}
+
+	fv.GrantCode("code-1", Identity{Subject: "42", Login: "alice"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/login/callback?code=code-1&state="+handle, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("callback with a broken store = %d, body %s; want 500 store error", rec.Code, rec.Body.String())
+	}
+}

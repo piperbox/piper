@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"html"
 	"io"
 	"log"
@@ -155,7 +156,11 @@ func (a *api) cliCallback(w http.ResponseWriter, r *http.Request) bool {
 	// Record who logged in; the credential is minted by the poll that
 	// collects it, so no secret sits in the handle row (#522).
 	if err := a.st.FinishCLIHandle(state, acc.ID); err != nil {
-		http.Error(w, "bad state", http.StatusBadRequest)
+		if errors.Is(err, errCLIHandleGone) {
+			http.Error(w, "bad state", http.StatusBadRequest)
+		} else {
+			http.Error(w, "store error", http.StatusInternalServerError)
+		}
 		return true
 	}
 	installURL := ""
