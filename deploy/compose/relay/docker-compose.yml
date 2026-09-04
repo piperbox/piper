@@ -45,6 +45,10 @@ services:
   relay:
     image: ghcr.io/piperbox/piper-relay:${PIPER_RELAY_VERSION:?set PIPER_RELAY_VERSION in .env (e.g. 0.20.0)}
     restart: unless-stopped
+    # SIGTERM drains (#523): up to 20s for open streams, 5s to leave the pool,
+    # 35s for webhook deliveries to park. Compose's default 10s would SIGKILL
+    # the relay mid-drain.
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
