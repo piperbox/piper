@@ -78,16 +78,13 @@ CREATE TABLE IF NOT EXISTS login_cli_handles (
 );
 
 -- login_device_flows: a GitHub device-code login. The relay serving a poll
--- asks GitHub at most once per interval; the outcome lands in the row so a
--- later poll on any relay returns it.
+-- asks GitHub only once next_poll_at has passed; the poll that gets a
+-- terminal answer returns it and deletes the row.
 CREATE TABLE IF NOT EXISTS login_device_flows (
     handle        TEXT PRIMARY KEY,
     device_code   TEXT NOT NULL,
     interval_secs INTEGER NOT NULL,
     next_poll_at  TIMESTAMPTZ NOT NULL,
-    github_id     TEXT,                -- set on approval
-    github_login  TEXT,
-    error         TEXT,                -- set on a terminal failure
     expires_at    TIMESTAMPTZ NOT NULL
 );
 
@@ -139,11 +136,11 @@ statement or one short transaction; none holds Go-side state.
 **Device flows**
 
 - `PutDeviceFlow(handle, deviceCode string, interval int, ttl time.Duration) error`.
-- `DeviceFlow(handle string) (DeviceFlow, bool, error)` — row read.
-- `DeferDeviceFlow(handle string, next time.Time) error` — advances
-  `next_poll_at` (normal interval, or interval + 5 s after `slow_down`).
-- `ResolveDeviceFlow(handle string, id Identity) error` and
-  `FailDeviceFlow(handle, msg string) error` — terminal outcomes.
+- `DeviceFlow(handle string) (DeviceFlow, bool, error)` — row read; the
+  returned `Due` reports whether `next_poll_at` has passed.
+- `DeferDeviceFlow(handle string, by time.Duration) error` — pushes
+  `next_poll_at` `by` into the future (normal interval, or interval + 5 s
+  after `slow_down`).
 - `DeleteDeviceFlow(handle string) error` — after the poll returns the
   outcome, so a handle redeems once.
 
@@ -209,14 +206,13 @@ stays.
   + expires_in + 1 min` (the same one-minute grace the map had, so a poll
   racing the deadline still sees GitHub's own "expired" error).
 - `Poll` — `DeviceFlow(handle)`; unknown ⇒ the same "unknown handle" error.
-  Resolved rows return the identity (or the stored error) and delete the
-  row. Otherwise, if `now < next_poll_at` return `ErrAuthPending` without
-  touching GitHub. Else one token request:
-  - `authorization_pending` ⇒ `DeferDeviceFlow(now + interval)`, pending.
-  - `slow_down` ⇒ `DeferDeviceFlow(now + interval + 5 s)`, pending.
-  - access token ⇒ `GET /user` once, `ResolveDeviceFlow`, then return as the
-    resolved branch does (identity, row deleted).
-  - `expired_token`, `access_denied`, other ⇒ `FailDeviceFlow`, return the
+  If not `Due`, return `ErrAuthPending` without touching GitHub. Else one
+  token request:
+  - `authorization_pending` ⇒ `DeferDeviceFlow(handle, interval)`, pending.
+  - `slow_down` ⇒ `DeferDeviceFlow(handle, interval + 5 s)`, pending.
+  - access token ⇒ `GET /user` once, `DeleteDeviceFlow`, return the
+    identity.
+  - `expired_token`, `access_denied`, other ⇒ `DeleteDeviceFlow`, return the
     error.
 
 GitHub's documented poll semantics are preserved exactly; what changes is
@@ -244,7 +240,10 @@ relay once. The "pin to one relay" comment in `handleTLS` is deleted.
 - **Two relays poll the same device flow concurrently**: both read
   `next_poll_at` in the past and both hit GitHub. GitHub answers the second
   with `slow_down`, which defers the row. One redundant upstream call per
-  race, no incorrect outcome. Not worth a lock.
+  race, no incorrect outcome. Not worth a lock. If the first poll instead
+  got a terminal answer and already deleted the row, the second poll's
+  `DeviceFlow` lookup finds nothing and returns the same "unknown handle"
+  error as an expired flow.
 
 ## Testing
 
