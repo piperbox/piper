@@ -220,7 +220,7 @@ func main() {
 	// test approval.
 	var v relay.Verifier
 	if id := env("PIPER_RELAY_GITHUB_CLIENT_ID", ""); id != "" {
-		v = relay.NewGitHubVerifier(id, env("PIPER_RELAY_GITHUB_CLIENT_SECRET", ""))
+		v = relay.NewGitHubVerifier(id, env("PIPER_RELAY_GITHUB_CLIENT_SECRET", ""), st)
 	} else if env("PIPER_RELAY_FAKE_APPROVE", "") == "1" {
 		log.Print("piper-relay: PIPER_RELAY_FAKE_APPROVE=1 — device login auto-approves (TEST ONLY)")
 		v = relay.NewAutoApproveVerifier("e2e-sub", "e2e")
