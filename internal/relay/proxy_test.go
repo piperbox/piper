@@ -648,3 +648,66 @@ func TestLivenessCountsARemoteOwner(t *testing.T) {
 		t.Fatalf("DELETE while owned elsewhere = %d, want 409", del.Code)
 	}
 }
+
+// TestControlProxyRefusesToReHopAMarkedRequest proves a flapping agent can't
+// cause a hop ping-pong. The owner row alone can't bound the hop count — a
+// reconnecting agent moves it at any moment — so the request that already
+// hopped once must carry proof of that, and a relay that sees the proof on a
+// router miss must refuse to hop again, even though its own owner row (here
+// stamped to point straight back at the "other" server) says otherwise.
+func TestControlProxyRefusesToReHopAMarkedRequest(t *testing.T) {
+	_, st, router, aliceCred, _, base := proxyFixture(t)
+	self := stampInstance(t, st, "self", "127.0.0.1:1", time.Now())
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, self)
+
+	var hit bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(other.Close)
+	stampInstance(t, st, "owner", other.Listener.Addr().String(), time.Now())
+	if err := st.SetOwner(base, "owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/agents/"+base+"/v1/apps", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceCred)
+	req.Header.Set(hopHeaderName, "1") // already hopped once, per some other relay
+	rr := httptest.NewRecorder()
+	api.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("re-hop of a marked request: %d %s, want 503", rr.Code, rr.Body.String())
+	}
+	if hit {
+		t.Fatal("request reached the other relay; a marked request must never hop")
+	}
+}
+
+// TestControlProxyLivenessFailsClosedOnOwnerLookupError proves an owner-lookup
+// DB error can't silently defeat the DELETE guard or report a live agent as
+// offline. Dropping relay_instances (which agent_owners references
+// ON DELETE CASCADE) breaks only OwnerOf's query — accounts, agents, and org
+// tables are untouched, so auth and ownership checks upstream of the liveness
+// answer still succeed, and the error path under test is reached
+// deterministically rather than by any retry/hack.
+func TestControlProxyLivenessFailsClosedOnOwnerLookupError(t *testing.T) {
+	_, st, router, aliceCred, _, base := proxyFixture(t)
+	self := stampInstance(t, st, "self", "127.0.0.1:1", time.Now())
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, self)
+
+	if _, err := st.db.Exec(`DROP TABLE relay_instances CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+
+	if rr := proxyGet(t, api, "/agents/"+base, aliceCred); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("GET /agents/<base> with broken owner lookup: %d %s, want 500", rr.Code, rr.Body.String())
+	}
+	if rr := proxyGet(t, api, "/agents", aliceCred); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("GET /agents with broken owner lookup: %d %s, want 500", rr.Code, rr.Body.String())
+	}
+	if rr := proxyDelete(t, api, "/agents/"+base, aliceCred); rr.Code != http.StatusInternalServerError {
+		t.Fatalf("DELETE with broken owner lookup: %d %s, want 500 (fail closed, not deleted)", rr.Code, rr.Body.String())
+	}
+}
