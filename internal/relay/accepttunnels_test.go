@@ -209,4 +209,26 @@ func TestAcceptTunnelsRefusesWhileDraining(t *testing.T) {
 	if agents, _, _ := router.Counts(); agents != 0 {
 		t.Fatalf("router holds %d agents after a refused dial", agents)
 	}
+
+	// The listener itself must stay open (#523): a draining relay refuses the
+	// session, not the socket, because a closed listener makes piper-edge
+	// evict this relay and cascade-delete its owner rows. Prove that with a
+	// second dial against the very same ln: if the drain branch had instead
+	// called ln.Close(), this dial would fail at the TCP level (connection
+	// refused, nothing listening) instead of being refused by the drain
+	// check.
+	conn2, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("listener no longer accepting connections while draining: %v", err)
+	}
+	defer conn2.Close()
+	if _, err := tunnel.Dial(conn2, en.Token, en.BaseDomain); err == nil {
+		t.Fatal("a valid enrollment got a session from a draining relay (second dial)")
+	}
+	waitCond(t, 2*time.Second, "second drain refusal logged", func() bool {
+		return strings.Count(logged.String(), "refused: relay is draining") >= 2
+	})
+	if agents, _, _ := router.Counts(); agents != 0 {
+		t.Fatalf("router holds %d agents after a second refused dial", agents)
+	}
 }
