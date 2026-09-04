@@ -202,7 +202,7 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	// the fresh session up; the watchdog re-checks next tick.
 	if off, err := disabled(sess.BaseDomain); (err == nil && off) || errors.Is(err, ErrUnknownAccount) {
 		router.Unregister(sess)
-		clearOwner(st, sess.BaseDomain, inst)
+		clearOwner(st, router, sess.BaseDomain, inst)
 		sess.Close()
 		return
 	}
@@ -215,7 +215,7 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		select {
 		case <-sess.CloseChan():
 			router.Unregister(sess)
-			clearOwner(st, sess.BaseDomain, inst)
+			clearOwner(st, router, sess.BaseDomain, inst)
 			log.Printf("agent gone: %s", sess.BaseDomain)
 			return
 		case <-ticker.C:
@@ -243,10 +243,16 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	}
 }
 
-// clearOwner releases baseDomain's owner row if inst still holds it. The
-// store's WHERE instance_id = inst.ID is what makes a late unregister from a
-// half-open session harmless after the agent reconnected elsewhere.
-func clearOwner(st *Store, baseDomain string, inst *Instance) {
+// clearOwner releases baseDomain's owner row if inst still holds it. Two
+// guards, one per way a late unregister can arrive after the agent has
+// reconnected: the store's WHERE instance_id = inst.ID covers a reconnect on
+// *another* relay, and the router check covers a reconnect on this one —
+// there the owner row names us either way, and only "do we still hold the
+// base?" distinguishes the newer session's row from ours.
+func clearOwner(st *Store, router *Router, baseDomain string, inst *Instance) {
+	if _, held := router.Holds(baseDomain); held {
+		return
+	}
 	if err := st.ClearOwner(baseDomain, inst.ID); err != nil {
 		log.Printf("agent %s: release owner: %v", baseDomain, err)
 	}

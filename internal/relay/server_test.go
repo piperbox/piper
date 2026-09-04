@@ -2,11 +2,15 @@ package relay
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -670,5 +674,78 @@ func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
 	})
 	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
 		t.Fatalf("owner after stale unregister = %+v ok=%v, want %s", r, ok, other.ID)
+	}
+}
+
+// tunnelLogSpy is a race-safe log sink. serveTunnel logs "agent gone" from its
+// own goroutine *after* it has released ownership, so the line is the sync
+// point that proves a teardown finished — without it a test asserting the
+// owner row survived could pass before the teardown ever ran.
+type tunnelLogSpy struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *tunnelLogSpy) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *tunnelLogSpy) saw(sub string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.Contains(s.buf.String(), sub)
+}
+
+// TestServeTunnelKeepsOwnerWhenItStillHoldsANewerSession: the agent's TCP goes
+// half-open and it redials, and the edge places it back on *this* relay. The
+// new session re-records the same owner row; when the old session's keepalive
+// finally fires, its teardown must not delete it. WHERE instance_id = me does
+// not help here — both sessions are this instance — so the guard has to be the
+// router: we still hold the base, so the row is not ours to clear.
+func TestServeTunnelKeepsOwnerWhenItStillHoldsANewerSession(t *testing.T) {
+	spy := &tunnelLogSpy{}
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(spy)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+
+	first := dialTestTunnel(t, st, router, inst, en)
+	stale, _ := router.Holds(en.BaseDomain)
+	waitCond(t, 3*time.Second, "owner row written", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == inst.ID
+	})
+
+	// The redial lands on the same relay.
+	cc, sc := net.Pipe()
+	t.Cleanup(func() { cc.Close(); sc.Close() })
+	go serveTunnel(sc, st, router, st.AgentDisabled, nil, nil, inst)
+	second, err := tunnel.Dial(cc, en.Token, en.BaseDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { second.Close() })
+	waitCond(t, 3*time.Second, "newer session registered", func() bool {
+		s, ok := router.Holds(en.BaseDomain)
+		return ok && s != stale
+	})
+
+	first.Close()
+	waitCond(t, 3*time.Second, "stale session torn down", func() bool {
+		return spy.saw("agent gone: " + en.BaseDomain)
+	})
+
+	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != inst.ID {
+		t.Fatalf("owner after stale teardown = %+v ok=%v, want %s", r, ok, inst.ID)
+	}
+	if s, ok := router.Holds(en.BaseDomain); !ok || s == stale {
+		t.Fatal("newer session lost its registration")
 	}
 }

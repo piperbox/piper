@@ -104,7 +104,17 @@ CREATE TABLE IF NOT EXISTS agent_owners (
 - **Ownership writes are conditional.** Register does an upsert (a new owner
   overwrites, since an agent that reconnected elsewhere is the truth).
   Unregister deletes `WHERE instance_id = <me>` so a relay whose half-open
-  session dies late never removes the new owner's row.
+  session dies late never removes the new owner's row — and skips the delete
+  altogether while its own router still holds the base, because a reconnect
+  onto the *same* relay leaves the row naming us either way and only the
+  router tells the newer session's row from the dying one's.
+- **Ownership is re-asserted, not written once.** Every heartbeat claims each
+  base the router holds that no live instance owns. A relay whose row was
+  deleted — by an edge that found it undialable for one dial, cascading its
+  ownership away — is otherwise back in the pool with every agent it holds
+  dark until each reconnects. A base a *different* live instance owns is left
+  alone: the agent moved, and the stale session is closed rather than stolen
+  back.
 
 Four NOTIFY channels, fired inside the store methods that change the rows,
 payload = the key that changed:
@@ -133,7 +143,9 @@ Confined to four places.
    own configured listener ports.
 2. **Ownership.** `serveTunnel` calls `st.SetOwner(agent, instanceID)` right
    after `router.Register(sess)` and `st.ClearOwner(agent, instanceID)` where
-   it calls `router.Unregister`. A relay also listens on `piper_owners`: a
+   it calls `router.Unregister` — unless `router.Holds(agent)` still names a
+   session, in which case a newer one already owns the base. The heartbeat
+   re-asserts ownership for held bases nobody live owns. A relay also listens on `piper_owners`: a
    payload naming an agent it holds, now owned by another live instance,
    closes that session (the agent has reconnected elsewhere; keeping the
    stale one risks a late webhook drain or control answer from the wrong
