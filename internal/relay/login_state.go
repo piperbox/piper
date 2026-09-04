@@ -170,3 +170,24 @@ func (s *Store) TakeFinishedCLIHandle(handle string) (string, string, cliHandleS
 	}
 	return "", "", cliHandleUnknown, nil
 }
+
+// LoginHit records one login request from key and returns how many the
+// current fixed window has seen, including this one. now is the caller's
+// clock (a test seam); window is the fixed window length. Windows an hour
+// stale are swept on the way in so the table stays bounded by recent clients.
+func (s *Store) LoginHit(key string, now time.Time, window time.Duration) (int, error) {
+	if _, err := s.db.Exec(`DELETE FROM login_rate WHERE window_start < $1::timestamptz - interval '1 hour'`, now); err != nil {
+		return 0, err
+	}
+	var hits int
+	err := s.db.QueryRow(
+		`INSERT INTO login_rate(key, window_start, hits) VALUES($1, $2, 1)
+		 ON CONFLICT(key) DO UPDATE SET
+		     hits = CASE WHEN login_rate.window_start <= $2::timestamptz - make_interval(secs => $3)
+		                 THEN 1 ELSE login_rate.hits + 1 END,
+		     window_start = CASE WHEN login_rate.window_start <= $2::timestamptz - make_interval(secs => $3)
+		                         THEN $2::timestamptz ELSE login_rate.window_start END
+		 RETURNING hits`,
+		key, now, window.Seconds()).Scan(&hits)
+	return hits, err
+}

@@ -580,13 +580,13 @@ func TestProxyProtocolLoginRateLimitKeysHeaderSource(t *testing.T) {
 		return resp.StatusCode
 	}
 
-	for i := 0; i < loginLimitBurst; i++ {
+	for i := 0; i < loginLimitPerMin; i++ {
 		if c := loginFrom("203.0.113.10"); c != http.StatusOK {
 			t.Fatalf("login #%d from claimed 203.0.113.10 = %d, want 200", i+1, c)
 		}
 	}
 	if c := loginFrom("203.0.113.10"); c != http.StatusTooManyRequests {
-		t.Fatalf("burst+1 login from claimed 203.0.113.10 = %d, want 429 (bucket keyed on the header source)", c)
+		t.Fatalf("limit+1 login from claimed 203.0.113.10 = %d, want 429 (bucket keyed on the header source)", c)
 	}
 	// A second client behind the same proxy — identical direct peer — has its
 	// own bucket: the abuser's exhausted budget is not shared.

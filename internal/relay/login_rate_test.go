@@ -22,7 +22,7 @@ func hitLogin(t *testing.T, api http.Handler, method, target, ip string) int {
 
 func TestLoginDeviceRateLimited(t *testing.T) {
 	api, _, _ := newTestAPI(t)
-	for i := 0; i < loginLimitBurst; i++ {
+	for i := 0; i < loginLimitPerMin; i++ {
 		if c := hitLogin(t, api, http.MethodPost, "/v1/login/device", "203.0.113.1"); c != http.StatusOK {
 			t.Fatalf("device login #%d = %d, want 200", i+1, c)
 		}
@@ -32,7 +32,7 @@ func TestLoginDeviceRateLimited(t *testing.T) {
 	rr := httptest.NewRecorder()
 	api.ServeHTTP(rr, req)
 	if rr.Code != http.StatusTooManyRequests {
-		t.Fatalf("burst+1 device login = %d, want 429", rr.Code)
+		t.Fatalf("limit+1 device login = %d, want 429", rr.Code)
 	}
 	if !strings.Contains(rr.Body.String(), "rate limit") {
 		t.Fatalf("429 body = %q, want a short plain explanation", rr.Body.String())
@@ -42,36 +42,35 @@ func TestLoginDeviceRateLimited(t *testing.T) {
 func TestLoginWebRateLimited(t *testing.T) {
 	api, _, _ := newWebTestAPI(t)
 	target := "/v1/login/web?redirect_uri=" + url.QueryEscape("https://dash.getpiper.co/auth")
-	for i := 0; i < loginLimitBurst; i++ {
+	for i := 0; i < loginLimitPerMin; i++ {
 		if c := hitLogin(t, api, http.MethodGet, target, "203.0.113.2"); c != http.StatusFound {
 			t.Fatalf("web login #%d = %d, want 302", i+1, c)
 		}
 	}
 	if c := hitLogin(t, api, http.MethodGet, target, "203.0.113.2"); c != http.StatusTooManyRequests {
-		t.Fatalf("burst+1 web login = %d, want 429", c)
+		t.Fatalf("limit+1 web login = %d, want 429", c)
 	}
 }
 
-// Both unauthenticated login endpoints draw from the same per-IP bucket.
+// Both unauthenticated login endpoints draw from the same per-IP window.
 func TestLoginRateLimitSharedAcrossEndpoints(t *testing.T) {
 	api, _, _ := newWebTestAPI(t)
 	target := "/v1/login/web?redirect_uri=" + url.QueryEscape("https://dash.getpiper.co/auth")
-	half := loginLimitBurst / 2
-	for i := 0; i < half; i++ {
+	for i := 0; i < loginLimitPerMin/2; i++ {
 		hitLogin(t, api, http.MethodPost, "/v1/login/device", "203.0.113.3")
 		hitLogin(t, api, http.MethodGet, target, "203.0.113.3")
 	}
 	if c := hitLogin(t, api, http.MethodPost, "/v1/login/device", "203.0.113.3"); c != http.StatusTooManyRequests {
-		t.Fatalf("device login after mixed burst = %d, want 429", c)
+		t.Fatalf("device login after mixed window = %d, want 429", c)
 	}
 	if c := hitLogin(t, api, http.MethodGet, target, "203.0.113.3"); c != http.StatusTooManyRequests {
-		t.Fatalf("web login after mixed burst = %d, want 429", c)
+		t.Fatalf("web login after mixed window = %d, want 429", c)
 	}
 }
 
 func TestLoginRateLimitPerIPIndependent(t *testing.T) {
 	api, _, _ := newTestAPI(t)
-	for i := 0; i < loginLimitBurst; i++ {
+	for i := 0; i < loginLimitPerMin; i++ {
 		hitLogin(t, api, http.MethodPost, "/v1/login/device", "203.0.113.4")
 	}
 	if c := hitLogin(t, api, http.MethodPost, "/v1/login/device", "203.0.113.4"); c != http.StatusTooManyRequests {
@@ -82,27 +81,22 @@ func TestLoginRateLimitPerIPIndependent(t *testing.T) {
 	}
 }
 
-// The bucket refills over time: exhaust it, advance the limiter's clock past
-// one refill interval, and the same IP is allowed again. No sleeps — the
-// limiter's now func is the test seam.
-func TestLoginRateLimitRefills(t *testing.T) {
+// A new window admits again. No sleeps — the limiter's now func is the seam.
+func TestLoginRateLimitNewWindowAdmits(t *testing.T) {
 	st := openTestStore(t)
-	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier()}
 	fakeNow := time.Now()
-	a.loginLimit.now = func() time.Time { return fakeNow }
-
-	for i := 0; i < loginLimitBurst; i++ {
-		if !a.loginLimit.allow("203.0.113.6") {
-			t.Fatalf("request #%d rejected before burst exhausted", i+1)
+	l := loginLimiter{st: st, now: func() time.Time { return fakeNow }}
+	for i := 0; i < loginLimitPerMin; i++ {
+		if !l.allow("203.0.113.6") {
+			t.Fatalf("request #%d rejected before the window filled", i+1)
 		}
 	}
-	if a.loginLimit.allow("203.0.113.6") {
-		t.Fatal("request past burst allowed, want limited")
+	if l.allow("203.0.113.6") {
+		t.Fatal("request past the window's limit allowed, want limited")
 	}
-	fakeNow = fakeNow.Add(time.Minute / loginLimitPerMin) // exactly one token
-	if !a.loginLimit.allow("203.0.113.6") {
-		t.Fatal("request after one refill interval rejected, want allowed")
+	fakeNow = fakeNow.Add(loginWindow)
+	if !l.allow("203.0.113.6") {
+		t.Fatal("request in the next window rejected, want allowed")
 	}
 }
 
@@ -133,69 +127,60 @@ func TestRateLimitKey(t *testing.T) {
 	}
 }
 
-// Two IPv6 addresses in the same /64 share a bucket: the second address
-// exhausts the burst the first one started.
+// Two IPv6 addresses in the same /64 share a window.
 func TestLoginRateLimitIPv6SamePrefixSharesBucket(t *testing.T) {
 	st := openTestStore(t)
-	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier()}
-	fakeNow := time.Now()
-	a.loginLimit.now = func() time.Time { return fakeNow }
-
-	for i := 0; i < loginLimitBurst; i++ {
-		if !a.loginLimit.allow("2001:db8:1234:5678::1") {
-			t.Fatalf("request #%d from first address rejected before burst exhausted", i+1)
+	l := loginLimiter{st: st}
+	for i := 0; i < loginLimitPerMin; i++ {
+		if !l.allow("2001:db8:1234:5678::1") {
+			t.Fatalf("request #%d from first address rejected before the window filled", i+1)
 		}
 	}
-	// A different address in the same /64 prefix shares the bucket, so it
-	// finds the burst already exhausted.
-	if a.loginLimit.allow("2001:db8:1234:5678:ffff:ffff:ffff:ffff") {
-		t.Fatal("second address in same /64 allowed, want limited (shared bucket)")
+	if l.allow("2001:db8:1234:5678:ffff:ffff:ffff:ffff") {
+		t.Fatal("second address in same /64 allowed, want limited (shared window)")
 	}
 }
 
-// Two IPv6 addresses in different /64 prefixes get independent buckets.
+// Two IPv6 addresses in different /64 prefixes get independent windows.
 func TestLoginRateLimitIPv6DifferentPrefixIndependent(t *testing.T) {
 	st := openTestStore(t)
-	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier()}
-	fakeNow := time.Now()
-	a.loginLimit.now = func() time.Time { return fakeNow }
-
-	for i := 0; i < loginLimitBurst; i++ {
-		if !a.loginLimit.allow("2001:db8:1111:1111::1") {
-			t.Fatalf("request #%d from first prefix rejected before burst exhausted", i+1)
-		}
+	l := loginLimiter{st: st}
+	for i := 0; i < loginLimitPerMin; i++ {
+		l.allow("2001:db8:1111:1111::1")
 	}
-	if a.loginLimit.allow("2001:db8:1111:1111::1") {
-		t.Fatal("request past burst allowed for first prefix, want limited")
+	if l.allow("2001:db8:1111:1111::1") {
+		t.Fatal("request past the limit allowed for first prefix, want limited")
 	}
-	// A different /64 prefix is unaffected by the first prefix's exhausted
-	// burst.
-	if !a.loginLimit.allow("2001:db8:2222:2222::1") {
+	if !l.allow("2001:db8:2222:2222::1") {
 		t.Fatal("request from a different /64 prefix rejected, want allowed")
 	}
 }
 
-// Idle buckets are evicted inline, mirroring the web-state sweep: after the
-// idle TTL, a stale entry is gone and the map holds only active IPs.
-func TestLoginRateLimitSweepsIdleBuckets(t *testing.T) {
+// Behind an edge the same client's requests are spread over every relay; the
+// budget is one per client, not one per relay (#522).
+func TestLoginRateLimitSharedAcrossRelays(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier()}
-	fakeNow := time.Now()
-	a.loginLimit.now = func() time.Time { return fakeNow }
-
-	a.loginLimit.allow("203.0.113.7")
-	fakeNow = fakeNow.Add(loginLimitMaxIdle + time.Minute)
-	a.loginLimit.allow("203.0.113.8")
-
-	a.loginLimit.mu.Lock()
-	defer a.loginLimit.mu.Unlock()
-	if _, ok := a.loginLimit.buckets["203.0.113.7"]; ok {
-		t.Fatal("idle bucket not swept")
+	fv := NewFakeVerifier()
+	relayA, relayB := NewAPI(st, fv), NewAPI(st, fv)
+	for i := 0; i < loginLimitPerMin/2; i++ {
+		hitLogin(t, relayA, http.MethodPost, "/v1/login/device", "203.0.113.9")
+		hitLogin(t, relayB, http.MethodPost, "/v1/login/device", "203.0.113.9")
 	}
-	if len(a.loginLimit.buckets) != 1 {
-		t.Fatalf("buckets size = %d, want 1 (only the active IP)", len(a.loginLimit.buckets))
+	if c := hitLogin(t, relayA, http.MethodPost, "/v1/login/device", "203.0.113.9"); c != http.StatusTooManyRequests {
+		t.Fatalf("relay A after a full shared window = %d, want 429", c)
+	}
+	if c := hitLogin(t, relayB, http.MethodPost, "/v1/login/device", "203.0.113.9"); c != http.StatusTooManyRequests {
+		t.Fatalf("relay B after a full shared window = %d, want 429", c)
+	}
+}
+
+// A limiter that cannot reach its store fails closed.
+func TestLoginRateLimitFailsClosedWithoutStore(t *testing.T) {
+	st := openTestStore(t)
+	st.Close()
+	l := loginLimiter{st: st}
+	if l.allow("203.0.113.10") {
+		t.Fatal("limiter allowed a request it could not count")
 	}
 }

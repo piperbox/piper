@@ -40,7 +40,8 @@ func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRed
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
 		webRedirects:  webRedirects,
 		lastReconcile: map[string]time.Time{},
-		now:           time.Now, ghApp: ghApp}
+		now:           time.Now, ghApp: ghApp,
+		loginLimit: loginLimiter{st: st}}
 	if wv, ok := v.(WebVerifier); ok {
 		a.webv = wv
 	}

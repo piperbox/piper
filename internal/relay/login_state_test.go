@@ -114,3 +114,29 @@ func TestCLIHandleExpiredIsInvisibleAndSwept(t *testing.T) {
 		t.Fatalf("rows after sweep = %d, want 1", n)
 	}
 }
+
+func TestLoginHitCountsWithinWindowAndResets(t *testing.T) {
+	st := openTestStore(t)
+	now := time.Now()
+	for want := 1; want <= 3; want++ {
+		hits, err := st.LoginHit("203.0.113.1", now, time.Minute)
+		if err != nil || hits != want {
+			t.Fatalf("hit %d = (%d, %v)", want, hits, err)
+		}
+	}
+	// Another key is independent.
+	if hits, _ := st.LoginHit("203.0.113.2", now, time.Minute); hits != 1 {
+		t.Fatalf("other key hits = %d, want 1", hits)
+	}
+	// Past the window the count restarts.
+	if hits, _ := st.LoginHit("203.0.113.1", now.Add(time.Minute), time.Minute); hits != 1 {
+		t.Fatalf("hits after window = %d, want 1", hits)
+	}
+	// Windows an hour stale are swept.
+	if _, err := st.LoginHit("203.0.113.3", now.Add(2*time.Hour), time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if n := countRows(t, st, `SELECT COUNT(*) FROM login_rate`); n != 1 {
+		t.Fatalf("login_rate rows = %d, want 1 (stale windows swept)", n)
+	}
+}
