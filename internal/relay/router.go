@@ -145,6 +145,20 @@ func (r *Router) Bases() []string {
 	return out
 }
 
+// Sessions snapshots the agent sessions this router holds. Custom domains
+// share byBase and are skipped, as in Bases, so each agent appears once.
+func (r *Router) Sessions() []*tunnel.Session {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []*tunnel.Session
+	for base, s := range r.byBase {
+		if _, custom := r.custom[base]; !custom {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // LookupCustom is Lookup restricted to BYO custom domains — same exact +
 // subdomain matching, but agent base domains and terminated shared hostnames
 // never match. It is what keeps the :80 Host routing (#228) from serving

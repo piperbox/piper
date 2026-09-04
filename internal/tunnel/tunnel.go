@@ -52,6 +52,12 @@ func (s *Session) Accept() (net.Conn, error)  { return s.mux.Accept() }
 func (s *Session) CloseChan() <-chan struct{} { return s.mux.CloseChan() }
 func (s *Session) Close() error               { return s.mux.Close() }
 
+// NumStreams is the number of streams open on the link, whichever end
+// opened them. A draining relay closes a session only when this reads zero,
+// so every relay-side opener must close its stream when done or the wait
+// runs to its deadline.
+func (s *Session) NumStreams() int { return s.mux.NumStreams() }
+
 // Closed non-blockingly reports whether the session has been torn down. A
 // zero-value Session (no mux) reports false, so callers can probe a session
 // without racing its construction.
