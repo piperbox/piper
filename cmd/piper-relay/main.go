@@ -201,6 +201,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("instance: %v", err)
 	}
+	log.Printf("piper-relay: instance %s advertising tls=%s http=%s tunnel=%s api=%s (PIPER_RELAY_ADVERTISE_HOST to override the host)",
+		inst.ID, inst.TLSAddr, inst.HTTPAddr, inst.TunnelAddr, inst.APIAddr)
 	tunnelPublic := env("PIPER_RELAY_TUNNEL_PUBLIC", "")
 
 	// Opt-in PROXY protocol v2 on the public listeners (#485), for a relay
@@ -210,7 +212,7 @@ func main() {
 	// source IP.
 	proxyProto := os.Getenv("PIPER_RELAY_PROXY_PROTOCOL") == "1"
 	if proxyProto {
-		log.Print("piper-relay: PIPER_RELAY_PROXY_PROTOCOL=1 — :443/:80/:7000 require a PROXY v2 header (trusted L4 proxy in front)")
+		log.Print("piper-relay: PIPER_RELAY_PROXY_PROTOCOL=1 — :443/:80/:7000 require a PROXY v2 header (trusted L4 proxy in front) — required when a piper-edge fronts this relay")
 	}
 
 	// Self-service login needs a GitHub OAuth app; without one the relay runs
@@ -297,27 +299,42 @@ func main() {
 		delivery = relay.NewTunnelDelivery(st, router)
 		// Retries parked events for boxes that are connected but were not
 		// accepting deliveries; without it such an event waits for a reconnect
-		// or another webhook that may never come (#294).
+		// or another webhook that may never come (#294). Safe on N replicas:
+		// the sweep only drains agents whose session is in this process.
 		delivery.StartSweeper(0)
 		outer := http.NewServeMux()
 		outer.Handle("POST /gh", relay.NewGitHubIngress(st, ghApp, delivery))
 		outer.Handle("/", apiHandler)
 		ctrl = outer
+	}
 
-		// A restart mid-burst used to drop every in-flight delivery: GitHub had
-		// already been sent its 202, so nothing would ever retry them. Draining
-		// the pool on SIGTERM/SIGINT lets each one park instead (#295).
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
-		go func() {
-			s := <-sig
-			log.Printf("piper-relay: %s — draining in-flight webhook deliveries", s)
+	// Pool membership: heartbeat, ownership watch, NOTIFY-woken drains. On
+	// SIGTERM/SIGINT leave the pool first (the row delete is what tells edges
+	// to stop routing here), then let in-flight webhook deliveries park (#295).
+	ctx, cancel := context.WithCancel(context.Background())
+	poolDone := make(chan struct{})
+	go func() {
+		relay.RunInstance(ctx, st, inst, router, delivery)
+		close(poolDone)
+	}()
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		s := <-sig
+		log.Printf("piper-relay: %s — leaving the pool and draining", s)
+		cancel()
+		select {
+		case <-poolDone:
+		case <-time.After(5 * time.Second):
+			log.Print("piper-relay: pool row not released in time; edges will expire it")
+		}
+		if delivery != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 			defer cancel()
 			delivery.Shutdown(ctx)
-			os.Exit(0)
-		}()
-	}
+		}
+		os.Exit(0)
+	}()
 
 	go func() {
 		log.Printf("piper-relay: control API %s", apiAddr)
