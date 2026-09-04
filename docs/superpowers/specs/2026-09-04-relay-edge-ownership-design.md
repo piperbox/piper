@@ -1,4 +1,4 @@
-# Design: relay scale-out — edge role + tunnel ownership
+# Design: relay scale-out — `piper-edge` + tunnel ownership
 
 Lets `piper-relay` run as N processes behind one public address. Today the
 relay is exactly one replica ([Postgres design](2026-08-04-relay-postgres-design.md)
@@ -14,14 +14,21 @@ drain).
 
 ## Decision summary
 
-- **Route to the owner; never forward between relays.** A new `edge` role is
-  the only public entrypoint. It learns which relay holds each agent from
-  Postgres and sends each connection straight there. Relay processes never
-  talk to each other for data traffic.
+- **Route to the owner; never forward between relays.** A new binary,
+  `piper-edge`, is the only public entrypoint. It learns which relay holds
+  each agent from Postgres and sends each connection straight there. Relay
+  processes never talk to each other for data traffic.
 - **The relay stays what it is.** Same binary, same listeners, same `Serve`.
   It gains an instance heartbeat and an ownership write on tunnel
-  register/unregister. `PIPER_RELAY_ROLE=edge` selects the new behaviour;
-  unset is today's relay.
+  register/unregister. Nothing else in `piper-relay` changes shape.
+- **The edge is a binary, not a role.** It shares parsing and splicing code
+  with the relay but no configuration and no lifecycle: no certs, no GitHub
+  App, no verifier, no API handlers. A separate `cmd/piper-edge` keeps
+  "the edge never opens the store's write paths" structural rather than a
+  discipline, gives Kubernetes its own image and rollout cadence, and keeps a
+  relay env file from ever being handed to an edge. The code lives in
+  `internal/relay` (`edge.go`) so the unexported SNI reader, Host peeker,
+  splice, and PROXY helpers stay unexported; both binaries link that package.
 - **Postgres is the only discovery mechanism.** No proxy config, no backend
   lists, no static addresses. A relay that starts is in the pool; one that
   stops heartbeating is out. LISTEN/NOTIFY keeps edges current in
@@ -114,7 +121,7 @@ same DSN; the store's `database/sql` pool is unsuitable for LISTEN). A
 dropped listener connection reconnects with backoff and does a full resync
 on return, so a missed NOTIFY costs at most one reconnect, never correctness.
 
-## Relay changes (the existing role)
+## Relay changes (`piper-relay`)
 
 Confined to four places.
 
@@ -155,13 +162,12 @@ and GitHub handlers — is untouched. `PIPER_RELAY_PROXY_PROTOCOL=1` on a relay
 behind an edge is required and documented, not implied, so the existing
 "never trust PROXY headers from the internet" guard keeps its meaning.
 
-## The edge role
+## The edge (`piper-edge`)
 
-`PIPER_RELAY_ROLE=edge`. Starts only the three public listeners
-(`PIPER_RELAY_TLS_ADDR`, `HTTP_ADDR`, `TUNNEL_ADDR`, same env as the relay)
-plus the ops listener. Needs `PIPER_RELAY_DB_URL` and `PIPER_RELAY_APEX`.
-Never opens the store's write paths beyond deleting dead instance rows. Holds
-no cert, speaks no HTTP beyond peeking a `Host` line.
+`cmd/piper-edge/main.go` is a thin main (env parsing, store open, ops
+listener, `relay.ServeEdge`). It starts the three public listeners plus the
+ops listener. Its only store access is reads plus deleting dead instance
+rows. Holds no cert, speaks no HTTP beyond peeking a `Host` line.
 
 ### Tables in memory
 
@@ -186,7 +192,7 @@ no cert, speaks no HTTP beyond peeking a `Host` line.
 
 Forwarding is the existing `pump` with a different far end: dial the target,
 write a PROXY v2 header carrying the client's real address (the edge's own
-listeners accept PROXY v2 behind `PIPER_RELAY_PROXY_PROTOCOL=1`, so a cloud
+listeners accept PROXY v2 behind `PIPER_EDGE_PROXY_PROTOCOL=1`, so a cloud
 balancer in front can preserve it), replay the bytes already consumed while
 peeking, then splice both ways. Metrics reuse `ConnAccepted`/`ConnRouted`/
 `ConnUnrouted` with the listener label, plus one new counter for backend
@@ -208,27 +214,46 @@ dial failures labelled by listener.
 
 ## Configuration
 
-| Env | Role | Meaning |
-|---|---|---|
-| `PIPER_RELAY_ROLE` | both | unset = relay (today); `edge` = edge |
-| `PIPER_RELAY_ADVERTISE_HOST` | relay | host edges dial; default first non-loopback IPv4 |
-| `PIPER_RELAY_PROXY_PROTOCOL=1` | both | relay: required behind an edge. Edge: only when a PROXY-speaking balancer sits in front |
-| `PIPER_RELAY_TLS_ADDR` / `HTTP_ADDR` / `TUNNEL_ADDR` | both | listener addresses, unchanged |
-| `PIPER_RELAY_APEX` | both | edge needs it to recognise `api.<apex>` |
+`piper-relay` gains one variable:
 
-No new flags beyond `ROLE` and `ADVERTISE_HOST`.
+| Env | Meaning |
+|---|---|
+| `PIPER_RELAY_ADVERTISE_HOST` | host edges dial; default first non-loopback IPv4 |
+| `PIPER_RELAY_PROXY_PROTOCOL=1` | existing; required on a relay behind an edge |
+
+`piper-edge` has its own prefix, so a relay env file cannot be handed to it:
+
+| Env | Meaning |
+|---|---|
+| `PIPER_EDGE_DB_URL` | required, same database as the relays |
+| `PIPER_EDGE_APEX` | required; recognises `api.<apex>` |
+| `PIPER_EDGE_TLS_ADDR` / `HTTP_ADDR` / `TUNNEL_ADDR` | public listeners; default `:443`, `:80`, `:7000` |
+| `PIPER_EDGE_PROXY_PROTOCOL=1` | only when a PROXY-speaking balancer sits in front |
+| `PIPER_EDGE_OPS_ADDR`, `PIPER_EDGE_METRICS`, `PIPER_EDGE_LOGS` | ops listener, same semantics as the relay's |
+
+Nothing else.
+
+## Packaging
+
+`piper-edge` joins the release matrix beside `piper-relay`: a goreleaser
+build entry (`CGO_ENABLED=0`, same platforms) and a second `dockers_v2`
+image, `ghcr.io/piperbox/piper-edge`, built from the same minimal base. Like
+the relay it is container-only — never apt or brew. `make build` and `make
+cross` cover it because both build `./...`. The binary list in `CLAUDE.md`
+gains the entry (and loses the stale "relay not built yet").
 
 ## Deployment shapes
 
-**Single host (Hetzner compose).** One `edge` service on the host network
-owning the public :443/:80/:7000; `relay` scaled to two or more on the
-bridge network, each on its own container IP, `PIPER_RELAY_PROXY_PROTOCOL=1`;
-Postgres as today. The edge is the only thing with published ports. Adding a
-relay is `docker compose up -d --scale relay=3`; nothing is configured.
+**Single host (Hetzner compose).** One `piper-edge` service on the host
+network owning the public :443/:80/:7000; `piper-relay` scaled to two or
+more on the bridge network, each on its own container IP,
+`PIPER_RELAY_PROXY_PROTOCOL=1`; Postgres as today. The edge is the only
+thing with published ports. Adding a relay is `docker compose up -d --scale
+relay=3`; nothing is configured.
 
-**Kubernetes.** `edge` Deployment behind a TCP Service that gets the public
-IP (or a cloud NLB with PROXY protocol, `externalTrafficPolicy: Local`
-otherwise). `relay` Deployment with `PIPER_RELAY_ADVERTISE_HOST` from the
+**Kubernetes.** `piper-edge` Deployment behind a TCP Service that gets the
+public IP (or a cloud NLB with PROXY protocol, `externalTrafficPolicy: Local`
+otherwise). `piper-relay` Deployment with `PIPER_RELAY_ADVERTISE_HOST` from the
 downward API `status.podIP` and a NetworkPolicy admitting only edge pods and
 other relays (for the control hop). An L7 ingress terminates `api.<apex>`
 with a cert-manager cert and routes to the relays' :8080 Service, which is
@@ -258,13 +283,13 @@ box-held certs needs L4 anyway.
   answered through the hop, a parked webhook is drained by the owner after
   NOTIFY, and killing one relay's session makes its agent reconnect and the
   owner row move. This is the test that earns the design its keep.
-- **e2e.** The existing loopback relay e2e runs unchanged with `ROLE` unset;
+- **e2e.** The existing loopback relay e2e runs unchanged (no edge in front);
   no new Docker dependency.
 
 ## Documentation and tracking
 
 - `docs/runbooks/relay-deploy.md`: replace the "still exactly one replica"
-  bullets with a **Scale out** section — the two-role shape, the compose
+  bullets with a **Scale out** section — the edge + relays shape, the compose
   example, the Kubernetes notes, the client-IP chain, the login pin, and what
   still drops on restart until graceful drain lands.
 - `PROGRESS.md`: one line under Plan 2 with the issue number.
