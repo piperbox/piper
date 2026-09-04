@@ -89,6 +89,7 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 		if err := st.UpsertInstance(i.row(agents)); err != nil {
 			log.Printf("relay: heartbeat: %v", err)
 		}
+		i.reassertOwnership(st, router)
 	}
 	beat()
 	tick := time.NewTicker(heartbeatInterval)
@@ -102,6 +103,34 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 			return
 		case <-tick.C:
 			beat()
+		}
+	}
+}
+
+// reassertOwnership re-records this instance as the owner of every base its
+// router holds that no live instance owns. Ownership is otherwise written
+// once, at register, so a relay whose row was deleted — by an edge that found
+// it undialable for one dial, say — comes back from the cascade with none of
+// its agents owned, and each stays dark at :443/:80 until it reconnects. It
+// runs inside the beat, after the upsert, so our own row is live before the
+// owner rows point at it. A base a *different* live instance owns is left
+// alone: the agent moved there, and RunInstance closes our stale session.
+func (i *Instance) reassertOwnership(st *Store, router *Router) {
+	bases := router.Bases()
+	if len(bases) == 0 {
+		return
+	}
+	owners, err := st.Owners()
+	if err != nil {
+		log.Printf("relay: read owners: %v", err)
+		return
+	}
+	for _, base := range bases {
+		if _, owned := owners[base]; owned {
+			continue
+		}
+		if err := st.SetOwner(base, i.ID); err != nil {
+			log.Printf("agent %s: re-record owner: %v", base, err)
 		}
 	}
 }

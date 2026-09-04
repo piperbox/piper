@@ -73,6 +73,88 @@ func TestHeartbeatPublishesSessionsAndLeavesOnStop(t *testing.T) {
 	}
 }
 
+// TestHeartbeatReassertsOwnershipAfterTheInstanceRowIsDeleted: an edge that
+// found this relay undialable for one dial deletes its instance row, and the
+// cascade takes every agent_owners row with it. Ownership is written at
+// register, so without a re-assert the agents this relay still holds stay
+// dark at :443/:80 until each one reconnects. The heartbeat has to put the
+// rows back.
+func TestHeartbeatReassertsOwnershipAfterTheInstanceRowIsDeleted(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go inst.heartbeat(ctx, st, router)
+
+	dialTestTunnel(t, st, router, inst, en)
+	waitCond(t, 3*time.Second, "owner row written", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == inst.ID
+	})
+
+	if err := st.DeleteInstance(inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, _ := st.OwnerOf(en.BaseDomain); ok {
+		t.Fatal("cascade did not take the owner row")
+	}
+	waitCond(t, 3*time.Second, "ownership re-asserted", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == inst.ID
+	})
+}
+
+// TestHeartbeatDoesNotStealOwnershipFromAnotherLiveInstance is the other half
+// of the re-assert: a base owned by a different live relay means the agent
+// moved there. RunInstance closes our stale session; the beat must not race it
+// by claiming the row back.
+func TestHeartbeatDoesNotStealOwnershipFromAnotherLiveInstance(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go inst.heartbeat(ctx, st, router)
+
+	dialTestTunnel(t, st, router, inst, en)
+	waitCond(t, 3*time.Second, "owner row written", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == inst.ID
+	})
+
+	// The agent reconnected on another live relay while we still hold the
+	// session (no RunInstance here to close it).
+	other := testInstance(t, st)
+	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	lastSeen := func() time.Time {
+		var ts time.Time
+		if err := st.db.QueryRow(`SELECT last_seen FROM relay_instances WHERE id=$1`, inst.ID).Scan(&ts); err != nil {
+			t.Fatal(err)
+		}
+		return ts
+	}
+	// Three beats is proof the loop ran with the foreign owner in place.
+	for i := 0; i < 3; i++ {
+		was := lastSeen()
+		waitCond(t, 3*time.Second, "heartbeat tick", func() bool { return lastSeen().After(was) })
+	}
+	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
+		t.Fatalf("owner after three beats = %+v ok=%v, want %s", r, ok, other.ID)
+	}
+}
+
 func TestRunInstanceClosesSessionOwnedElsewhere(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
