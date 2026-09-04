@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,6 +21,7 @@ type edgeState struct {
 	owners    map[string]string // agent base domain → instance id
 	names     map[string]nameEntry
 	now       func() time.Time
+	apiNext   atomic.Uint64 // round-robin cursor for api.<apex>
 }
 
 // nameEntry caches one lookup. agent == "" is a negative entry: nothing
@@ -91,13 +94,23 @@ func (s *edgeState) ownerOf(agent string) (InstanceRow, bool) {
 	return r, ok
 }
 
-// pickAPI is the api.<apex> pin: the live instance that started first, so
-// every login-flow poll lands on one process until that state moves to
-// Postgres.
+// pickAPI spreads api.<apex> across the live pool. Login-flow state lives in
+// Postgres (#522), so any relay answers any control-plane request; a stable
+// order plus a cursor gives each relay its turn. Eviction or a resync just
+// shifts the cursor's target by one, which is harmless.
 func (s *edgeState) pickAPI() (InstanceRow, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.pickLocked(earlier, nil)
+	if len(s.instances) == 0 {
+		return InstanceRow{}, false
+	}
+	live := make([]InstanceRow, 0, len(s.instances))
+	for _, r := range s.instances {
+		live = append(live, r)
+	}
+	sort.Slice(live, func(i, j int) bool { return earlier(live[i], live[j]) })
+	n := s.apiNext.Add(1) - 1
+	return live[int(n%uint64(len(live)))], true
 }
 
 // pickTunnel is :7000 placement: fewest sessions, ties to the earliest
