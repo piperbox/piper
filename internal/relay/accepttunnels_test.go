@@ -173,3 +173,40 @@ func TestServeTunnelLogsRejectedHandshake(t *testing.T) {
 	}
 	t.Fatalf("rejected handshake left no log naming the base domain; log was %q", logged.String())
 }
+
+// A draining relay must not take a new agent: the listener stays open (a
+// refused dial would make the edge evict us and cascade our owner rows) but
+// every connection is closed before the handshake, and the log says why.
+func TestAcceptTunnelsRefusesWhileDraining(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+
+	var logged syncLogBuffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	inst := testInstance(t, st)
+	router := NewRouter()
+	go acceptTunnels(ln, st, router, nil, nil, nil, inst)
+	inst.MarkDraining()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := tunnel.Dial(conn, en.Token, en.BaseDomain); err == nil {
+		t.Fatal("a valid enrollment got a session from a draining relay")
+	}
+	waitForLog(t, &logged, "refused: relay is draining")
+	if agents, _, _ := router.Counts(); agents != 0 {
+		t.Fatalf("router holds %d agents after a refused dial", agents)
+	}
+}
