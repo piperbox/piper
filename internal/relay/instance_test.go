@@ -1,9 +1,14 @@
 package relay
 
 import (
+	"bufio"
 	"context"
+	"io"
+	"net/http"
 	"testing"
 	"time"
+
+	"github.com/piperbox/piper/internal/tunnel"
 )
 
 func TestNewInstanceAdvertisesHostWithListenerPorts(t *testing.T) {
@@ -65,5 +70,97 @@ func TestHeartbeatPublishesSessionsAndLeavesOnStop(t *testing.T) {
 	<-done
 	if rows, _ := st.LiveInstances(); len(rows) != 0 {
 		t.Fatalf("row survived a clean stop: %+v", rows)
+	}
+}
+
+func TestRunInstanceClosesSessionOwnedElsewhere(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	mine, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := testInstance(t, st)
+	router := NewRouter()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go RunInstance(ctx, st, mine, router, nil)
+	waitCond(t, 3*time.Second, "instance live", func() bool {
+		rows, _ := st.LiveInstances()
+		for _, r := range rows {
+			if r.ID == mine.ID {
+				return true
+			}
+		}
+		return false
+	})
+
+	dialTestTunnel(t, st, router, mine, en)
+	waitCond(t, 3*time.Second, "owned by mine", func() bool {
+		r, ok, _ := st.OwnerOf(en.BaseDomain)
+		return ok && r.ID == mine.ID
+	})
+	// The agent reconnected on another live relay: our copy must go.
+	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 3*time.Second, "stale session closed", func() bool {
+		_, ok := router.Holds(en.BaseDomain)
+		return !ok
+	})
+	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
+		t.Fatalf("owner after stale close = %+v ok=%v, want %s", r, ok, other.ID)
+	}
+}
+
+func TestRunInstanceDrainsParkedEventsOnNotify(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter()
+	delivery := NewTunnelDelivery(st, router)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go RunInstance(ctx, st, inst, router, delivery)
+
+	sess := dialTestTunnel(t, st, router, inst, en)
+	bodies := make(chan string, 4)
+	go func() {
+		for {
+			kind, stream, err := sess.AcceptKind()
+			if err != nil {
+				return
+			}
+			if kind != tunnel.KindHTTP {
+				stream.Close()
+				continue
+			}
+			req, err := http.ReadRequest(bufio.NewReader(stream))
+			if err != nil {
+				stream.Close()
+				return
+			}
+			body, _ := io.ReadAll(req.Body)
+			bodies <- string(body)
+			_, _ = io.WriteString(stream, "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n")
+			stream.Close()
+		}
+	}()
+
+	// Parked by "another relay" (any store on the same database).
+	if err := st.ParkEvent(en.BaseDomain, "blog", "main", "push", []byte(`{"after":"x"}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-bodies:
+		if got != `{"after":"x"}` {
+			t.Fatalf("drained %s", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("owner never drained the parked event after NOTIFY")
 	}
 }

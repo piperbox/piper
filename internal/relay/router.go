@@ -121,6 +121,30 @@ func (r *Router) Lookup(sni string) (*tunnel.Session, bool) {
 	return nil, false
 }
 
+// Holds reports the session registered for exactly base — no suffix walk.
+// It is what cluster-wide bookkeeping keys on: a NOTIFY payload is an exact
+// base domain, and a suffix match could name a different agent.
+func (r *Router) Holds(base string) (*tunnel.Session, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	s, ok := r.byBase[base]
+	return s, ok
+}
+
+// Bases lists the agent base domains this router holds (custom domains,
+// which share byBase, are excluded).
+func (r *Router) Bases() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []string
+	for base := range r.byBase {
+		if _, custom := r.custom[base]; !custom {
+			out = append(out, base)
+		}
+	}
+	return out
+}
+
 // LookupCustom is Lookup restricted to BYO custom domains — same exact +
 // subdomain matching, but agent base domains and terminated shared hostnames
 // never match. It is what keeps the :80 Host routing (#228) from serving

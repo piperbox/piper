@@ -105,3 +105,42 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 		}
 	}
 }
+
+// RunInstance keeps this relay in the pool and reacts to the cluster. It
+// heartbeats until ctx is done, then leaves. Meanwhile it LISTENs on two
+// channels: a piper_owners payload naming an agent this process holds that
+// is now owned by another live instance closes the stale session (the agent
+// has reconnected elsewhere; a late webhook drain or control answer from
+// here would be wrong), and a piper_events payload naming an agent this
+// process holds drains its parked webhooks. On every listener (re)connect the
+// same checks run over every held agent, so a NOTIFY missed while
+// disconnected is caught up. delivery may be nil (no GitHub App).
+func RunInstance(ctx context.Context, st *Store, inst *Instance, router *Router, delivery *TunnelDelivery) {
+	handle := func(channel, base string) {
+		sess, ok := router.Holds(base)
+		if !ok {
+			return
+		}
+		switch channel {
+		case chanOwners:
+			owner, live, err := st.OwnerOf(base)
+			if err != nil || !live || owner.ID == inst.ID {
+				return
+			}
+			log.Printf("agent %s reconnected on %s; closing stale session", base, owner.ID)
+			sess.Close()
+		case chanEvents:
+			if delivery != nil {
+				delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, base) })
+			}
+		}
+	}
+	resync := func() {
+		for _, base := range router.Bases() {
+			handle(chanOwners, base)
+			handle(chanEvents, base)
+		}
+	}
+	go listen(ctx, st.dsn, []string{chanOwners, chanEvents}, resync, handle)
+	inst.heartbeat(ctx, st, router)
+}
