@@ -128,10 +128,12 @@ statement or one short transaction; none holds Go-side state.
   callback's checks (confirmed, unexpired).
 - `FinishCLIHandle(handle, accountID string) error` — sets `account_id`;
   refuses (zero rows) if the handle is gone or unconfirmed.
-- `TakeFinishedCLIHandle(handle string) (accountID string, state cliHandleState, err error)` —
+- `TakeFinishedCLIHandle(handle string) (accountID, username string, state cliHandleState, err error)` —
   one query returning one of: unknown/expired, pending, done. Done is a
-  `DELETE … WHERE handle = $1 AND account_id IS NOT NULL RETURNING account_id`;
-  the caller mints the credential from the returned account.
+  `DELETE FROM login_cli_handles h USING accounts a WHERE h.handle = $1 AND
+  h.account_id = a.id AND h.expires_at > now() RETURNING a.id, a.username`,
+  folding the account lookup into the delete; the caller mints the credential
+  from the returned account.
 
 **Device flows**
 

@@ -163,8 +163,14 @@ func (g *GitHubVerifier) Poll(ctx context.Context, handle string) (Identity, err
 	if !fl.Due {
 		return Identity{}, ErrAuthPending
 	}
+	// The caller's context (the poll handler's r.Context()) is only good for
+	// deciding whether to make this upstream request at all: once started, it
+	// must run to completion even if the CLI's poll connection drops, or a
+	// dropped connection would delete the flow (via finish) out from under
+	// the next poll. The httpc 15s timeout still bounds both calls.
+	upstreamCtx := context.WithoutCancel(ctx)
 	var tr githubTokenResponse
-	err = g.postForm(ctx, g.oauthBase+"/login/oauth/access_token", url.Values{
+	err = g.postForm(upstreamCtx, g.oauthBase+"/login/oauth/access_token", url.Values{
 		"client_id":   {g.clientID},
 		"device_code": {fl.DeviceCode},
 		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
@@ -177,7 +183,7 @@ func (g *GitHubVerifier) Poll(ctx context.Context, handle string) (Identity, err
 		if tr.AccessToken == "" {
 			return g.finish(handle, Identity{}, errors.New("github token response missing access_token"))
 		}
-		id, err := g.fetchUser(ctx, tr.AccessToken)
+		id, err := g.fetchUser(upstreamCtx, tr.AccessToken)
 		return g.finish(handle, id, err)
 	case "authorization_pending":
 		return g.deferFlow(handle, fl.Interval)

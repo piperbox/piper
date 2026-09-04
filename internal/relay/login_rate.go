@@ -45,7 +45,8 @@ func (l *loginLimiter) allow(ip string) bool {
 // rateLimitKey normalizes ip into the login rate limiter's bucket key. A
 // typical residential IPv6 allocation is a /64, and an attacker on one
 // machine can otherwise source each login attempt from a fresh address
-// within their prefix — a fresh burst-10 bucket every time. Native IPv6
+// within their prefix — dodging the fixed window's 30-per-minute cap on each
+// key. Native IPv6
 // addresses are therefore masked to their /64 prefix; IPv4 (including
 // IPv4-mapped IPv6, e.g. ::ffff:a.b.c.d) is keyed on the address as-is,
 // since a /64 mask carries no meaning there. Malformed input (should not

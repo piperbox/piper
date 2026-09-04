@@ -82,9 +82,9 @@ type api struct {
 	mu            sync.Mutex
 	lastReconcile map[string]time.Time // account id → last installation reconcile (#470)
 
-	// Shared per-IP bucket for the two unauthenticated login endpoints (#106):
-	// one budget per IP, so hammering one endpoint can't dodge the limit by
-	// switching to the other.
+	// Shared per-IP fixed window for the two unauthenticated login endpoints
+	// (#106): one budget per IP, so hammering one endpoint can't dodge the
+	// limit by switching to the other.
 	loginLimit loginLimiter
 }
 

@@ -246,6 +246,37 @@ func TestGitHubDeviceFlowSpansTwoRelays(t *testing.T) {
 	}
 }
 
+// If the CLI's poll connection drops mid-flight, the request context is
+// canceled — but the upstream token exchange and identity fetch must still
+// run to completion, so the flow's outcome (or a genuine retry) survives the
+// caller going away instead of the row being deleted out from under the next
+// poll (a regression from the deleted background-goroutine days, which used
+// context.Background()).
+func TestGitHubDeviceFlowSurvivesCanceledPoll(t *testing.T) {
+	st := openTestStore(t)
+	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
+		{"error": "authorization_pending"},
+	}}
+	v := newTestGitHubVerifier(t, fake, st)
+	handle, _, err := v.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	makeDue(t, st, handle)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := v.Poll(ctx, handle); !errors.Is(err, ErrAuthPending) {
+		t.Fatalf("Poll (canceled ctx) err = %v, want pending", err)
+	}
+	if n := fake.tokenPolls(); n != 1 {
+		t.Fatalf("upstream token polls = %d, want 1", n)
+	}
+	if _, ok, err := st.DeviceFlow(handle); err != nil || !ok {
+		t.Fatalf("DeviceFlow(handle) ok = %v err = %v, want row to survive a canceled poll", ok, err)
+	}
+}
+
 func TestGitHubVerifierPollUnknownHandle(t *testing.T) {
 	v := NewGitHubVerifier("test-client", "test-secret", openTestStore(t))
 	if _, err := v.Poll(context.Background(), "never-started"); err == nil {

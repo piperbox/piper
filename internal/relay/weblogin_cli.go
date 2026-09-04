@@ -132,6 +132,10 @@ func (a *api) cliCallback(w http.ResponseWriter, r *http.Request) bool {
 	if !ok {
 		return false // not a CLI handle — let the dashboard flow try
 	}
+	if !a.cliLoginEnabled() {
+		http.Error(w, "brokered login not configured", http.StatusServiceUnavailable)
+		return true
+	}
 
 	code := r.URL.Query().Get("code")
 	c, err := r.Cookie(stateCookie)

@@ -11,7 +11,7 @@ func instRow(id string, started time.Time, sessions int) InstanceRow {
 		TLSAddr: id + ":443", HTTPAddr: id + ":80", TunnelAddr: id + ":7000", APIAddr: id + ":8080"}
 }
 
-func TestPickAPIPinsEarliestStarted(t *testing.T) {
+func TestEdgeStatePickAPIStartsWithEarliest(t *testing.T) {
 	t0 := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
 	s := newEdgeState()
 	if _, ok := s.pickAPI(); ok {
