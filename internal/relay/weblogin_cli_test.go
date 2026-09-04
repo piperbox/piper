@@ -20,7 +20,7 @@ func newCLILoginAPI(t *testing.T, slug string) (http.Handler, *FakeVerifier, *St
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPIWithTunnel(st, fv, "", nil, nil, app)
+	api := NewAPIWithTunnel(st, fv, "", nil, nil, app, nil)
 	return api, fv, st
 }
 
@@ -275,7 +275,7 @@ func TestCLILoginConfirmRejectsWrongCode(t *testing.T) {
 // Brokered CLI login needs an App configured; without one, start is 503.
 func TestCLILoginStartRequiresApp(t *testing.T) {
 	st := openTestStore(t)
-	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, nil)
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, nil, nil)
 	if rr := apiReq(t, api, "POST", "/v1/login/cli/start", "", ""); rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("start without app = %d, want 503", rr.Code)
 	}

@@ -129,7 +129,7 @@ func TestLoginPollUnknownHandle(t *testing.T) {
 func TestEnrollWithAccountCredential(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay.getpiper.co:7000", nil, nil, nil)
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay.getpiper.co:7000", nil, nil, nil, nil)
 
 	acc, _ := st.UpsertAccount("sub-1", "judy")
 	cred, _ := st.MintAccountCredential(acc.ID)
@@ -169,7 +169,7 @@ func TestEnrollReturnsWebhookSecretAndAppFlag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay.getpiper.co:7000", nil, nil, app)
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay.getpiper.co:7000", nil, nil, app, nil)
 
 	acc, _ := st.UpsertAccount("sub-1", "judy")
 	cred, _ := st.MintAccountCredential(acc.ID)
@@ -199,7 +199,7 @@ func TestEnrollReturnsWebhookSecretAndAppFlag(t *testing.T) {
 func TestEnrollRejectsBadCredential(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay:7000", nil, nil, nil)
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay:7000", nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/enroll", nil)
 	req.Header.Set("Authorization", "Bearer nope")
@@ -213,7 +213,7 @@ func TestEnrollRejectsBadCredential(t *testing.T) {
 func TestEnrollOverCapReturns429(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 1, 10, 5)
-	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay:7000", nil, nil, nil)
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "relay:7000", nil, nil, nil, nil)
 	acc, _ := st.UpsertAccount("sub-1", "ken")
 	cred, _ := st.MintAccountCredential(acc.ID)
 
@@ -270,7 +270,7 @@ func newWebTestAPI(t *testing.T) (http.Handler, *FakeVerifier) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	fv := NewFakeVerifier()
-	api := NewAPIWithTunnel(st, fv, "", nil, []string{"https://dash.getpiper.co/"}, nil)
+	api := NewAPIWithTunnel(st, fv, "", nil, []string{"https://dash.getpiper.co/"}, nil, nil)
 	return api, fv
 }
 
@@ -302,7 +302,7 @@ func TestLoginCallbackIgnoresInstallationID(t *testing.T) {
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	fv := NewFakeVerifier()
 	app := installationAccountStub(t, "583231")
-	api := NewAPIWithTunnel(st, fv, "", nil, []string{"https://dash.getpiper.co/"}, app)
+	api := NewAPIWithTunnel(st, fv, "", nil, []string{"https://dash.getpiper.co/"}, app, nil)
 
 	state, cookie := startWebLogin(t, api, "https://dash.getpiper.co/auth")
 	fv.GrantCode("code-1", Identity{Subject: "583231", Login: "ivan"})
@@ -513,7 +513,7 @@ func reposAPI(t *testing.T, st *Store, gh *httptest.Server) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app)
+	return NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app, nil)
 }
 
 func getRepos(t *testing.T, h http.Handler, cred, instID string) *httptest.ResponseRecorder {
@@ -633,7 +633,7 @@ func statusAPI(t *testing.T, st *Store) http.Handler {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app)
+	return NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app, nil)
 }
 
 func getStatus(t *testing.T, h http.Handler, cred string) *httptest.ResponseRecorder {
@@ -681,7 +681,7 @@ func reconcileAPI(t *testing.T, st *Store, insts string) (*api, http.Handler, *i
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, h := newAPI(st, NewFakeVerifier(), "", nil, nil, app)
+	a, h := newAPI(st, NewFakeVerifier(), "", nil, nil, app, nil)
 	return a, h, &calls
 }
 
@@ -888,7 +888,7 @@ func TestGitHubStatusSurvivesAFailedReconcile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app)
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", nil, nil, app, nil)
 
 	rec := getStatus(t, api, cred)
 	if rec.Code != http.StatusOK {
@@ -964,7 +964,7 @@ func TestGitHubStatusFailedReconcileKeepsStoredAnswerAndStaysThrottled(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, api := newAPI(st, NewFakeVerifier(), "", nil, nil, app)
+	a, api := newAPI(st, NewFakeVerifier(), "", nil, nil, app, nil)
 	clock := time.Now()
 	a.now = func() time.Time { return clock }
 

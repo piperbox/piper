@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/piperbox/piper/internal/tunnel"
 )
@@ -78,7 +79,7 @@ func proxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router, al
 	}
 	base = en.BaseDomain
 	router = NewRouter()
-	api = NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil)
+	api = NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, nil)
 	return
 }
 
@@ -341,7 +342,7 @@ func orgProxyFixture(t *testing.T) (api http.Handler, st *Store, router *Router,
 	}
 	base = en.BaseDomain
 	router = NewRouter()
-	api = NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil)
+	api = NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, nil)
 	return
 }
 
@@ -541,5 +542,109 @@ func TestControlProxyAgentPathStillRejectsOtherMethods(t *testing.T) {
 	api.ServeHTTP(rr, req)
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("PUT: %d, want 405", rr.Code)
+	}
+}
+
+// ownerEcho stands in for the owner relay's :8080: it echoes what arrived so
+// a test can prove the hop forwarded the request unchanged.
+func ownerEcho(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s %s auth=%s", r.Method, r.URL.RequestURI(), r.Header.Get("Authorization"))
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestControlProxyHopsToLiveOwnerUnchanged(t *testing.T) {
+	_, st, router, aliceCred, _, base := proxyFixture(t)
+	self := stampInstance(t, st, "self", "127.0.0.1:1", time.Now())
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, self)
+	owner := ownerEcho(t)
+	stampInstance(t, st, "owner", owner.Listener.Addr().String(), time.Now())
+	if err := st.SetOwner(base, "owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := proxyGet(t, api, "/agents/"+base+"/v1/apps?x=1", aliceCred)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("hop: %d %s", rr.Code, rr.Body.String())
+	}
+	want := "GET /agents/" + base + "/v1/apps?x=1 auth=Bearer " + aliceCred
+	if rr.Body.String() != want {
+		t.Fatalf("owner saw %q, want %q", rr.Body.String(), want)
+	}
+}
+
+func TestControlProxyDoesNotHopToItselfOrADeadOwner(t *testing.T) {
+	_, st, router, aliceCred, _, base := proxyFixture(t)
+	self := stampInstance(t, st, "self", "127.0.0.1:1", time.Now())
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, self)
+
+	// Owner row names us but the router misses (unregister race): 503, no loop.
+	if err := st.SetOwner(base, "self"); err != nil {
+		t.Fatal(err)
+	}
+	if rr := proxyGet(t, api, "/agents/"+base+"/v1/apps", aliceCred); rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("self-owned miss: %d, want 503", rr.Code)
+	}
+	// Owner row names a relay that stopped heartbeating: 503, not a hop.
+	owner := ownerEcho(t)
+	stampInstance(t, st, "dead", owner.Listener.Addr().String(), time.Now())
+	if err := st.SetOwner(base, "dead"); err != nil {
+		t.Fatal(err)
+	}
+	ageInstance(t, st, "dead")
+	if rr := proxyGet(t, api, "/agents/"+base+"/v1/apps", aliceCred); rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("dead owner: %d, want 503", rr.Code)
+	}
+}
+
+func TestControlProxyHopFailureIs502(t *testing.T) {
+	_, st, router, aliceCred, _, base := proxyFixture(t)
+	self := stampInstance(t, st, "self", "127.0.0.1:1", time.Now())
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, self)
+	stampInstance(t, st, "owner", freeTCPAddr(t), time.Now()) // nothing listens there
+	if err := st.SetOwner(base, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if rr := proxyGet(t, api, "/agents/"+base+"/v1/apps", aliceCred); rr.Code != http.StatusBadGateway {
+		t.Fatalf("unreachable owner: %d, want 502", rr.Code)
+	}
+}
+
+func TestLivenessCountsARemoteOwner(t *testing.T) {
+	_, st, router, aliceCred, _, base := proxyFixture(t)
+	self := stampInstance(t, st, "self", "127.0.0.1:1", time.Now())
+	api := NewAPIWithTunnel(st, NewFakeVerifier(), "", router, nil, nil, self)
+	stampInstance(t, st, "owner", "127.0.0.1:1", time.Now())
+	if err := st.SetOwner(base, "owner"); err != nil {
+		t.Fatal(err)
+	}
+
+	rr := proxyGet(t, api, "/agents/"+base, aliceCred)
+	var one struct {
+		Connected bool `json:"connected"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &one); err != nil || !one.Connected {
+		t.Fatalf("GET /agents/<base> = %d %s, want connected:true", rr.Code, rr.Body.String())
+	}
+
+	rr = proxyGet(t, api, "/agents", aliceCred)
+	var list struct {
+		Agents []struct {
+			Connected bool `json:"connected"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &list); err != nil || len(list.Agents) != 1 || !list.Agents[0].Connected {
+		t.Fatalf("GET /agents = %d %s, want one connected agent", rr.Code, rr.Body.String())
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/agents/"+base, nil)
+	req.Header.Set("Authorization", "Bearer "+aliceCred)
+	del := httptest.NewRecorder()
+	api.ServeHTTP(del, req)
+	if del.Code != http.StatusConflict {
+		t.Fatalf("DELETE while owned elsewhere = %d, want 409", del.Code)
 	}
 }
