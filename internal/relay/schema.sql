@@ -164,3 +164,46 @@ CREATE TABLE IF NOT EXISTS agent_owners (
     instance_id TEXT NOT NULL REFERENCES relay_instances(id) ON DELETE CASCADE,
     since       TIMESTAMPTZ NOT NULL
 );
+
+-- Login-flow state (#522). Each row is one in-flight login step that has to
+-- survive the next request landing on a different relay. Expiry is a
+-- server-side predicate (expires_at > now()) so relay clocks never disagree;
+-- every insert first sweeps its table's expired rows, so there is no janitor.
+
+-- login_web_states: a pending dashboard browser login. Redeemed once by the
+-- callback; the browser's cookie must also carry the same state.
+CREATE TABLE IF NOT EXISTS login_web_states (
+    state        TEXT PRIMARY KEY,
+    redirect_uri TEXT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL
+);
+
+-- login_cli_handles: a brokered CLI browser login (#291). confirmed flips
+-- when the user types the code; account_id is set by the callback and read
+-- by the poll, which mints the credential and deletes the row. No credential
+-- is ever stored here.
+CREATE TABLE IF NOT EXISTS login_cli_handles (
+    handle     TEXT PRIMARY KEY,
+    user_code  TEXT NOT NULL,          -- normalized: upper-case, no dash
+    confirmed  BOOLEAN NOT NULL DEFAULT FALSE,
+    account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE, -- NULL until the callback
+    expires_at TIMESTAMPTZ NOT NULL
+);
+
+-- login_device_flows: a GitHub device-code login. The relay serving a poll
+-- asks GitHub only once next_poll_at has passed; the poll that gets a
+-- terminal answer returns it and deletes the row.
+CREATE TABLE IF NOT EXISTS login_device_flows (
+    handle        TEXT PRIMARY KEY,
+    device_code   TEXT NOT NULL,
+    interval_secs INTEGER NOT NULL,
+    next_poll_at  TIMESTAMPTZ NOT NULL,
+    expires_at    TIMESTAMPTZ NOT NULL
+);
+
+-- login_rate: fixed-window login rate limit per client key (#106).
+CREATE TABLE IF NOT EXISTS login_rate (
+    key          TEXT PRIMARY KEY,
+    window_start TIMESTAMPTZ NOT NULL,
+    hits         INTEGER NOT NULL
+);
