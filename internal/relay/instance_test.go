@@ -246,3 +246,35 @@ func TestRunInstanceDrainsParkedEventsOnNotify(t *testing.T) {
 		t.Fatal("owner never drained the parked event after NOTIFY")
 	}
 }
+
+// Once marked, every heartbeat carries draining=true: the flag is how the
+// edge learns to stop placing work here, so it must not depend on Drain's
+// one explicit upsert alone.
+func TestMarkDrainingFlagsEveryHeartbeat(t *testing.T) {
+	st := openTestStore(t)
+	router := NewRouter()
+	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Draining() {
+		t.Fatal("fresh instance reports draining")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { inst.heartbeat(ctx, st, router); close(done) }()
+	waitCond(t, 3*time.Second, "first heartbeat, not draining", func() bool {
+		rows, _ := st.LiveInstances()
+		return len(rows) == 1 && !rows[0].Draining
+	})
+	inst.MarkDraining()
+	if !inst.Draining() {
+		t.Fatal("MarkDraining did not stick")
+	}
+	waitCond(t, 3*time.Second, "heartbeat carrying draining=true", func() bool {
+		rows, _ := st.LiveInstances()
+		return len(rows) == 1 && rows[0].Draining
+	})
+	cancel()
+	<-done
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,7 +25,17 @@ type Instance struct {
 	HTTPAddr   string
 	TunnelAddr string
 	APIAddr    string
+	// draining is set once, on SIGTERM, and never cleared: from then on the
+	// heartbeat row says so and acceptTunnels refuses new sessions (#523).
+	draining atomic.Bool
 }
+
+// MarkDraining flips this instance into its final state: every heartbeat
+// from now on carries draining=true and acceptTunnels refuses new sessions.
+func (i *Instance) MarkDraining() { i.draining.Store(true) }
+
+// Draining reports whether MarkDraining has been called.
+func (i *Instance) Draining() bool { return i.draining.Load() }
 
 // NewInstance mints an instance identity. advertiseHost is the host an edge
 // dials ("" ⇒ the first non-loopback IPv4, which in a container or pod is
@@ -74,10 +85,12 @@ func defaultAdvertiseHost() (string, error) {
 	return "", errors.New("no non-loopback IPv4 address; set PIPER_RELAY_ADVERTISE_HOST")
 }
 
-// row is the heartbeat payload: the identity plus the current session count.
+// row is the heartbeat payload: the identity plus the current session count
+// and the drain flag.
 func (i *Instance) row(sessions int) InstanceRow {
 	return InstanceRow{ID: i.ID, StartedAt: i.StartedAt, Sessions: sessions,
-		TLSAddr: i.TLSAddr, HTTPAddr: i.HTTPAddr, TunnelAddr: i.TunnelAddr, APIAddr: i.APIAddr}
+		TLSAddr: i.TLSAddr, HTTPAddr: i.HTTPAddr, TunnelAddr: i.TunnelAddr, APIAddr: i.APIAddr,
+		Draining: i.draining.Load()}
 }
 
 // heartbeat upserts the instance row now and every heartbeatInterval until
