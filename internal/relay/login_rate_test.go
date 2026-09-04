@@ -40,7 +40,7 @@ func TestLoginDeviceRateLimited(t *testing.T) {
 }
 
 func TestLoginWebRateLimited(t *testing.T) {
-	api, _ := newWebTestAPI(t)
+	api, _, _ := newWebTestAPI(t)
 	target := "/v1/login/web?redirect_uri=" + url.QueryEscape("https://dash.getpiper.co/auth")
 	for i := 0; i < loginLimitBurst; i++ {
 		if c := hitLogin(t, api, http.MethodGet, target, "203.0.113.2"); c != http.StatusFound {
@@ -54,7 +54,7 @@ func TestLoginWebRateLimited(t *testing.T) {
 
 // Both unauthenticated login endpoints draw from the same per-IP bucket.
 func TestLoginRateLimitSharedAcrossEndpoints(t *testing.T) {
-	api, _ := newWebTestAPI(t)
+	api, _, _ := newWebTestAPI(t)
 	target := "/v1/login/web?redirect_uri=" + url.QueryEscape("https://dash.getpiper.co/auth")
 	half := loginLimitBurst / 2
 	for i := 0; i < half; i++ {
@@ -88,7 +88,7 @@ func TestLoginRateLimitPerIPIndependent(t *testing.T) {
 func TestLoginRateLimitRefills(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier(), webStates: map[string]webState{}}
+	a := &api{st: st, v: NewFakeVerifier()}
 	fakeNow := time.Now()
 	a.loginLimit.now = func() time.Time { return fakeNow }
 
@@ -138,7 +138,7 @@ func TestRateLimitKey(t *testing.T) {
 func TestLoginRateLimitIPv6SamePrefixSharesBucket(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier(), webStates: map[string]webState{}}
+	a := &api{st: st, v: NewFakeVerifier()}
 	fakeNow := time.Now()
 	a.loginLimit.now = func() time.Time { return fakeNow }
 
@@ -158,7 +158,7 @@ func TestLoginRateLimitIPv6SamePrefixSharesBucket(t *testing.T) {
 func TestLoginRateLimitIPv6DifferentPrefixIndependent(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier(), webStates: map[string]webState{}}
+	a := &api{st: st, v: NewFakeVerifier()}
 	fakeNow := time.Now()
 	a.loginLimit.now = func() time.Time { return fakeNow }
 
@@ -182,7 +182,7 @@ func TestLoginRateLimitIPv6DifferentPrefixIndependent(t *testing.T) {
 func TestLoginRateLimitSweepsIdleBuckets(t *testing.T) {
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier(), webStates: map[string]webState{}}
+	a := &api{st: st, v: NewFakeVerifier()}
 	fakeNow := time.Now()
 	a.loginLimit.now = func() time.Time { return fakeNow }
 

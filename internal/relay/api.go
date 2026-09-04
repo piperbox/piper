@@ -38,8 +38,8 @@ func NewAPIWithTunnel(st *Store, v Verifier, tunnelEndpoint string, router *Rout
 // deliberately keeps private (the reconcile clock).
 func newAPI(st *Store, v Verifier, tunnelEndpoint string, router *Router, webRedirects []string, ghApp *GitHubApp, self *Instance) (*api, http.Handler) {
 	a := &api{st: st, v: v, tunnelEndpoint: tunnelEndpoint,
-		webRedirects: webRedirects, webStates: map[string]webState{},
-		cliStates: map[string]*cliLogin{}, lastReconcile: map[string]time.Time{},
+		webRedirects: webRedirects,
+		cliStates:    map[string]*cliLogin{}, lastReconcile: map[string]time.Time{},
 		now: time.Now, ghApp: ghApp}
 	if wv, ok := v.(WebVerifier); ok {
 		a.webv = wv
@@ -79,7 +79,6 @@ type api struct {
 	now func() time.Time // clock seam for the reconcile throttle; tests override
 
 	mu            sync.Mutex
-	webStates     map[string]webState  // state → pending dashboard browser flow
 	cliStates     map[string]*cliLogin // handle → pending CLI browser login (#291)
 	lastReconcile map[string]time.Time // account id → last installation reconcile (#470)
 
@@ -87,13 +86,6 @@ type api struct {
 	// one budget per IP, so hammering one endpoint can't dodge the limit by
 	// switching to the other.
 	loginLimit loginLimiter
-}
-
-// webState is a pending browser login: where to send the credential, and how
-// long the state stays redeemable.
-type webState struct {
-	redirectURI string
-	expires     time.Time
 }
 
 const stateCookie = "piper_login_state"
@@ -115,7 +107,7 @@ func (a *api) redirectAllowed(uri string) bool {
 }
 
 // loginWeb starts the browser flow: bind a fresh state to the validated
-// redirect_uri (server-side map + browser cookie), then hand the browser to
+// redirect_uri (store row + browser cookie), then hand the browser to
 // the IdP.
 func (a *api) loginWeb(w http.ResponseWriter, r *http.Request) {
 	if !a.loginLimit.allow(clientIP(r)) {
@@ -134,15 +126,10 @@ func (a *api) loginWeb(w http.ResponseWriter, r *http.Request) {
 	raw := make([]byte, 16)
 	_, _ = rand.Read(raw)
 	state := hex.EncodeToString(raw)
-	now := time.Now()
-	a.mu.Lock()
-	for s, ws := range a.webStates {
-		if now.After(ws.expires) {
-			delete(a.webStates, s)
-		}
+	if err := a.st.PutWebState(state, ru, 10*time.Minute); err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
 	}
-	a.webStates[state] = webState{redirectURI: ru, expires: now.Add(10 * time.Minute)}
-	a.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: stateCookie, Value: state, MaxAge: 600, Path: "/v1/login",
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
@@ -151,9 +138,9 @@ func (a *api) loginWeb(w http.ResponseWriter, r *http.Request) {
 }
 
 // loginCallback finishes the browser flow: state must match both the
-// server-side map (single-use, unexpired) and the browser's cookie
-// (login-CSRF guard); then code → identity → account → credential, delivered
-// in the URL fragment so it never reaches server logs.
+// store (single-use, unexpired) and the browser's cookie (login-CSRF
+// guard); then code → identity → account → credential, delivered in the
+// URL fragment so it never reaches server logs.
 func (a *api) loginCallback(w http.ResponseWriter, r *http.Request) {
 	// The App's single callback URL serves both browser flows; a CLI handle
 	// (#291) is completed here and collected by the CLI's poll.
@@ -170,11 +157,12 @@ func (a *api) loginCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad state", http.StatusBadRequest)
 		return
 	}
-	a.mu.Lock()
-	ws, ok := a.webStates[state]
-	delete(a.webStates, state) // single use
-	a.mu.Unlock()
-	if !ok || time.Now().After(ws.expires) {
+	ru, ok, err := a.st.TakeWebState(state)
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		return
+	}
+	if !ok {
 		http.Error(w, "bad state", http.StatusBadRequest)
 		return
 	}
@@ -206,7 +194,7 @@ func (a *api) loginCallback(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
 	})
 	http.Redirect(w, r,
-		ws.redirectURI+"#credential="+url.QueryEscape(cred)+"&username="+url.QueryEscape(acc.Username),
+		ru+"#credential="+url.QueryEscape(cred)+"&username="+url.QueryEscape(acc.Username),
 		http.StatusFound)
 }
 
