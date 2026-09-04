@@ -374,7 +374,21 @@ network; relays scale on the bridge network with no published ports:
 ```yaml
 services:
   postgres:
-    # as in "Run as a container"
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: piper_relay
+      POSTGRES_PASSWORD: change-me
+      POSTGRES_DB: piper_relay
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - relay_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U piper_relay -d piper_relay"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
   edge:
     image: ghcr.io/piperbox/piper-edge:<version>
     restart: unless-stopped
@@ -403,7 +417,7 @@ volumes:
 ```
 
 Postgres must publish `127.0.0.1:5432` for the host-networked edge (the
-Hetzner file already does). Add capacity with
+snippet above and the Hetzner file both do). Add capacity with
 `docker compose up -d --scale relay=3`; nothing is configured. The relay's
 `:8080` is reachable only on the bridge network, which is what the control hop
 relies on. Each relay's ops endpoint is on its own container IP; scrape it
