@@ -145,6 +145,9 @@ func (s *Store) RegisterHostname(baseDomain, app string, pr int) (string, error)
 		hostname, agentName, accountID, app, pr, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return "", err
 	}
+	if err := notify(tx, chanHostnames, hostname); err != nil {
+		return "", err
+	}
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
@@ -211,6 +214,9 @@ func (s *Store) ReconcileHostnames(baseDomain string, apps []tunnel.AppRef) (liv
 			agentName, sl.app, sl.pr); err != nil {
 			return nil, nil, err
 		}
+		if err := notify(s.db, chanHostnames, sl.hostname); err != nil {
+			return nil, nil, err
+		}
 		pruned = append(pruned, sl.hostname)
 	}
 
@@ -239,6 +245,8 @@ func (s *Store) DeregisterHostname(baseDomain, hostname string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`DELETE FROM hostnames WHERE agent_name=$1 AND hostname=$2`, agentName, hostname)
-	return err
+	if _, err := s.db.Exec(`DELETE FROM hostnames WHERE agent_name=$1 AND hostname=$2`, agentName, hostname); err != nil {
+		return err
+	}
+	return notify(s.db, chanHostnames, hostname)
 }
