@@ -18,6 +18,7 @@ import (
 // goroutine) runs, so it does not race the goroutines that read it.
 func TestMain(m *testing.M) {
 	disabledPollInterval = 20 * time.Millisecond
+	heartbeatInterval = 20 * time.Millisecond
 	os.Exit(relaytest.Main(m))
 }
 
