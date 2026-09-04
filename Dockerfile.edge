@@ -1,0 +1,12 @@
+# syntax=docker/dockerfile:1
+
+# Built by goreleaser (dockers_v2: piper-edge) from the prebuilt, version-
+# stamped binary at <os>/<arch>/piper-edge — no compile stage, so a bare
+# `docker build -f Dockerfile.edge .` will not work; use
+# `goreleaser release --snapshot`. Same distroless base as the relay.
+
+FROM gcr.io/distroless/static-debian12
+ARG TARGETPLATFORM
+COPY $TARGETPLATFORM/piper-edge /usr/local/bin/piper-edge
+EXPOSE 443 80 7000
+ENTRYPOINT ["/usr/local/bin/piper-edge"]

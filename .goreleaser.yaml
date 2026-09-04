@@ -48,6 +48,21 @@ builds:
       - -s -w -X github.com/piperbox/piper/internal/version.value={{ .Version }}
     mod_timestamp: "{{ .CommitTimestamp }}"
 
+  - id: piper-edge
+    main: ./cmd/piper-edge
+    binary: piper-edge
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    ignore:
+      - goos: darwin
+        goarch: arm
+    ldflags:
+      - -s -w -X github.com/piperbox/piper/internal/version.value={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
 archives:
   - id: piperd
     ids: [piperd]
@@ -58,6 +73,9 @@ archives:
   - id: piper-relay
     ids: [piper-relay]
     name_template: "piper-relay_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
+  - id: piper-edge
+    ids: [piper-edge]
+    name_template: "piper-edge_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
   - id: piper-bundle
     ids: [piper, piperd]
     name_template: "piper-bundle_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ if .Arm }}v{{ .Arm }}{{ end }}"
@@ -115,6 +133,7 @@ nfpms:
 # version tags publish on every tag including RCs (so an RC can be smoke-tested
 # from the registry before promotion), while :latest moves only on finals —
 # the empty tag an RC renders is skipped.
+# piper-edge ships the same way: the scale-out entrypoint is container-only too.
 dockers_v2:
   - id: piper-relay
     ids: [piper-relay]
@@ -130,6 +149,25 @@ dockers_v2:
     labels:
       org.opencontainers.image.title: piper-relay
       org.opencontainers.image.description: Piper relay — SNI passthrough and tunnel server
+      org.opencontainers.image.source: https://github.com/piperbox/piper
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: Apache-2.0
+
+  - id: piper-edge
+    ids: [piper-edge]
+    dockerfile: Dockerfile.edge
+    images:
+      - ghcr.io/piperbox/piper-edge
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: piper-edge
+      org.opencontainers.image.description: Piper edge — owner-routed L4 entrypoint in front of piper-relay
       org.opencontainers.image.source: https://github.com/piperbox/piper
       org.opencontainers.image.version: "{{ .Version }}"
       org.opencontainers.image.revision: "{{ .FullCommit }}"

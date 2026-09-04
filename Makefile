@@ -10,6 +10,7 @@ build:
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/piperd ./cmd/piperd
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/piper  ./cmd/piper
 	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/piper-relay ./cmd/piper-relay
+	CGO_ENABLED=0 go build -ldflags="$(LDFLAGS)" -o bin/piper-edge ./cmd/piper-edge
 test:
 	go test ./...
 # e2e runs the end-to-end suite against real Docker. Needs :80, :2019 and

@@ -7,7 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 An open-source, developer-first PaaS that gives you `git push → live HTTPS URL` on hardware you own — including a Raspberry Pi behind CGNAT. A single Go module produces multiple binaries:
 
 - `piperd` — the agent that runs on your box (control-plane, deployer, tunnel-client).
-- `piper-relay` — the optional self-hostable cloud relay (SNI passthrough + tunnel server). *Not built yet.*
+- `piper-relay` — the optional self-hostable cloud relay (SNI passthrough + tunnel server).
+- `piper-edge` — the L4 entrypoint in front of N relays: routes each connection to the relay that owns the agent's tunnel (container-only, like the relay).
 - `piper` — the CLI, a thin HTTP client to `piperd`.
 
 Full design rationale lives in [`docs/superpowers/specs/`](docs/superpowers/specs/) — read it before non-trivial work. Implementation *plans* live in [`docs/superpowers/plans/`](docs/superpowers/plans/); work is delivered plan-by-plan, task-by-task, TDD-style. **Plan 1 of 3** is the agent core, LAN-only (build a Dockerfile → run a container → health-check → serve at `http://<app>.piper.localhost` via managed Caddy, SQLite state). Plan 2 = relay + outbound tunnel + DNS-01 TLS. Plan 3 = GitHub webhook + PR-preview URLs.
