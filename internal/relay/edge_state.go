@@ -97,16 +97,20 @@ func (s *edgeState) ownerOf(agent string) (InstanceRow, bool) {
 // pickAPI spreads api.<apex> across the live pool. Login-flow state lives in
 // Postgres (#522), so any relay answers any control-plane request; a stable
 // order plus a cursor gives each relay its turn. Eviction or a resync just
-// shifts the cursor's target by one, which is harmless.
+// shifts the cursor's target by one, which is harmless. A draining relay (#523)
+// is left out, as in pickLocked.
 func (s *edgeState) pickAPI() (InstanceRow, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if len(s.instances) == 0 {
-		return InstanceRow{}, false
-	}
 	live := make([]InstanceRow, 0, len(s.instances))
 	for _, r := range s.instances {
+		if r.Draining {
+			continue
+		}
 		live = append(live, r)
+	}
+	if len(live) == 0 {
+		return InstanceRow{}, false
 	}
 	sort.Slice(live, func(i, j int) bool { return earlier(live[i], live[j]) })
 	n := s.apiNext.Add(1) - 1
@@ -134,11 +138,15 @@ func earlier(a, b InstanceRow) bool {
 	return a.ID < b.ID
 }
 
+// pickLocked is the shared placement scan. A draining instance is never a
+// candidate (#523): it is on its way out and refuses new tunnels anyway.
+// ownerOf does not go through here on purpose — a draining relay still
+// holds its agents' sessions and must keep receiving their traffic.
 func (s *edgeState) pickLocked(less func(a, b InstanceRow) bool, exclude map[string]bool) (InstanceRow, bool) {
 	var best InstanceRow
 	found := false
 	for _, r := range s.instances {
-		if exclude[r.ID] {
+		if exclude[r.ID] || r.Draining {
 			continue
 		}
 		if !found || less(r, best) {
