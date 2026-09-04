@@ -163,6 +163,8 @@ func NewControlProxy(st *Store, router *Router, self *Instance) http.Handler {
 			if rt.boxToken != "" {
 				pr.Out.Header.Set("Authorization", "Bearer "+rt.boxToken)
 			}
+			// Relay-internal bookkeeping; the box has no use for it.
+			pr.Out.Header.Del(hopHeaderName)
 		},
 		Transport:     transport,
 		FlushInterval: -1,
@@ -185,7 +187,14 @@ func NewControlProxy(st *Store, router *Router, self *Instance) http.Handler {
 			pr.Out.Header.Set(hopHeaderName, "1")
 			// Everything else — path, query, Authorization — travels as is.
 		},
-		Transport:     &http.Transport{ResponseHeaderTimeout: responseHeaderTimeout},
+		// The dial needs its own bound: ResponseHeaderTimeout starts once the
+		// connection is up, so a hop to a node that is gone (SYN blackholed)
+		// would otherwise hold the caller for the OS SYN-retry budget — the
+		// same 2 s the edge gives a relay.
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: edgeDialTimeout}).DialContext,
+			ResponseHeaderTimeout: responseHeaderTimeout,
+		},
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("relay: control hop to %s failed: %v", hopFromContext(r.Context()), err)

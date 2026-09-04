@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -44,6 +45,11 @@ type edge struct {
 	m       *Metrics
 	apiHost string
 	dbDown  atomic.Bool
+	// syncMu serializes a whole resync against a whole onNotify. Both write
+	// the same maps from two goroutines (poll and the listener), and without
+	// it a poll's snapshot, read before a NOTIFY and applied after it, would
+	// silently undo the newer event for a full poll interval.
+	syncMu sync.Mutex
 }
 
 // ServeEdge runs the public entrypoint: :443 by SNI, :80 by Host, :7000 by
@@ -61,8 +67,8 @@ func newEdge(cfg EdgeConfig, st *Store, m *Metrics) *edge {
 // on the cluster picture its routing decisions actually read — the store row
 // lands before the NOTIFY that refreshes it here.
 func (e *edge) serve(ctx context.Context) error {
-	e.resync()
-	go listen(ctx, e.st.dsn, []string{chanInstances, chanOwners, chanHostnames}, e.resync, e.onNotify)
+	e.resync(true)
+	go listen(ctx, e.st.dsn, []string{chanInstances, chanOwners, chanHostnames}, func() { e.resync(true) }, e.onNotify)
 	go e.poll(ctx)
 
 	errc := make(chan error, 3)
@@ -112,9 +118,14 @@ func (e *edge) serve(ctx context.Context) error {
 	}
 }
 
-// resync reloads the pool and the owner map and drops the name cache. It
-// runs at start, on every listener (re)connect, and from poll.
-func (e *edge) resync() {
+// resync reloads the pool and the owner map. dropNames also empties the
+// hostname cache: the listener does that at start and on every reconnect,
+// where a piper_hostnames NOTIFY may have been missed, but poll must not —
+// clearing on a 15 s tick would cut nameCacheTTL in half and make its
+// comment a lie.
+func (e *edge) resync(dropNames bool) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 	rows, err := e.st.LiveInstances()
 	if err != nil {
 		e.dbLost(err)
@@ -128,10 +139,14 @@ func (e *edge) resync() {
 	e.dbBack()
 	e.state.setInstances(rows)
 	e.state.setOwners(owners)
-	e.state.clearNames()
+	if dropNames {
+		e.state.clearNames()
+	}
 }
 
 func (e *edge) onNotify(channel, payload string) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 	switch channel {
 	case chanInstances:
 		if rows, err := e.st.LiveInstances(); err != nil {
@@ -171,7 +186,7 @@ func (e *edge) poll(ctx context.Context) {
 				e.dbLost(err)
 				continue
 			}
-			e.resync()
+			e.resync(false)
 		}
 	}
 }

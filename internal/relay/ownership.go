@@ -35,7 +35,7 @@ type InstanceRow struct {
 	APIAddr    string
 }
 
-// execer is the slice of *sql.DB and *sql.Tx that notify needs.
+// execer is the subset of *sql.DB and *sql.Tx that notify needs.
 type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }

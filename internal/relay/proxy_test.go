@@ -649,6 +649,50 @@ func TestLivenessCountsARemoteOwner(t *testing.T) {
 	}
 }
 
+// TestControlProxyStripsTheHopMarkerBeforeTheBox: X-Piper-Hop is relay-internal
+// bookkeeping. The second relay in a hop finds the session in its router and
+// forwards to the box, and the marker the first relay set must not travel down
+// the tunnel with it.
+func TestControlProxyStripsTheHopMarkerBeforeTheBox(t *testing.T) {
+	api, _, router, aliceCred, _, base := proxyFixture(t)
+	relaySess, agentSess := pipeSession(t, base)
+	router.Register(relaySess)
+	go func() {
+		for {
+			kind, stream, err := agentSess.AcceptKind()
+			if err != nil {
+				return
+			}
+			if kind != tunnel.KindControlAPI {
+				stream.Close()
+				continue
+			}
+			go func() {
+				defer stream.Close()
+				req, err := http.ReadRequest(bufio.NewReader(stream))
+				if err != nil {
+					return
+				}
+				body := "hop=" + req.Header.Get(hopHeaderName)
+				fmt.Fprintf(stream, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+			}()
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/agents/"+base+"/v1/apps", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceCred)
+	req.Header.Set(hopHeaderName, "1") // set by the relay that hopped to us
+	rr := httptest.NewRecorder()
+	api.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("proxy: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr.Body.String() != "hop=" {
+		t.Fatalf("box saw %q, want the hop marker stripped", rr.Body.String())
+	}
+}
+
 // TestControlProxyRefusesToReHopAMarkedRequest proves a flapping agent can't
 // cause a hop ping-pong. The owner row alone can't bound the hop count — a
 // reconnecting agent moves it at any moment — so the request that already
