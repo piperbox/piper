@@ -95,6 +95,25 @@ func (s *Session) Closed() bool {
 	}
 }
 
+// Ping round-trips a yamux ping and reports whether the peer answered within
+// timeout. yamux's own Ping is bounded only by its 10s ConnectionWriteTimeout;
+// the relay needs a tighter verdict on a suspected half-open session (#538)
+// while a redial's handshake waits on it, so the underlying ping is left to
+// expire on its own and only the wait here is bounded.
+func (s *Session) Ping(timeout time.Duration) error {
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := s.mux.Ping()
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(timeout):
+		return fmt.Errorf("ping: no answer within %s", timeout)
+	}
+}
+
 // writeFrame writes a uint16-length-prefixed payload. Length-prefixing (rather
 // than a json.Decoder) guarantees we consume exactly the handshake bytes and
 // leave the rest of the stream untouched for yamux.
