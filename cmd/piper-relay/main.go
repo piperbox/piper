@@ -47,6 +47,18 @@ func env(key, def string) string {
 	return def
 }
 
+// newInstanceFromEnv mints this relay's pool identity: the advertise host
+// from PIPER_RELAY_ADVERTISE_HOST (default: first non-loopback IPv4) and the
+// optional failure zone from PIPER_RELAY_ZONE (#531).
+func newInstanceFromEnv(tlsAddr, httpAddr, tunnelAddr, apiAddr string) (*relay.Instance, error) {
+	inst, err := relay.NewInstance(env("PIPER_RELAY_ADVERTISE_HOST", ""), tlsAddr, httpAddr, tunnelAddr, apiAddr)
+	if err != nil {
+		return nil, err
+	}
+	inst.Zone = env("PIPER_RELAY_ZONE", "")
+	return inst, nil
+}
+
 // readAppKey loads the GitHub App private key, refusing one any other user on
 // the box could read. Only the world bits disqualify it: systemd stages
 // LoadCredential= files at 0440 inside a per-unit tmpfs it grants nobody else
@@ -204,12 +216,12 @@ func main() {
 	httpAddr := env("PIPER_RELAY_HTTP_ADDR", ":80")
 	tunnelAddr := env("PIPER_RELAY_TUNNEL_ADDR", ":7000")
 	apiAddr := env("PIPER_RELAY_API_ADDR", ":8080")
-	inst, err := relay.NewInstance(env("PIPER_RELAY_ADVERTISE_HOST", ""), tlsAddr, httpAddr, tunnelAddr, apiAddr)
+	inst, err := newInstanceFromEnv(tlsAddr, httpAddr, tunnelAddr, apiAddr)
 	if err != nil {
 		log.Fatalf("instance: %v", err)
 	}
-	log.Printf("piper-relay: instance %s advertising tls=%s http=%s tunnel=%s api=%s (PIPER_RELAY_ADVERTISE_HOST to override the host)",
-		inst.ID, inst.TLSAddr, inst.HTTPAddr, inst.TunnelAddr, inst.APIAddr)
+	log.Printf("piper-relay: instance %s advertising tls=%s http=%s tunnel=%s api=%s zone=%q (PIPER_RELAY_ADVERTISE_HOST to override the host, PIPER_RELAY_ZONE to set the zone)",
+		inst.ID, inst.TLSAddr, inst.HTTPAddr, inst.TunnelAddr, inst.APIAddr, inst.Zone)
 	tunnelPublic := env("PIPER_RELAY_TUNNEL_PUBLIC", "")
 
 	// Opt-in PROXY protocol v2 on the public listeners (#485), for a relay

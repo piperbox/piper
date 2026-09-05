@@ -68,6 +68,7 @@ services:
       PIPER_RELAY_OPS_ADDR: ":9090"
       # PIPER_RELAY_ADVERTISE_HOST is left unset: the default (first
       # non-loopback IPv4 = the container's bridge IP) is what the edge dials.
+      # PIPER_RELAY_ZONE is left unset too: one host is one zone (#531).
     volumes:
       # Whole tree, not live/<domain>: certbot's live/ entries are symlinks into
       # ../../archive/, which dangle if only live/ is mounted. The relay re-reads

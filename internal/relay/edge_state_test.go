@@ -222,3 +222,55 @@ func TestOwnersOfPrefersNonDrainingThenFewestThenEarliest(t *testing.T) {
 		t.Fatalf("ownerOf after evict = %+v ok=%v, want quiet-late", first, ok)
 	}
 }
+
+// zoned is instRow plus a zone label.
+func zoned(id string, started time.Time, sessions int, zone string) InstanceRow {
+	r := instRow(id, started, sessions)
+	r.Zone = zone
+	return r
+}
+
+// The second session prefers a relay outside the zone already holding the
+// first (#531), ahead of load: a zone outage must not take both. Zone is a
+// preference, not a filter — when every candidate shares the owner's zone,
+// or nobody set one, placement is the old fewest-sessions rule.
+func TestPickTunnelPrefersAnotherZoneThenFewestSessions(t *testing.T) {
+	t0 := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	s := newEdgeState()
+	s.setInstances([]InstanceRow{
+		zoned("a1", t0, 1, "a"),
+		zoned("a2", t0.Add(time.Second), 0, "a"),
+		zoned("b1", t0.Add(time.Minute), 4, "b"),
+		zoned("b2", t0.Add(2*time.Minute), 2, "b"),
+	})
+	s.setOwners(map[string][]string{"x.example": {"a1"}})
+
+	if got, ok := s.pickTunnel("x.example", nil); !ok || got.ID != "b2" {
+		t.Fatalf("owner in zone a: pickTunnel = %+v ok=%v, want b2 (other zone, fewest there)", got, ok)
+	}
+	if got, ok := s.pickTunnel("x.example", map[string]bool{"b2": true}); !ok || got.ID != "b1" {
+		t.Fatalf("b2 undialable: pickTunnel = %+v ok=%v, want b1 (still zone b, however busy)", got, ok)
+	}
+	if got, ok := s.pickTunnel("x.example", map[string]bool{"b1": true, "b2": true}); !ok || got.ID != "a2" {
+		t.Fatalf("zone b gone: pickTunnel = %+v ok=%v, want a2 (fall back to fewest sessions)", got, ok)
+	}
+	if got, ok := s.pickTunnel("y.example", nil); !ok || got.ID != "a2" {
+		t.Fatalf("no owners yet: pickTunnel = %+v ok=%v, want a2 (zone plays no part)", got, ok)
+	}
+
+	// A zoneless candidate never clashes, so it sorts with the other-zone group.
+	s.setInstances([]InstanceRow{
+		zoned("a1", t0, 1, "a"),
+		zoned("a2", t0.Add(time.Second), 0, "a"),
+		zoned("none", t0.Add(time.Minute), 3, ""),
+	})
+	if got, ok := s.pickTunnel("x.example", nil); !ok || got.ID != "none" {
+		t.Fatalf("zoneless candidate: pickTunnel = %+v ok=%v, want none (unknown zone is not a clash)", got, ok)
+	}
+
+	// A zoneless owner constrains nothing.
+	s.setOwners(map[string][]string{"x.example": {"none"}})
+	if got, ok := s.pickTunnel("x.example", nil); !ok || got.ID != "a2" {
+		t.Fatalf("zoneless owner: pickTunnel = %+v ok=%v, want a2 (fewest sessions)", got, ok)
+	}
+}

@@ -149,9 +149,12 @@ func (s *edgeState) pickAPI() (InstanceRow, bool) {
 	return live[int(n%uint64(len(live)))], true
 }
 
-// pickTunnel is :7000 placement for the agent named base: fewest sessions,
-// ties to the earliest started, among relays that do not already own base
-// (#530). exclude names instances a failed dial has just ruled out. The
+// pickTunnel is :7000 placement for the agent named base: a relay outside
+// the zones already holding one of base's sessions (#531), then fewest
+// sessions, then earliest started, among relays that do not already own
+// base (#530). exclude names instances a failed dial has just ruled out.
+// Zone is a preference — a relay with no zone never clashes, and a pool
+// entirely in the owner's zone just falls through to the load order. The
 // owner exclusion is soft: if it empties the pool the pick runs again over
 // every relay and the one dialled rejects the duplicate after auth, so a
 // claimed base never changes what an unauthenticated peer can observe.
@@ -159,10 +162,18 @@ func (s *edgeState) pickTunnel(base string, exclude map[string]bool) (InstanceRo
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	owned := map[string]bool{}
+	zones := map[string]bool{}
 	for _, id := range s.owners[base] {
 		owned[id] = true
+		if r, ok := s.instances[id]; ok && r.Zone != "" {
+			zones[r.Zone] = true
+		}
 	}
+	clashes := func(r InstanceRow) bool { return r.Zone != "" && zones[r.Zone] }
 	less := func(a, b InstanceRow) bool {
+		if ca, cb := clashes(a), clashes(b); ca != cb {
+			return !ca
+		}
 		if a.Sessions != b.Sessions {
 			return a.Sessions < b.Sessions
 		}
