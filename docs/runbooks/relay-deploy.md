@@ -214,7 +214,8 @@ leaving the whole pool unplaceable regardless of roll order. The #530
 release changes `agent_owners`' primary key and needs this drop; it also
 changes the tunnel handshake, so agents on the previous release cannot
 connect until they are upgraded — roll relays and edge first, then every
-agent the same day.
+agent the same day. For #530 a skipped drop fails silently: `agent_owners`
+keeps one row per agent and the edge never sees an agent's second session.
 
 ```bash
 sudo systemctl stop piper-relay
@@ -381,7 +382,10 @@ can never place: the relay rejects it as a duplicate, the agent retries once
 a minute and logs the reason once, and the relay logs each refusal. Nothing
 breaks, but nothing is redundant either. A rolling restart with one relay
 unavailable at a time (`maxUnavailable: 1`, or ECS `minimumHealthyPercent`)
-is zero-drop: no agent loses both sessions while the replaced relay is out.
+is zero-drop provided the replacement relay is in the pool before the old
+one drains (the surge default on Kubernetes and ECS); with in-place
+replacement the second step of the roll finds each agent on one session for
+up to a minute.
 
 Control-API calls that land on a non-owner relay hop to the owner over the
 internal `:8080`; webhooks parked by any relay wake the owner. Relays never
