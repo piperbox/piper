@@ -925,9 +925,17 @@ func TestDuplicateRejectionBacksOffToTheCapAndLogsOnce(t *testing.T) {
 	addr, rejected := dupRelay(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	done := make(chan struct{})
 	var c TunnelClient
-	go c.Run(ctx, addr, "tok", "alice.example.com", nil)
+	go func() { defer close(done); c.Run(ctx, addr, "tok", "alice.example.com", nil) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return after cancel")
+		}
+	}()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for rejected.Load() < 4 {
