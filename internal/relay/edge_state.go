@@ -149,17 +149,29 @@ func (s *edgeState) pickAPI() (InstanceRow, bool) {
 	return live[int(n%uint64(len(live)))], true
 }
 
-// pickTunnel is :7000 placement: fewest sessions, ties to the earliest
-// started. exclude names instances a failed dial has just ruled out.
-func (s *edgeState) pickTunnel(exclude map[string]bool) (InstanceRow, bool) {
+// pickTunnel is :7000 placement for the agent named base: fewest sessions,
+// ties to the earliest started, among relays that do not already own base
+// (#530). exclude names instances a failed dial has just ruled out. The
+// owner exclusion is soft: if it empties the pool the pick runs again over
+// every relay and the one dialled rejects the duplicate after auth, so a
+// claimed base never changes what an unauthenticated peer can observe.
+func (s *edgeState) pickTunnel(base string, exclude map[string]bool) (InstanceRow, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.pickLocked(func(a, b InstanceRow) bool {
+	owned := map[string]bool{}
+	for _, id := range s.owners[base] {
+		owned[id] = true
+	}
+	less := func(a, b InstanceRow) bool {
 		if a.Sessions != b.Sessions {
 			return a.Sessions < b.Sessions
 		}
 		return earlier(a, b)
-	}, exclude)
+	}
+	if r, ok := s.pickLocked(less, func(r InstanceRow) bool { return exclude[r.ID] || owned[r.ID] }); ok {
+		return r, true
+	}
+	return s.pickLocked(less, func(r InstanceRow) bool { return exclude[r.ID] })
 }
 
 // earlier is a total order on instances: start time, then id.
@@ -172,13 +184,13 @@ func earlier(a, b InstanceRow) bool {
 
 // pickLocked is the shared placement scan. A draining instance is never a
 // candidate (#523): it is on its way out and refuses new tunnels anyway.
-// ownerOf does not go through here on purpose — a draining relay still
+// ownersOf does not go through here on purpose — a draining relay still
 // holds its agents' sessions and must keep receiving their traffic.
-func (s *edgeState) pickLocked(less func(a, b InstanceRow) bool, exclude map[string]bool) (InstanceRow, bool) {
+func (s *edgeState) pickLocked(less func(a, b InstanceRow) bool, skip func(InstanceRow) bool) (InstanceRow, bool) {
 	var best InstanceRow
 	found := false
 	for _, r := range s.instances {
-		if exclude[r.ID] || r.Draining {
+		if skip(r) || r.Draining {
 			continue
 		}
 		if !found || less(r, best) {

@@ -41,12 +41,12 @@ func TestPickTunnelFewestSessionsThenEarliest(t *testing.T) {
 		{"only the busy one left", map[string]bool{"early-idle": true, "late-idle": true}, "busy"},
 	}
 	for _, c := range cases {
-		got, ok := s.pickTunnel(c.exclude)
+		got, ok := s.pickTunnel("", c.exclude)
 		if !ok || got.ID != c.want {
 			t.Errorf("%s: pickTunnel = %+v ok=%v, want %s", c.name, got, ok, c.want)
 		}
 	}
-	if _, ok := s.pickTunnel(map[string]bool{"early-idle": true, "late-idle": true, "busy": true}); ok {
+	if _, ok := s.pickTunnel("", map[string]bool{"early-idle": true, "late-idle": true, "busy": true}); ok {
 		t.Fatal("every candidate excluded still picked one")
 	}
 }
@@ -71,7 +71,7 @@ func TestOwnerOfRequiresALiveInstanceAndEvictCascades(t *testing.T) {
 	if _, ok := s.ownerOf("x.example"); ok {
 		t.Fatal("owner survived its instance's eviction")
 	}
-	if got, ok := s.pickTunnel(nil); !ok || got.ID != "b" {
+	if got, ok := s.pickTunnel("", nil); !ok || got.ID != "b" {
 		t.Fatalf("after evict pickTunnel = %+v ok=%v, want b", got, ok)
 	}
 	// An owner row that points at an unknown (dead) instance is unroutable.
@@ -145,7 +145,7 @@ func TestPlacementSkipsDrainingInstances(t *testing.T) {
 	s.setInstances([]InstanceRow{a, instRow("b", t0.Add(time.Minute), 7)})
 	s.setOwners(map[string][]string{"x.example": {"a"}})
 
-	if got, ok := s.pickTunnel(nil); !ok || got.ID != "b" {
+	if got, ok := s.pickTunnel("", nil); !ok || got.ID != "b" {
 		t.Fatalf("pickTunnel = %+v ok=%v, want b (a is draining, however idle and early)", got, ok)
 	}
 	if got, ok := s.pickAPI(); !ok || got.ID != "b" {
@@ -158,11 +158,37 @@ func TestPlacementSkipsDrainingInstances(t *testing.T) {
 	b := instRow("b", t0.Add(time.Minute), 7)
 	b.Draining = true
 	s.setInstances([]InstanceRow{a, b})
-	if got, ok := s.pickTunnel(nil); ok {
+	if got, ok := s.pickTunnel("", nil); ok {
 		t.Fatalf("pickTunnel = %+v on a pool that is all draining, want no candidate", got)
 	}
 	if got, ok := s.pickAPI(); ok {
 		t.Fatalf("pickAPI = %+v on a pool that is all draining, want no candidate", got)
+	}
+}
+
+// :7000 placement for an agent leaves out the relays that already hold it,
+// so its second session lands elsewhere. The exclusion is soft: when every
+// candidate already holds the agent, the pick falls back to the full pool
+// and the relay rejects the duplicate after auth — the same observable
+// outcome for every claimed base, so nothing is learnable from a refusal.
+func TestPickTunnelExcludesOwnersThenFallsBack(t *testing.T) {
+	t0 := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	s := newEdgeState()
+	s.setInstances([]InstanceRow{instRow("a", t0, 1), instRow("b", t0.Add(time.Minute), 3)})
+	s.setOwners(map[string][]string{"x.example": {"a"}})
+
+	if got, ok := s.pickTunnel("y.example", nil); !ok || got.ID != "a" {
+		t.Fatalf("unowned agent: pickTunnel = %+v ok=%v, want a (fewest sessions)", got, ok)
+	}
+	if got, ok := s.pickTunnel("x.example", nil); !ok || got.ID != "b" {
+		t.Fatalf("agent owned by a: pickTunnel = %+v ok=%v, want b", got, ok)
+	}
+	s.setOwner("x.example", []string{"a", "b"})
+	if got, ok := s.pickTunnel("x.example", nil); !ok || got.ID != "a" {
+		t.Fatalf("agent owned by all: pickTunnel = %+v ok=%v, want the fallback pick a", got, ok)
+	}
+	if got, ok := s.pickTunnel("x.example", map[string]bool{"a": true}); !ok || got.ID != "b" {
+		t.Fatalf("fallback still honours a failed dial: pickTunnel = %+v ok=%v, want b", got, ok)
 	}
 }
 
