@@ -210,7 +210,11 @@ The drop is mandatory and is the only thing that matters for this release:
 both `piper-relay` and `piper-edge` apply the same `schema.sql`, so after
 the drop whichever binary opens the store first re-creates the tables with
 the new column. Skip the drop and every new relay's heartbeat fails,
-leaving the whole pool unplaceable regardless of roll order.
+leaving the whole pool unplaceable regardless of roll order. The #530
+release changes `agent_owners`' primary key and needs this drop; it also
+changes the tunnel handshake, so agents on the previous release cannot
+connect until they are upgraded — roll relays and edge first, then every
+agent the same day.
 
 ```bash
 sudo systemctl stop piper-relay
@@ -359,16 +363,25 @@ volumes:
 behind it and nothing else changes. Design:
 [`docs/superpowers/specs/2026-09-04-relay-edge-ownership-design.md`](../superpowers/specs/2026-09-04-relay-edge-ownership-design.md).
 
-**How it routes.** Each agent's tunnel is terminated by exactly one relay,
-which records itself as the owner in Postgres (`relay_instances` with a 5 s
-heartbeat, `agent_owners`). The edge keeps an in-memory copy, refreshed by
-LISTEN/NOTIFY and a 15 s poll, and forwards raw bytes:
+**How it routes.** Each agent holds two tunnel sessions, on two different
+relays whenever the pool has two live ones (#530). Each relay records itself
+as an owner in Postgres (`relay_instances` with a 5 s heartbeat,
+`agent_owners`, one row per session). The edge keeps an in-memory copy,
+refreshed by LISTEN/NOTIFY and a 15 s poll, and forwards raw bytes:
 
 | Listener | Decision |
 | --- | --- |
-| `:443` | SNI → agent → owner relay. `api.<apex>` is pinned to the earliest-started relay until login-flow state moves to Postgres. |
-| `:80` | Host → custom domain → owner relay (custom domains only, as today). |
-| `:7000` | the live relay with the fewest sessions. |
+| `:443` | SNI → agent → an owner relay: non-draining first, then fewest sessions, then earliest started; a dead owner costs one retry on the other. `api.<apex>` round-robins across the pool. |
+| `:80` | Host → custom domain → an owner relay, same rule (custom domains only, as today). |
+| `:7000` | the routing preface names the agent; the live relay with the fewest sessions that does not already hold it. |
+
+**At least two relays.** A supported deployment is `piper-edge` in front of
+two or more `piper-relay` processes. With one relay an agent's second session
+can never place: the relay rejects it as a duplicate, the agent retries once
+a minute and logs the reason once, and the relay logs each refusal. Nothing
+breaks, but nothing is redundant either. A rolling restart with one relay
+unavailable at a time (`maxUnavailable: 1`, or ECS `minimumHealthyPercent`)
+is zero-drop: no agent loses both sessions while the replaced relay is out.
 
 Control-API calls that land on a non-owner relay hop to the owner over the
 internal `:8080`; webhooks parked by any relay wake the owner. Relays never
@@ -460,18 +473,27 @@ edge. The ingress must never take the wildcard: per-hostname routing to the
 owning pod is the dynamic map the edge exists to hold, and box-held
 certificates need L4 passthrough anyway.
 
-**What still drops.** A relay restart closes each of its tunnels once the
-tunnel has no streams in flight (#523), so requests finish but the agent's
-hostnames are dark for the 1–3 s it takes to redial onto a survivor; #530
-(two sessions per agent) closes that gap. Restarting the edge on a single
-host drops every tunnel through it (on Kubernetes the Service holds the port
-across a rolling restart). Both relays drain at once if they are recreated
-together, and on compose they are: `docker compose up -d` recreates every
-replica of a scaled service within the same second, and
+**What still drops.** A relay restart closes one of each agent's two
+sessions, and the edge routes through the other while the lost slot redials
+onto the replacement (#530); nothing is unrouted. Restarting the edge on a
+single host drops every tunnel through it (on Kubernetes the Service holds
+the port across a rolling restart). Both relays drain at once if they are
+recreated together, and on compose they are: `docker compose up -d`
+recreates every replica of a scaled service within the same second, and
 `COMPOSE_PARALLEL_LIMIT=1` does not change that (confirmed on the Hetzner
-host 2026-09-05; it bounds concurrent engine calls, not replica order). A
-true one-at-a-time relay roll on compose is #535; on Kubernetes or ECS the
-orchestrator's rolling update already provides it.
+host 2026-09-05; it bounds concurrent engine calls, not replica order). On
+compose that means every agent loses both sessions for the seconds both
+relays are down; a true one-at-a-time relay roll on compose is #535. On
+Kubernetes or ECS the orchestrator's rolling update already provides it.
+
+A clean `piperd` stop or restart (SIGTERM, which is what upgrades and
+`systemctl restart` send) closes both sessions at once; both relays
+unregister them immediately and the restarted agent reconnects right away.
+After an unclean stop (crash, power loss, network blackhole) both relays
+keep the stale sessions until the yamux keepalive reaps them (about 30 s),
+every redial in that window is refused as a duplicate, and the slots wait
+the one-minute duplicate backoff before trying again — so the box's apps
+can be unreachable for about a minute.
 
 ## Single host with compose
 
@@ -580,7 +602,8 @@ Relay before agents, as always; nothing on the boxes changes.
   `sudo docker compose up -d --no-deps --scale relay=2 relay`, check the
   pool rows and owners are back, then `sudo docker compose up -d --no-deps edge`.
   Compose recreates both relay replicas together (#535), so every agent
-  redials once; each relay drains (#523) so requests in flight finish first.
+  loses both sessions until they are back (#535); each relay drains (#523)
+  so requests in flight finish first.
   Restarting the edge drops every tunnel until it is back. For a
   schema-change release, drop the named tables first with
   `sudo docker compose exec postgres psql -U piper_relay piper_relay`,
