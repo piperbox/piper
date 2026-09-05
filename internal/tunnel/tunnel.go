@@ -6,6 +6,7 @@ package tunnel
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -34,10 +35,31 @@ var handshakeWriteTimeout = 10 * time.Second
 // return rejects the connection.
 type Auth func(token, baseDomain string) error
 
-type handshake struct {
-	Token      string `json:"token"`
+// The handshake is two frames, written in one flush by Dial. The preface is
+// the routing key: it carries only the base domain, so the edge can peek it
+// (ReadPreface) and place the dial without ever reading a credential — the
+// same shape as SNI on :443 and the Host line on :80. The credential frame
+// carries the token and nothing else, so the two frames cannot disagree
+// about the base; the relay's auth check that the token's enrolled base
+// equals the claimed one is what makes the unauthenticated preface
+// trustworthy once auth passes.
+type preface struct {
 	BaseDomain string `json:"base_domain"`
 }
+
+type credential struct {
+	Token string `json:"token"`
+}
+
+// ErrDuplicateSession is what a relay's Auth returns when it already holds a
+// session for the claimed base. It is the one rejection Serve names to the
+// peer (duplicateReason): it can only be raised after the token was
+// validated, so naming it confirms nothing to an unauthenticated peer. Dial
+// maps the reason back to this sentinel so the agent can errors.Is it.
+var ErrDuplicateSession = errors.New("relay already holds a session for this agent")
+
+// duplicateReason is the ack text for ErrDuplicateSession.
+const duplicateReason = "duplicate session"
 
 // Session is a live multiplexed link. Open (server→agent) and Accept (agent
 // side) yield net.Conn streams.
@@ -89,16 +111,43 @@ func writeFrame(w io.Writer, b []byte) error {
 	return err
 }
 
-func readFrame(r io.Reader) ([]byte, error) {
+// readFrameRaw reads one frame and returns both its payload and the raw
+// bytes (header + payload) that carried it.
+func readFrameRaw(r io.Reader) (payload, raw []byte, err error) {
 	var hdr [2]byte
 	if _, err := io.ReadFull(r, hdr[:]); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	buf := make([]byte, binary.BigEndian.Uint16(hdr[:]))
 	if _, err := io.ReadFull(r, buf); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return buf, nil
+	return buf, append(hdr[:], buf...), nil
+}
+
+func readFrame(r io.Reader) ([]byte, error) {
+	payload, _, err := readFrameRaw(r)
+	return payload, err
+}
+
+// ReadPreface reads exactly the preface frame from r and returns the base
+// domain it names plus the frame's raw bytes (length header included), so a
+// peeking proxy can replay them verbatim. Nothing past the preface is
+// consumed. An empty base is an error: the frame is the routing key and a
+// blank one routes nowhere.
+func ReadPreface(r io.Reader) (string, []byte, error) {
+	payload, raw, err := readFrameRaw(r)
+	if err != nil {
+		return "", nil, err
+	}
+	var p preface
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return "", nil, fmt.Errorf("malformed preface: %w", err)
+	}
+	if p.BaseDomain == "" {
+		return "", nil, errors.New("preface names no base domain")
+	}
+	return p.BaseDomain, raw, nil
 }
 
 // rejectedReason is the single reason the relay reports for any failed
@@ -128,13 +177,18 @@ type handshakeAck struct {
 // accepted, not that the session will survive: the relay can still evict it
 // afterwards (a disabled account), which it logs itself.
 func Dial(conn net.Conn, token, baseDomain string) (*Session, error) {
-	payload, _ := json.Marshal(handshake{Token: token, BaseDomain: baseDomain})
+	prefacePayload, _ := json.Marshal(preface{BaseDomain: baseDomain})
+	credPayload, _ := json.Marshal(credential{Token: token})
 	// Bound the write like the ack wait below: a relay that accepts the
 	// connection and then stops reading lets the send buffer and receive
 	// window fill, and an undeadlined write pins the reconnect loop the
-	// same way an undeadlined read does.
+	// same way an undeadlined read does. Both frames go under one deadline
+	// and, on a TCP conn, out in one flush.
 	_ = conn.SetWriteDeadline(time.Now().Add(handshakeWriteTimeout))
-	writeErr := writeFrame(conn, payload)
+	writeErr := writeFrame(conn, prefacePayload)
+	if writeErr == nil {
+		writeErr = writeFrame(conn, credPayload)
+	}
 	_ = conn.SetWriteDeadline(time.Time{})
 	if writeErr != nil {
 		return nil, fmt.Errorf("writing handshake: %w", writeErr)
@@ -150,6 +204,9 @@ func Dial(conn net.Conn, token, baseDomain string) (*Session, error) {
 	var ack handshakeAck
 	if err := json.Unmarshal(ackPayload, &ack); err != nil {
 		return nil, fmt.Errorf("malformed relay handshake ack: %w", err)
+	}
+	if ack.Error == duplicateReason {
+		return nil, fmt.Errorf("relay rejected %s: %w", baseDomain, ErrDuplicateSession)
 	}
 	if ack.Error != "" {
 		return nil, fmt.Errorf("relay rejected %s: %s", baseDomain, ack.Error)
@@ -261,22 +318,32 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 	// Deadline the unauthenticated handshake read; clear it once the frame is in
 	// hand so the established yamux session isn't killed mid-traffic.
 	_ = conn.SetReadDeadline(time.Now().Add(preAuthReadTimeout))
-
-	payload, err := readFrame(conn)
+	base, _, err := ReadPreface(conn)
+	if err != nil {
+		_ = conn.SetReadDeadline(time.Time{})
+		return nil, err
+	}
+	credPayload, err := readFrame(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	var hs handshake
-	if err := json.Unmarshal(payload, &hs); err != nil {
+	var cred credential
+	if err := json.Unmarshal(credPayload, &cred); err != nil {
 		return nil, err
 	}
-	if err := auth(hs.Token, hs.BaseDomain); err != nil {
+	if err := auth(cred.Token, base); err != nil {
 		// Best-effort: tell the agent *why* before dropping it, so a stranded
 		// enrollment is self-diagnosing instead of an invisible reconnect loop
 		// (#400). A failed write changes nothing — the connection is going away.
+		// Only a duplicate is named: it is raised after the token was
+		// validated, so it confirms nothing to an unauthenticated peer.
+		reason := rejectedReason
+		if errors.Is(err, ErrDuplicateSession) {
+			reason = duplicateReason
+		}
 		_ = conn.SetWriteDeadline(time.Now().Add(ackReadTimeout))
-		ackPayload, _ := json.Marshal(handshakeAck{Error: rejectedReason})
+		ackPayload, _ := json.Marshal(handshakeAck{Error: reason})
 		_ = writeFrame(conn, ackPayload)
 		_ = conn.SetWriteDeadline(time.Time{})
 		return nil, err
@@ -301,5 +368,5 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Session{BaseDomain: hs.BaseDomain, ObservedAddr: observed, mux: mux}, nil
+	return &Session{BaseDomain: base, ObservedAddr: observed, mux: mux}, nil
 }

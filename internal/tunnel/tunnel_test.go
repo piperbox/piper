@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"io"
@@ -303,9 +304,12 @@ func TestDialClearsTheHandshakeWriteDeadline(t *testing.T) {
 	c, s := net.Pipe()
 	t.Cleanup(func() { c.Close(); s.Close() })
 
-	// Fake relay: read the handshake frame, ack it, then keep draining so
+	// Fake relay: read both handshake frames, ack it, then keep draining so
 	// later writes don't block on the unbuffered pipe.
 	go func() {
+		if _, err := readFrame(s); err != nil {
+			return
+		}
 		if _, err := readFrame(s); err != nil {
 			return
 		}
@@ -340,8 +344,9 @@ func TestDialBoundsTheAckWait(t *testing.T) {
 	c, s := net.Pipe()
 	t.Cleanup(func() { c.Close(); s.Close() })
 
-	// Server reads the handshake frame and then goes silent — never acks.
+	// Server reads both handshake frames and then goes silent — never acks.
 	go func() {
+		_, _ = readFrame(s)
 		_, _ = readFrame(s)
 		select {}
 	}()
@@ -377,8 +382,10 @@ func TestServeBoundsTheSuccessAckWrite(t *testing.T) {
 
 	// Fake agent: sends a valid handshake, then never reads the ack.
 	go func() {
-		payload, _ := json.Marshal(handshake{Token: "tok", BaseDomain: "alice.example.com"})
-		_ = writeFrame(c, payload)
+		prefacePayload, _ := json.Marshal(preface{BaseDomain: "alice.example.com"})
+		_ = writeFrame(c, prefacePayload)
+		credPayload, _ := json.Marshal(credential{Token: "tok"})
+		_ = writeFrame(c, credPayload)
 	}()
 
 	type serveRes struct {
@@ -431,8 +438,12 @@ func TestServeClearsTheSuccessAckWriteDeadline(t *testing.T) {
 	// Fake agent: handshake, read the ack, then keep draining so later writes
 	// don't block on the unbuffered pipe.
 	go func() {
-		payload, _ := json.Marshal(handshake{Token: "tok", BaseDomain: "alice.example.com"})
-		if err := writeFrame(c, payload); err != nil {
+		prefacePayload, _ := json.Marshal(preface{BaseDomain: "alice.example.com"})
+		if err := writeFrame(c, prefacePayload); err != nil {
+			return
+		}
+		credPayload, _ := json.Marshal(credential{Token: "tok"})
+		if err := writeFrame(c, credPayload); err != nil {
 			return
 		}
 		if _, err := readFrame(c); err != nil {
@@ -536,5 +547,78 @@ func TestNumStreamsFollowsOpenAndClose(t *testing.T) {
 			t.Fatalf("stream count stuck at %d after both ends closed", srv.NumStreams())
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// The handshake is two frames: a routing preface carrying only the base
+// domain, then the credential. ReadPreface is what the edge peeks: it must
+// return the base and exactly the preface's bytes, leaving the credential
+// frame unread on the stream.
+func TestReadPrefaceReturnsBaseAndLeavesCredentialUnread(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	go Dial(c, "tok-123", "alice.example.com")
+
+	base, raw, err := ReadPreface(s)
+	if err != nil {
+		t.Fatalf("ReadPreface: %v", err)
+	}
+	if base != "alice.example.com" {
+		t.Fatalf("base = %q", base)
+	}
+	if strings.Contains(string(raw), "tok-123") {
+		t.Fatalf("preface bytes carry the token: %q", raw)
+	}
+	// The raw bytes are a complete frame: header + payload, replayable as is.
+	if got := binary.BigEndian.Uint16(raw[:2]); int(got) != len(raw)-2 {
+		t.Fatalf("raw frame length header %d, want %d", got, len(raw)-2)
+	}
+	// The next frame on the stream is the credential, untouched.
+	next, err := readFrame(s)
+	if err != nil {
+		t.Fatalf("credential frame: %v", err)
+	}
+	var cred credential
+	if err := json.Unmarshal(next, &cred); err != nil || cred.Token != "tok-123" {
+		t.Fatalf("credential frame = %q (%v), want the token", next, err)
+	}
+}
+
+func TestReadPrefaceRejectsAnEmptyBase(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	go func() {
+		payload, _ := json.Marshal(preface{})
+		_ = writeFrame(c, payload)
+	}()
+	if _, _, err := ReadPreface(s); err == nil {
+		t.Fatal("ReadPreface accepted a preface with no base domain")
+	}
+}
+
+// A duplicate is the one rejection the relay may name: it is checked only
+// after the token has been validated, so the peer has proven who it is.
+func TestDuplicateRejectionSurvivesTheAck(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	go Serve(s, func(token, base string) error { return ErrDuplicateSession })
+
+	_, err := Dial(c, "tok", "alice.example.com")
+	if !errors.Is(err, ErrDuplicateSession) {
+		t.Fatalf("Dial error = %v, want ErrDuplicateSession", err)
+	}
+}
+
+func TestOtherRejectionsStayUndifferentiated(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	go Serve(s, func(token, base string) error { return errors.New("bad token") })
+
+	_, err := Dial(c, "tok", "alice.example.com")
+	if err == nil || errors.Is(err, ErrDuplicateSession) {
+		t.Fatalf("Dial error = %v, want a generic rejection", err)
+	}
+	if !strings.Contains(err.Error(), rejectedReason) {
+		t.Fatalf("Dial error = %q, want the undifferentiated reason %q", err, rejectedReason)
 	}
 }
