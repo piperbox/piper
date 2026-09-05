@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"sync"
 	"testing"
-	"time"
 )
 
 // fakeGitHub fakes github.com (device code + token) and api.github.com (/user)
@@ -73,42 +72,33 @@ func (f *fakeGitHub) handler() http.Handler {
 	return mux
 }
 
-// newTestGitHubVerifier points a GitHubVerifier at the fake and makes sleeps
-// instant, recording requested durations.
-func newTestGitHubVerifier(t *testing.T, fake *fakeGitHub) (*GitHubVerifier, *[]time.Duration) {
+// newTestGitHubVerifier points a GitHubVerifier at the fake, over st.
+func newTestGitHubVerifier(t *testing.T, fake *fakeGitHub, st *Store) *GitHubVerifier {
 	t.Helper()
 	srv := httptest.NewServer(fake.handler())
 	t.Cleanup(srv.Close)
-	v := NewGitHubVerifier("test-client", "test-secret")
+	v := NewGitHubVerifier("test-client", "test-secret", st)
 	v.oauthBase = srv.URL
 	v.apiBase = srv.URL
-	var slept []time.Duration
-	var mu sync.Mutex
-	v.sleep = func(d time.Duration) { mu.Lock(); slept = append(slept, d); mu.Unlock() }
-	return v, &slept
+	return v
 }
 
-// waitDone polls the verifier until the flow completes or times out.
-func waitDone(t *testing.T, v *GitHubVerifier, handle string) (Identity, error) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		id, err := v.Poll(context.Background(), handle)
-		if err != ErrAuthPending {
-			return id, err
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("flow never completed")
-	return Identity{}, nil
+func (f *fakeGitHub) tokenPolls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.tokenForms)
 }
 
+// A device flow resolves through the polls the CLI already makes: nothing
+// runs in the background, GitHub is asked only once the interval has passed,
+// and the handle redeems exactly once (#522).
 func TestGitHubDeviceFlowApproved(t *testing.T) {
+	st := openTestStore(t)
 	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
 		{"error": "authorization_pending"},
 		{"access_token": "gho_tok", "token_type": "bearer"},
 	}}
-	v, _ := newTestGitHubVerifier(t, fake)
+	v := newTestGitHubVerifier(t, fake, st)
 
 	handle, da, err := v.Start(context.Background())
 	if err != nil {
@@ -119,108 +109,96 @@ func TestGitHubDeviceFlowApproved(t *testing.T) {
 		t.Fatalf("DeviceAuth = %+v", da)
 	}
 
-	id, err := waitDone(t, v, handle)
+	// Before the interval has passed a poll is pending and costs no upstream call.
+	if _, err := v.Poll(context.Background(), handle); !errors.Is(err, ErrAuthPending) {
+		t.Fatalf("early Poll err = %v, want pending", err)
+	}
+	if n := fake.tokenPolls(); n != 0 {
+		t.Fatalf("early poll made %d upstream calls, want 0", n)
+	}
+
+	makeDue(t, st, handle)
+	if _, err := v.Poll(context.Background(), handle); !errors.Is(err, ErrAuthPending) {
+		t.Fatalf("Poll (github pending) err = %v, want pending", err)
+	}
+	// That poll spent the slot: the next one waits again.
+	if _, err := v.Poll(context.Background(), handle); !errors.Is(err, ErrAuthPending) || fake.tokenPolls() != 1 {
+		t.Fatalf("Poll right after upstream = %v with %d calls, want pending and 1", err, fake.tokenPolls())
+	}
+
+	makeDue(t, st, handle)
+	id, err := v.Poll(context.Background(), handle)
 	if err != nil {
-		t.Fatalf("Poll: %v", err)
+		t.Fatalf("Poll (approved): %v", err)
 	}
 	if id.Subject != "583231" || id.Login != "Octo-Cat" {
 		t.Fatalf("identity = %+v", id)
 	}
-	// The poll used the device grant.
 	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if len(fake.tokenForms) == 0 ||
-		fake.tokenForms[0]["grant_type"] != "urn:ietf:params:oauth:grant-type:device_code" ||
-		fake.tokenForms[0]["device_code"] != "dc-1" {
-		t.Fatalf("token forms = %+v", fake.tokenForms)
+	form := fake.tokenForms[0]
+	fake.mu.Unlock()
+	if form["grant_type"] != "urn:ietf:params:oauth:grant-type:device_code" || form["device_code"] != "dc-1" {
+		t.Fatalf("token form = %+v", form)
+	}
+	// Redeemed once: the row is gone.
+	if _, err := v.Poll(context.Background(), handle); err == nil || errors.Is(err, ErrAuthPending) {
+		t.Fatalf("Poll(redeemed handle) = %v, want unknown-handle error", err)
 	}
 }
 
-func TestGitHubDeviceFlowSlowDown(t *testing.T) {
+func TestGitHubDeviceFlowSlowDownDefersByInterval(t *testing.T) {
+	st := openTestStore(t)
 	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
 		{"error": "slow_down"},
 		{"access_token": "gho_tok", "token_type": "bearer"},
 	}}
-	v, slept := newTestGitHubVerifier(t, fake)
-
+	v := newTestGitHubVerifier(t, fake, st)
 	handle, _, err := v.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if _, err := waitDone(t, v, handle); err != nil {
-		t.Fatalf("Poll: %v", err)
+	makeDue(t, st, handle)
+	if _, err := v.Poll(context.Background(), handle); !errors.Is(err, ErrAuthPending) {
+		t.Fatalf("Poll (slow_down) err = %v, want pending", err)
 	}
-	// First sleep at the server interval (5s), then slow_down adds 5s (GitHub semantics).
-	if len(*slept) < 2 || (*slept)[0] != 5*time.Second || (*slept)[1] != 10*time.Second {
-		t.Fatalf("sleeps = %v, want [5s 10s ...]", *slept)
+	// GitHub semantics: wait interval + 5s. The fake's interval is 5.
+	var secs float64
+	if err := st.db.QueryRow(`SELECT EXTRACT(EPOCH FROM next_poll_at - now()) FROM login_device_flows WHERE handle = $1`, handle).Scan(&secs); err != nil {
+		t.Fatal(err)
+	}
+	if secs < 9 || secs > 10 {
+		t.Fatalf("next poll in %.1fs, want ~10s after slow_down", secs)
+	}
+	makeDue(t, st, handle)
+	if _, err := v.Poll(context.Background(), handle); err != nil {
+		t.Fatalf("Poll (approved): %v", err)
 	}
 }
 
 func TestGitHubDeviceFlowDenied(t *testing.T) {
-	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
-		{"error": "access_denied"},
-	}}
-	v, _ := newTestGitHubVerifier(t, fake)
-
+	st := openTestStore(t)
+	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{{"error": "access_denied"}}}
+	v := newTestGitHubVerifier(t, fake, st)
 	handle, _, err := v.Start(context.Background())
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	if _, err := waitDone(t, v, handle); err == nil || err == ErrAuthPending {
+	makeDue(t, st, handle)
+	if _, err := v.Poll(context.Background(), handle); err == nil || errors.Is(err, ErrAuthPending) {
 		t.Fatalf("denied flow err = %v, want terminal error", err)
 	}
-}
-
-func TestGitHubDeviceFlowPollPrunesCompletedFlow(t *testing.T) {
-	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
-		{"access_token": "gho_tok", "token_type": "bearer"},
-	}}
-	v, _ := newTestGitHubVerifier(t, fake)
-
-	handle, _, err := v.Start(context.Background())
-	if err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if _, err := waitDone(t, v, handle); err != nil {
-		t.Fatalf("Poll: %v", err)
-	}
-	// The flow completed and was already returned once; a second poll of the
-	// same handle must not still redeem the cached identity.
-	if _, err := v.Poll(context.Background(), handle); err == nil {
-		t.Fatal("Poll(completed handle) succeeded a second time, want unknown-handle error")
+	// Terminal: the row is gone, a retry is unknown.
+	if _, err := v.Poll(context.Background(), handle); err == nil || errors.Is(err, ErrAuthPending) {
+		t.Fatalf("Poll after denial = %v, want unknown-handle error", err)
 	}
 }
 
 // Most device flows are never polled to completion: the user closes the tab,
-// the CLI is Ctrl-C'd, the code expires unapproved. Those entries used to sit in
-// the flows map for the life of the process, so a long-running relay's memory
-// grew with every login ever started. Start sweeps what has expired (#81).
-func TestGitHubDeviceFlowPrunesAbandonedFlows(t *testing.T) {
-	// Never approved: every poll answers authorization_pending until the device
-	// code's own lifetime runs out.
-	v, _ := newTestGitHubVerifier(t, &fakeGitHub{t: t})
-
-	// A fake clock the poll loop drives itself: each slept interval advances it,
-	// so the fake's 900s expires_in is reached in a few hundred instant polls
-	// rather than fifteen real minutes.
-	var clockMu sync.Mutex
-	now := time.Now()
-	v.now = func() time.Time {
-		clockMu.Lock()
-		defer clockMu.Unlock()
-		return now
-	}
-	v.sleep = func(d time.Duration) {
-		clockMu.Lock()
-		now = now.Add(d)
-		clockMu.Unlock()
-	}
-	advance := func(d time.Duration) {
-		clockMu.Lock()
-		now = now.Add(d)
-		clockMu.Unlock()
-	}
-
+// the CLI is Ctrl-C'd, the code expires unapproved. Expired rows are
+// invisible, and the next Start sweeps them (#81).
+func TestGitHubDeviceFlowSweepsExpired(t *testing.T) {
+	st := openTestStore(t)
+	v := newTestGitHubVerifier(t, &fakeGitHub{t: t}, st)
 	var abandoned []string
 	for i := 0; i < 3; i++ {
 		h, _, err := v.Start(context.Background())
@@ -229,61 +207,85 @@ func TestGitHubDeviceFlowPrunesAbandonedFlows(t *testing.T) {
 		}
 		abandoned = append(abandoned, h)
 	}
-
-	// Let the three background pollers run their codes out.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		v.mu.Lock()
-		allDone := true
-		for _, fl := range v.flows {
-			if !fl.done {
-				allDone = false
-			}
-		}
-		v.mu.Unlock()
-		if allDone {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("device codes never expired")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// The codes have run out, but each entry is still resolvable through its
-	// grace window — a poll landing right on the deadline deserves the real
-	// "device code expired" error, not a bare unknown-handle.
-	if _, err := v.Poll(context.Background(), abandoned[0]); err == nil || errors.Is(err, ErrAuthPending) {
-		t.Errorf("Poll within grace = %v, want the flow's terminal error", err)
-	}
-	advance(flowGrace + time.Second)
-
-	// A fresh login is the sweep trigger: the dead flows must not outlive it.
-	if _, _, err := v.Start(context.Background()); err != nil {
-		t.Fatalf("Start (post-expiry): %v", err)
-	}
-	v.mu.Lock()
-	n := len(v.flows)
-	v.mu.Unlock()
-	if n != 1 {
-		t.Errorf("flows after sweep = %d, want 1 (only the live flow)", n)
+	if _, err := st.db.Exec(`UPDATE login_device_flows SET expires_at = now() - interval '1 second'`); err != nil {
+		t.Fatal(err)
 	}
 	for i, h := range abandoned {
 		if _, err := v.Poll(context.Background(), h); err == nil || errors.Is(err, ErrAuthPending) {
-			t.Errorf("Poll(abandoned handle %d) = %v, want unknown-handle error", i, err)
+			t.Errorf("Poll(expired handle %d) = %v, want unknown-handle error", i, err)
 		}
+	}
+	if _, _, err := v.Start(context.Background()); err != nil {
+		t.Fatalf("Start (post-expiry): %v", err)
+	}
+	if n := countRows(t, st, `SELECT COUNT(*) FROM login_device_flows`); n != 1 {
+		t.Errorf("flows after sweep = %d, want 1 (only the live flow)", n)
+	}
+}
+
+// Start on one relay, poll on another: the flow lives in the store, not the
+// process that started it.
+func TestGitHubDeviceFlowSpansTwoRelays(t *testing.T) {
+	st := openTestStore(t)
+	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
+		{"access_token": "gho_tok", "token_type": "bearer"},
+	}}
+	relayA := newTestGitHubVerifier(t, fake, st)
+	relayB := newTestGitHubVerifier(t, fake, st)
+	handle, _, err := relayA.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if _, err := relayB.Poll(context.Background(), handle); !errors.Is(err, ErrAuthPending) {
+		t.Fatalf("early Poll on B = %v, want pending", err)
+	}
+	makeDue(t, st, handle)
+	id, err := relayB.Poll(context.Background(), handle)
+	if err != nil || id.Login != "Octo-Cat" {
+		t.Fatalf("Poll on B = (%+v, %v)", id, err)
+	}
+}
+
+// If the CLI's poll connection drops mid-flight, the request context is
+// canceled — but the upstream token exchange and identity fetch must still
+// run to completion, so the flow's outcome (or a genuine retry) survives the
+// caller going away instead of the row being deleted out from under the next
+// poll (a regression from the deleted background-goroutine days, which used
+// context.Background()).
+func TestGitHubDeviceFlowSurvivesCanceledPoll(t *testing.T) {
+	st := openTestStore(t)
+	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
+		{"error": "authorization_pending"},
+	}}
+	v := newTestGitHubVerifier(t, fake, st)
+	handle, _, err := v.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	makeDue(t, st, handle)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := v.Poll(ctx, handle); !errors.Is(err, ErrAuthPending) {
+		t.Fatalf("Poll (canceled ctx) err = %v, want pending", err)
+	}
+	if n := fake.tokenPolls(); n != 1 {
+		t.Fatalf("upstream token polls = %d, want 1", n)
+	}
+	if _, ok, err := st.DeviceFlow(handle); err != nil || !ok {
+		t.Fatalf("DeviceFlow(handle) ok = %v err = %v, want row to survive a canceled poll", ok, err)
 	}
 }
 
 func TestGitHubVerifierPollUnknownHandle(t *testing.T) {
-	v := NewGitHubVerifier("test-client", "test-secret")
+	v := NewGitHubVerifier("test-client", "test-secret", openTestStore(t))
 	if _, err := v.Poll(context.Background(), "never-started"); err == nil {
 		t.Fatal("Poll(unknown) succeeded, want error")
 	}
 }
 
 func TestGitHubAuthCodeURL(t *testing.T) {
-	v := NewGitHubVerifier("test-client", "test-secret")
+	v := NewGitHubVerifier("test-client", "test-secret", nil)
 	got := v.AuthCodeURL("state-123")
 	u, err := url.Parse(got)
 	if err != nil {
@@ -311,7 +313,7 @@ func TestGitHubExchange(t *testing.T) {
 	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
 		{"access_token": "gho_tok", "token_type": "bearer"},
 	}}
-	v, _ := newTestGitHubVerifier(t, fake)
+	v := newTestGitHubVerifier(t, fake, nil)
 
 	id, err := v.Exchange(context.Background(), "code-1")
 	if err != nil {
@@ -332,7 +334,7 @@ func TestGitHubExchangeBadCode(t *testing.T) {
 	fake := &fakeGitHub{t: t, tokenResponses: []map[string]any{
 		{"error": "bad_verification_code"},
 	}}
-	v, _ := newTestGitHubVerifier(t, fake)
+	v := newTestGitHubVerifier(t, fake, nil)
 	if _, err := v.Exchange(context.Background(), "nope"); err == nil {
 		t.Fatal("Exchange(bad code) succeeded, want error")
 	}

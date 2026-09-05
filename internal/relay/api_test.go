@@ -265,13 +265,39 @@ func startWebLogin(t *testing.T, api http.Handler, redirectURI string) (state st
 	return state, cookie
 }
 
-func newWebTestAPI(t *testing.T) (http.Handler, *FakeVerifier) {
+func newWebTestAPI(t *testing.T) (http.Handler, *FakeVerifier, *Store) {
 	t.Helper()
 	st := openTestStore(t)
 	st.Configure("public.getpiper.co", 3, 10, 5)
 	fv := NewFakeVerifier()
 	api := NewAPIWithTunnel(st, fv, "", nil, []string{"https://dash.getpiper.co/"}, nil, nil)
-	return api, fv
+	return api, fv, st
+}
+
+// Two relays over one store: the browser starts on one process and GitHub's
+// callback lands on the other. The state must be found there (#522).
+func TestWebLoginCompletesOnAnotherRelay(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	fv := NewFakeVerifier()
+	redirects := []string{"https://dash.getpiper.co/"}
+	relayA := NewAPIWithTunnel(st, fv, "", nil, redirects, nil, nil)
+	relayB := NewAPIWithTunnel(st, fv, "", nil, redirects, nil, nil)
+
+	state, cookie := startWebLogin(t, relayA, "https://dash.getpiper.co/auth")
+	fv.GrantCode("code-1", Identity{Subject: "583231", Login: "ivan"})
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/v1/login/callback?code=code-1&state="+url.QueryEscape(state), nil)
+	req.AddCookie(cookie)
+	rr := httptest.NewRecorder()
+	relayB.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound {
+		t.Fatalf("callback on relay B = %d, body %s", rr.Code, rr.Body.String())
+	}
+	if loc := rr.Header().Get("Location"); !strings.Contains(loc, "#credential=") {
+		t.Fatalf("callback Location = %q, want credential fragment", loc)
+	}
 }
 
 // installationAccountStub fakes the GitHub "get an installation" endpoint,
@@ -326,7 +352,7 @@ func TestLoginCallbackIgnoresInstallationID(t *testing.T) {
 }
 
 func TestWebLoginCallbackHappyPath(t *testing.T) {
-	api, fv := newWebTestAPI(t)
+	api, fv, _ := newWebTestAPI(t)
 	state, cookie := startWebLogin(t, api, "https://dash.getpiper.co/auth")
 
 	fv.GrantCode("code-1", Identity{Subject: "583231", Login: "ivan"})
@@ -367,7 +393,7 @@ func TestWebLoginCallbackHappyPath(t *testing.T) {
 }
 
 func TestWebLoginRejectsDisallowedRedirect(t *testing.T) {
-	api, _ := newWebTestAPI(t)
+	api, _, _ := newWebTestAPI(t)
 	rr := httptest.NewRecorder()
 	api.ServeHTTP(rr, httptest.NewRequest(http.MethodGet,
 		"/v1/login/web?redirect_uri="+url.QueryEscape("https://evil.example/auth"), nil))
@@ -377,7 +403,7 @@ func TestWebLoginRejectsDisallowedRedirect(t *testing.T) {
 }
 
 func TestWebLoginRejectsFragmentRedirect(t *testing.T) {
-	api, _ := newWebTestAPI(t)
+	api, _, _ := newWebTestAPI(t)
 	rr := httptest.NewRecorder()
 	api.ServeHTTP(rr, httptest.NewRequest(http.MethodGet,
 		"/v1/login/web?redirect_uri="+url.QueryEscape("https://dash.getpiper.co/#x"), nil))
@@ -387,7 +413,7 @@ func TestWebLoginRejectsFragmentRedirect(t *testing.T) {
 }
 
 func TestWebLoginCallbackStateSingleUse(t *testing.T) {
-	api, fv := newWebTestAPI(t)
+	api, fv, _ := newWebTestAPI(t)
 	state, cookie := startWebLogin(t, api, "https://dash.getpiper.co/auth")
 	fv.GrantCode("code-1", Identity{Subject: "583231", Login: "ivan"})
 
@@ -408,7 +434,7 @@ func TestWebLoginCallbackStateSingleUse(t *testing.T) {
 }
 
 func TestWebLoginCallbackRejectsCookieMismatch(t *testing.T) {
-	api, fv := newWebTestAPI(t)
+	api, fv, _ := newWebTestAPI(t)
 	state, _ := startWebLogin(t, api, "https://dash.getpiper.co/auth")
 	fv.GrantCode("code-1", Identity{Subject: "583231", Login: "ivan"})
 
@@ -433,7 +459,7 @@ func TestWebLoginCallbackRejectsCookieMismatch(t *testing.T) {
 }
 
 func TestWebLoginCallbackExchangeFailure(t *testing.T) {
-	api, _ := newWebTestAPI(t) // no GrantCode → Exchange fails
+	api, _, _ := newWebTestAPI(t) // no GrantCode → Exchange fails
 	state, cookie := startWebLogin(t, api, "https://dash.getpiper.co/auth")
 
 	req := httptest.NewRequest(http.MethodGet,
@@ -447,25 +473,13 @@ func TestWebLoginCallbackExchangeFailure(t *testing.T) {
 }
 
 func TestWebLoginSweepsExpiredStates(t *testing.T) {
-	st := openTestStore(t)
-	st.Configure("public.getpiper.co", 3, 10, 5)
-	a := &api{st: st, v: NewFakeVerifier(), webv: NewFakeVerifier(),
-		webRedirects: []string{"https://dash.getpiper.co/"}, webStates: map[string]webState{}}
-	a.webStates["stale"] = webState{redirectURI: "https://dash.getpiper.co/x", expires: time.Now().Add(-time.Minute)}
-
-	rr := httptest.NewRecorder()
-	a.loginWeb(rr, httptest.NewRequest(http.MethodGet,
-		"/v1/login/web?redirect_uri="+url.QueryEscape("https://dash.getpiper.co/auth"), nil))
-	if rr.Code != http.StatusFound {
-		t.Fatalf("web login status = %d", rr.Code)
+	api, _, st := newWebTestAPI(t)
+	if err := st.PutWebState("stale", "https://dash.getpiper.co/x", -time.Minute); err != nil {
+		t.Fatal(err)
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if _, ok := a.webStates["stale"]; ok {
-		t.Fatal("expired state not swept on new login")
-	}
-	if len(a.webStates) != 1 {
-		t.Fatalf("webStates size = %d, want 1 (only the fresh state)", len(a.webStates))
+	startWebLogin(t, api, "https://dash.getpiper.co/auth")
+	if n := countRows(t, st, `SELECT COUNT(*) FROM login_web_states`); n != 1 {
+		t.Fatalf("login_web_states rows = %d, want 1 (only the fresh state)", n)
 	}
 }
 

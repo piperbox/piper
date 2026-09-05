@@ -307,23 +307,30 @@ func TestEdgePlacesAndRoutesAcrossTwoRelays(t *testing.T) {
 	_, _ = tunnel.Dial(bogus, "not-a-token", "nobody.public.getpiper.co")
 	waitForLog(t, logged, "from "+bogus.LocalAddr().String())
 
-	// api.<apex> is pinned to the earliest-started relay (rA) and reaches
-	// its control plane: no bearer → 401 from that process.
-	tc, err := tls.Dial("tcp", cfg.TLSAddr, &tls.Config{ServerName: "api.public.getpiper.co", InsecureSkipVerify: true})
-	if err != nil {
-		t.Fatal(err)
+	// api.<apex> round-robins across the pool (#522): two requests reach two
+	// different relays' control planes (no bearer → 401 from each).
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		tc, err := tls.Dial("tcp", cfg.TLSAddr, &tls.Config{ServerName: "api.public.getpiper.co", InsecureSkipVerify: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := io.WriteString(tc, "GET /agents HTTP/1.1\r\nHost: api.public.getpiper.co\r\nConnection: close\r\n\r\n"); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		tc.Close()
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("api.<apex> via edge: %d, want 401", resp.StatusCode)
+		}
+		seen[resp.Header.Get("X-Relay")] = true
 	}
-	defer tc.Close()
-	if _, err := io.WriteString(tc, "GET /agents HTTP/1.1\r\nHost: api.public.getpiper.co\r\nConnection: close\r\n\r\n"); err != nil {
-		t.Fatal(err)
-	}
-	resp, err := http.ReadResponse(bufio.NewReader(tc), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("X-Relay") != rA.inst.ID {
-		t.Fatalf("api.<apex> via edge: %d from %q, want 401 from %s (rB is %s)", resp.StatusCode, resp.Header.Get("X-Relay"), rA.inst.ID, rB.inst.ID)
+	if !seen[rA.inst.ID] || !seen[rB.inst.ID] {
+		t.Fatalf("api.<apex> reached %v, want both %s and %s", seen, rA.inst.ID, rB.inst.ID)
 	}
 }
 

@@ -242,8 +242,6 @@ func (e *edge) handleTLS(conn net.Conn) {
 	var target InstanceRow
 	var ok bool
 	if sni == e.apiHost {
-		// Login-flow state is per-process until its follow-up lands: pin the
-		// control plane to one relay so every poll sees the same memory.
 		target, ok = e.state.pickAPI()
 	} else if agent, found := e.resolveAgent(sni, false); found {
 		target, ok = e.state.ownerOf(agent)

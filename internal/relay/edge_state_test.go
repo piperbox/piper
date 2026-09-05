@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -10,7 +11,7 @@ func instRow(id string, started time.Time, sessions int) InstanceRow {
 		TLSAddr: id + ":443", HTTPAddr: id + ":80", TunnelAddr: id + ":7000", APIAddr: id + ":8080"}
 }
 
-func TestPickAPIPinsEarliestStarted(t *testing.T) {
+func TestEdgeStatePickAPIStartsWithEarliest(t *testing.T) {
 	t0 := time.Date(2026, 9, 4, 0, 0, 0, 0, time.UTC)
 	s := newEdgeState()
 	if _, ok := s.pickAPI(); ok {
@@ -103,5 +104,31 @@ func TestNameCacheExpiresAndClears(t *testing.T) {
 	s.clearNames()
 	if _, cached, _ := s.cachedName("app.example"); cached {
 		t.Fatal("clearNames left an entry")
+	}
+}
+
+// api.<apex> is round-robined: with login state in Postgres (#522) any relay
+// serves any request, so the edge spreads them instead of pinning one.
+func TestEdgeStatePickAPIRoundRobins(t *testing.T) {
+	s := newEdgeState()
+	t0 := time.Now()
+	s.setInstances([]InstanceRow{
+		{ID: "b", StartedAt: t0.Add(time.Second)},
+		{ID: "a", StartedAt: t0},
+	})
+	var got []string
+	for i := 0; i < 4; i++ {
+		r, ok := s.pickAPI()
+		if !ok {
+			t.Fatal("pickAPI found nothing")
+		}
+		got = append(got, r.ID)
+	}
+	if want := []string{"a", "b", "a", "b"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("pickAPI order = %v, want %v", got, want)
+	}
+	s.evict("a")
+	if r, ok := s.pickAPI(); !ok || r.ID != "b" {
+		t.Fatalf("pickAPI after evict = (%v, %v), want b", r.ID, ok)
 	}
 }

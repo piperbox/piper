@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -19,47 +18,31 @@ import (
 // browser, the authorization-code exchange. It holds the relay's GitHub client
 // secret so callers never see it. GitHub's device flow returns no ID token —
 // identity comes from GET /user with the granted access token, which is used
-// once and discarded. Each Start spawns a background goroutine that polls
-// GitHub until the user approves, the code expires, or the process exits; Poll
-// reports progress without blocking.
+// once and discarded. Flows live in the store (#522): Start records the device
+// code, and the poll that arrives once GitHub's interval has passed makes one
+// upstream request, so any relay serves any poll and nothing runs in the
+// background.
 type GitHubVerifier struct {
 	clientID, clientSecret string
 	oauthBase              string // https://github.com; tests override
 	apiBase                string // https://api.github.com; tests override
 	httpc                  *http.Client
-	sleep                  func(time.Duration) // poll delay seam; tests override
-	now                    func() time.Time    // clock seam; tests override
-
-	mu    sync.Mutex
-	flows map[string]*githubFlow
-}
-
-type githubFlow struct {
-	done bool
-	id   Identity
-	err  error
-	// expires bounds how long this entry may occupy the map: the device code's
-	// own lifetime plus a grace for the poll that redeems it. A flow polled to
-	// completion is deleted by Poll; this is what retires the ones nobody ever
-	// comes back for (#81).
-	expires time.Time
+	st                     *Store
 }
 
 // flowGrace is how long past a device code's expiry a flow stays resolvable, so
-// a poll racing the deadline still gets the real "device code expired" error
-// rather than a bare unknown-handle.
+// a poll racing the deadline still gets GitHub's own "expired" answer rather
+// than a bare unknown-handle.
 const flowGrace = time.Minute
 
-func NewGitHubVerifier(clientID, clientSecret string) *GitHubVerifier {
+func NewGitHubVerifier(clientID, clientSecret string, st *Store) *GitHubVerifier {
 	return &GitHubVerifier{
 		clientID:     clientID,
 		clientSecret: clientSecret,
 		oauthBase:    "https://github.com",
 		apiBase:      "https://api.github.com",
 		httpc:        &http.Client{Timeout: 15 * time.Second},
-		sleep:        time.Sleep,
-		now:          time.Now,
-		flows:        map[string]*githubFlow{},
+		st:           st,
 	}
 }
 
@@ -98,13 +81,14 @@ func (g *GitHubVerifier) Start(ctx context.Context) (string, DeviceAuth, error) 
 	if expiresIn <= 0 {
 		expiresIn = 900 // GitHub's documented device-code lifetime
 	}
-	fl := &githubFlow{expires: g.now().Add(time.Duration(expiresIn)*time.Second + flowGrace)}
-	g.mu.Lock()
-	g.sweepLocked()
-	g.flows[handle] = fl
-	g.mu.Unlock()
-
-	go g.pollUntilDone(res.DeviceCode, res.Interval, res.ExpiresIn, fl)
+	interval := res.Interval
+	if interval <= 0 {
+		interval = 5
+	}
+	if err := g.st.PutDeviceFlow(handle, res.DeviceCode, interval,
+		time.Duration(expiresIn)*time.Second+flowGrace); err != nil {
+		return "", DeviceAuth{}, err
+	}
 
 	return handle, DeviceAuth{
 		UserCode:        res.UserCode,
@@ -112,57 +96,6 @@ func (g *GitHubVerifier) Start(ctx context.Context) (string, DeviceAuth, error) 
 		Interval:        res.Interval,
 		ExpiresIn:       res.ExpiresIn,
 	}, nil
-}
-
-// pollUntilDone polls GitHub's token endpoint at the server-given interval,
-// stretching by 5s on slow_down (GitHub's documented semantics), until the
-// grant resolves or the device code's lifetime elapses.
-func (g *GitHubVerifier) pollUntilDone(deviceCode string, interval, expiresIn int, fl *githubFlow) {
-	finish := func(id Identity, err error) {
-		g.mu.Lock()
-		fl.done, fl.id, fl.err = true, id, err
-		g.mu.Unlock()
-	}
-	if interval <= 0 {
-		interval = 5
-	}
-	deadline := g.now().Add(time.Duration(expiresIn) * time.Second)
-	ctx := context.Background()
-	for {
-		if g.now().After(deadline) {
-			finish(Identity{}, errors.New("device code expired"))
-			return
-		}
-		g.sleep(time.Duration(interval) * time.Second)
-
-		var tr githubTokenResponse
-		err := g.postForm(ctx, g.oauthBase+"/login/oauth/access_token", url.Values{
-			"client_id":   {g.clientID},
-			"device_code": {deviceCode},
-			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
-		}, &tr)
-		if err != nil {
-			finish(Identity{}, err)
-			return
-		}
-		switch tr.Error {
-		case "":
-			if tr.AccessToken == "" {
-				finish(Identity{}, errors.New("github token response missing access_token"))
-				return
-			}
-			finish(g.fetchUser(ctx, tr.AccessToken))
-			return
-		case "authorization_pending":
-			continue
-		case "slow_down":
-			interval += 5
-			continue
-		default: // expired_token, access_denied, incorrect_device_code, ...
-			finish(Identity{}, fmt.Errorf("github device flow: %s", tr.Error))
-			return
-		}
-	}
 }
 
 // fetchUser resolves an access token to the GitHub identity behind it.
@@ -215,31 +148,67 @@ func (g *GitHubVerifier) postForm(ctx context.Context, u string, form url.Values
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func (g *GitHubVerifier) Poll(_ context.Context, handle string) (Identity, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	fl, ok := g.flows[handle]
-	if !ok || g.now().After(fl.expires) {
+// Poll advances a flow by at most one upstream request. Before next_poll_at it
+// is pending for free; after it, GitHub is asked once and the row is deferred
+// (authorization_pending, slow_down) or retired (any terminal answer, which is
+// returned to this caller and to nobody else).
+func (g *GitHubVerifier) Poll(ctx context.Context, handle string) (Identity, error) {
+	fl, ok, err := g.st.DeviceFlow(handle)
+	if err != nil {
+		return Identity{}, err
+	}
+	if !ok {
 		return Identity{}, errors.New("unknown handle")
 	}
-	if !fl.done {
+	if !fl.Due {
 		return Identity{}, ErrAuthPending
 	}
-	delete(g.flows, handle)
-	return fl.id, fl.err
+	// The caller's context (the poll handler's r.Context()) is only good for
+	// deciding whether to make this upstream request at all: once started, it
+	// must run to completion even if the CLI's poll connection drops, or a
+	// dropped connection would delete the flow (via finish) out from under
+	// the next poll. The httpc 15s timeout still bounds both calls.
+	upstreamCtx := context.WithoutCancel(ctx)
+	var tr githubTokenResponse
+	err = g.postForm(upstreamCtx, g.oauthBase+"/login/oauth/access_token", url.Values{
+		"client_id":   {g.clientID},
+		"device_code": {fl.DeviceCode},
+		"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
+	}, &tr)
+	if err != nil {
+		return g.finish(handle, Identity{}, err)
+	}
+	switch tr.Error {
+	case "":
+		if tr.AccessToken == "" {
+			return g.finish(handle, Identity{}, errors.New("github token response missing access_token"))
+		}
+		id, err := g.fetchUser(upstreamCtx, tr.AccessToken)
+		return g.finish(handle, id, err)
+	case "authorization_pending":
+		return g.deferFlow(handle, fl.Interval)
+	case "slow_down":
+		// GitHub's documented semantics: wait interval + 5s.
+		return g.deferFlow(handle, fl.Interval+5)
+	default: // expired_token, access_denied, incorrect_device_code, ...
+		return g.finish(handle, Identity{}, fmt.Errorf("github device flow: %s", tr.Error))
+	}
 }
 
-// sweepLocked drops flows past their expiry. Called from Start, so the map is
-// bounded by the number of logins actually in flight: entries can only be added
-// there, and every add pays one pass over a map that size. No background
-// goroutine, nothing to shut down.
-func (g *GitHubVerifier) sweepLocked() {
-	now := g.now()
-	for h, fl := range g.flows {
-		if now.After(fl.expires) {
-			delete(g.flows, h)
-		}
+// deferFlow pushes the flow's next upstream request secs into the future.
+func (g *GitHubVerifier) deferFlow(handle string, secs int) (Identity, error) {
+	if err := g.st.DeferDeviceFlow(handle, time.Duration(secs)*time.Second); err != nil {
+		return Identity{}, err
 	}
+	return Identity{}, ErrAuthPending
+}
+
+// finish retires the flow and hands its outcome to this one caller.
+func (g *GitHubVerifier) finish(handle string, id Identity, outcome error) (Identity, error) {
+	if err := g.st.DeleteDeviceFlow(handle); err != nil {
+		return Identity{}, err
+	}
+	return id, outcome
 }
 
 // AuthCodeURL is the GitHub authorize URL for the browser flow. No

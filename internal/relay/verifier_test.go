@@ -58,5 +58,5 @@ func TestFakeVerifierWebFlow(t *testing.T) {
 
 	// Both verifiers satisfy WebVerifier.
 	var _ WebVerifier = f
-	var _ WebVerifier = NewGitHubVerifier("id", "secret")
+	var _ WebVerifier = NewGitHubVerifier("id", "secret", nil)
 }

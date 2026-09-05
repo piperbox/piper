@@ -280,3 +280,103 @@ func TestCLILoginStartRequiresApp(t *testing.T) {
 		t.Fatalf("start without app = %d, want 503", rr.Code)
 	}
 }
+
+// The brokered CLI login spans four requests from two clients (CLI and
+// browser); behind an edge they land on arbitrary relays. Start on A, poll on
+// B, confirm on B, callback on A, collect on B — and the credential is minted
+// exactly once, by the poll, so nothing secret ever sat in the handle (#522).
+func TestCLILoginSpansTwoRelays(t *testing.T) {
+	relayA, fv, st := newCLILoginAPI(t, "piper-app")
+	app, err := NewGitHubApp(GitHubAppConfig{
+		AppID: "1", PrivateKeyPEM: relayTestKeyPEM(t), WebhookSecret: "s", Slug: "piper-app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayB := NewAPIWithTunnel(st, fv, "", nil, nil, app, nil)
+
+	rr := apiReq(t, relayA, "POST", "/v1/login/cli/start", "", "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("start = %d", rr.Code)
+	}
+	var start struct {
+		Handle   string `json:"handle"`
+		UserCode string `json:"user_code"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &start); err != nil {
+		t.Fatal(err)
+	}
+	if rr := apiReq(t, relayB, "POST", "/v1/login/cli/poll", "", `{"handle":"`+start.Handle+`"}`); rr.Code != http.StatusAccepted {
+		t.Fatalf("early poll on B = %d, want 202", rr.Code)
+	}
+	state, cookie := confirmCode(t, relayB, start.UserCode)
+
+	fv.GrantCode("code-1", Identity{Subject: "42", Login: "alice"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/login/callback?code=code-1&state="+url.QueryEscape(state), nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	relayA.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("callback on A = %d, body %s", rec.Code, rec.Body.String())
+	}
+	if n := countRows(t, st, "SELECT COUNT(*) FROM account_creds"); n != 0 {
+		t.Fatalf("account_creds after callback = %d, want 0 (poll mints, not callback)", n)
+	}
+
+	rr2 := apiReq(t, relayB, "POST", "/v1/login/cli/poll", "", `{"handle":"`+start.Handle+`"}`)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("final poll on B = %d, body %s", rr2.Code, rr2.Body.String())
+	}
+	var out struct {
+		AccountCredential string `json:"account_credential"`
+		Username          string `json:"username"`
+		InstallURL        string `json:"install_url"`
+	}
+	if err := json.Unmarshal(rr2.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Username != "alice" || !strings.Contains(out.InstallURL, "/apps/piper-app/installations/new") {
+		t.Fatalf("poll body = %s", rr2.Body.String())
+	}
+	if acc, err := st.AuthenticateAccount(out.AccountCredential); err != nil || acc.Username != "alice" {
+		t.Fatalf("minted credential does not authenticate: %v", err)
+	}
+	if n := countRows(t, st, "SELECT COUNT(*) FROM login_cli_handles"); n != 0 {
+		t.Fatalf("handle rows after collect = %d, want 0", n)
+	}
+}
+
+// FinishCLIHandle returns the same sentinel error for a legitimate "handle
+// gone/unconfirmed/expired" no-op (the guarded UPDATE affects zero rows) and
+// for a genuine store failure — cliCallback must not conflate the two, the
+// way every other handler in this file distinguishes them (#522). A BEFORE
+// UPDATE trigger forces a real Postgres error out of the exact statement
+// FinishCLIHandle issues, without disturbing the earlier CLIHandle SELECT or
+// the ConfirmCLIHandle UPDATE that already ran during setup — so this is a
+// genuine store failure, not a mocked one.
+func TestCLILoginCallbackStoreErrorIsNotBadState(t *testing.T) {
+	api, fv, st := newCLILoginAPI(t, "piper-app")
+	handle, cookie := startCLILogin(t, api)
+
+	if _, err := st.db.Exec(`CREATE FUNCTION break_finish_cli_handle() RETURNS trigger AS $$
+		BEGIN
+			RAISE EXCEPTION 'forced failure for TestCLILoginCallbackStoreErrorIsNotBadState';
+		END;
+		$$ LANGUAGE plpgsql`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`CREATE TRIGGER break_finish_cli_handle
+		BEFORE UPDATE ON login_cli_handles
+		FOR EACH ROW EXECUTE FUNCTION break_finish_cli_handle()`); err != nil {
+		t.Fatal(err)
+	}
+
+	fv.GrantCode("code-1", Identity{Subject: "42", Login: "alice"})
+	req := httptest.NewRequest(http.MethodGet, "/v1/login/callback?code=code-1&state="+handle, nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	api.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("callback with a broken store = %d, body %s; want 500 store error", rec.Code, rec.Body.String())
+	}
+}
