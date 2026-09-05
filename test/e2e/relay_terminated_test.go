@@ -17,8 +17,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 // TestRelayTerminatedSelfService proves the full free-tier loop:
@@ -34,41 +32,13 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	apex := "public.localhost"
 	certFile, keyFile := writeSelfSigned(t, apex) // *.public.localhost
 
-	binDir := t.TempDir()
-	for _, c := range []string{"piperd", "piper-relay", "piper"} {
-		b := exec.Command("go", "build", "-o", filepath.Join(binDir, c), "./cmd/"+c)
-		b.Dir = repoRoot
-		if out, err := b.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", c, err, out)
-		}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	relayData := t.TempDir()
-	relayDB := relaytest.DSN(t)
-	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
-	relay.Env = append(os.Environ(),
-		"PIPER_RELAY_DATA_DIR="+relayData,
-		"PIPER_RELAY_DB_URL="+relayDB,
-		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
-		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
-		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
-		"PIPER_RELAY_API_ADDR=127.0.0.1:8080",
-		"PIPER_RELAY_TUNNEL_PUBLIC=127.0.0.1:7000",
-		"PIPER_RELAY_APEX="+apex,
-		"PIPER_RELAY_TLS_CERT="+certFile,
-		"PIPER_RELAY_TLS_KEY="+keyFile,
-		"PIPER_RELAY_FAKE_APPROVE=1",
-	)
-	relay.Stdout, relay.Stderr = os.Stdout, os.Stderr
-	if err := relay.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	killOnCleanup(t, relay)
-	waitPort(t, "127.0.0.1:7000", 10*time.Second)
-	waitPort(t, "127.0.0.1:8080", 10*time.Second)
+	// piper-edge on the public ports with two relays behind it: the
+	// smallest topology both of a box's tunnel sessions can place in (#530).
+	cl := startCluster(t, ctx, clusterOpts{apex: apex, certFile: certFile, keyFile: keyFile})
+	binDir, relayDB := bins(t), cl.dsn
 
 	// Start piperd first, LAN-only (no PIPER_RELAY_* env): its enrollment
 	// socket comes up so `piper login` below can claim it (one-command login).
@@ -99,7 +69,7 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	// relay.json (terminated); piperd re-execs itself to apply it.
 	home := t.TempDir()
 	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=", "PIPER_NO_BROWSER=1")
-	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080", "--data-dir", piperdData)
+	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", cl.relayAPI(), "--data-dir", piperdData)
 	login.Env = piperEnv
 	if out, err := login.CombinedOutput(); err != nil {
 		t.Fatalf("piper login: %v\n%s", err, out)
@@ -153,7 +123,7 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		d := &tls.Dialer{Config: &tls.Config{ServerName: hostname, InsecureSkipVerify: true}}
-		conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
+		conn, err := d.DialContext(ctx, "tcp", edgeTLSAddr)
 		if err == nil {
 			fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", hostname)
 			b, _ := io.ReadAll(conn)
@@ -175,26 +145,26 @@ func TestRelayTerminatedSelfService(t *testing.T) {
 	cred := accountCredential(t, home)
 
 	// Owner's credential → the box's real, Token-B-gated /v1/apps.
-	apps := controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base+"/v1/apps", cred, http.StatusOK, 30*time.Second)
+	apps := controlRequest(t, "api."+apex, edgeTLSAddr, "/agents/"+base+"/v1/apps", cred, http.StatusOK, 30*time.Second)
 	if !strings.Contains(apps, "blog") || !strings.Contains(apps, `"Status":"running"`) {
 		t.Fatalf("control response missing deployed app with running status: %q", apps)
 	}
 
 	// Unknown credential → 401 at the relay.
-	controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base+"/v1/apps", "bogus-cred", http.StatusUnauthorized, 10*time.Second)
+	controlRequest(t, "api."+apex, edgeTLSAddr, "/agents/"+base+"/v1/apps", "bogus-cred", http.StatusUnauthorized, 10*time.Second)
 
 	// Another tenant → 404 at the relay: never reaches the box, existence not leaked.
 	mcred := insertSecondAccount(t, relayDB)
-	controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base+"/v1/apps", mcred, http.StatusNotFound, 10*time.Second)
+	controlRequest(t, "api."+apex, edgeTLSAddr, "/agents/"+base+"/v1/apps", mcred, http.StatusNotFound, 10*time.Second)
 
 	// ---- Health/metrics surface (#75) ----
 	// Liveness: relay-answered from the live tunnel session, no box round-trip.
-	live := controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base, cred, http.StatusOK, 10*time.Second)
+	live := controlRequest(t, "api."+apex, edgeTLSAddr, "/agents/"+base, cred, http.StatusOK, 10*time.Second)
 	if !strings.Contains(live, `"connected":true`) {
 		t.Fatalf("liveness = %q, want connected:true", live)
 	}
 	// Same gates as the proxy: another tenant gets 404, not an existence leak.
-	controlRequest(t, "api."+apex, "127.0.0.1:8443", "/agents/"+base, mcred, http.StatusNotFound, 10*time.Second)
+	controlRequest(t, "api."+apex, edgeTLSAddr, "/agents/"+base, mcred, http.StatusNotFound, 10*time.Second)
 }
 
 // terminatedHostname reads the single registered hostname from the relay's

@@ -13,8 +13,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 // TestRelayCustomDomainSelfService proves the free-tier box can self-serve a
@@ -33,41 +31,13 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	apex := "public.localhost"
 	certFile, keyFile := writeSelfSigned(t, apex) // *.public.localhost
 
-	binDir := t.TempDir()
-	for _, c := range []string{"piperd", "piper-relay", "piper"} {
-		b := exec.Command("go", "build", "-o", filepath.Join(binDir, c), "./cmd/"+c)
-		b.Dir = repoRoot
-		if out, err := b.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", c, err, out)
-		}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	relayData := t.TempDir()
-	relayDB := relaytest.DSN(t)
-	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
-	relay.Env = append(os.Environ(),
-		"PIPER_RELAY_DATA_DIR="+relayData,
-		"PIPER_RELAY_DB_URL="+relayDB,
-		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
-		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
-		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
-		"PIPER_RELAY_API_ADDR=127.0.0.1:8080",
-		"PIPER_RELAY_TUNNEL_PUBLIC=127.0.0.1:7000",
-		"PIPER_RELAY_APEX="+apex,
-		"PIPER_RELAY_TLS_CERT="+certFile,
-		"PIPER_RELAY_TLS_KEY="+keyFile,
-		"PIPER_RELAY_FAKE_APPROVE=1",
-	)
-	relay.Stdout, relay.Stderr = os.Stdout, os.Stderr
-	if err := relay.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	killOnCleanup(t, relay)
-	waitPort(t, "127.0.0.1:7000", 10*time.Second)
-	waitPort(t, "127.0.0.1:8080", 10*time.Second)
+	// piper-edge on the public ports with two relays behind it: the
+	// smallest topology both of a box's tunnel sessions can place in (#530).
+	cl := startCluster(t, ctx, clusterOpts{apex: apex, certFile: certFile, keyFile: keyFile})
+	binDir, relayDB := bins(t), cl.dsn
 
 	// Start piperd first, LAN-only (no PIPER_RELAY_* env): its enrollment
 	// socket comes up so `piper login` below can claim it (one-command login).
@@ -99,7 +69,7 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	// relay.json (terminated); piperd re-execs itself to apply it.
 	home := t.TempDir()
 	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=", "PIPER_NO_BROWSER=1")
-	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080", "--data-dir", piperdData)
+	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", cl.relayAPI(), "--data-dir", piperdData)
 	login.Env = piperEnv
 	if out, err := login.CombinedOutput(); err != nil {
 		t.Fatalf("piper login: %v\n%s", err, out)
@@ -194,7 +164,7 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	deadline = time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		d := &tls.Dialer{Config: &tls.Config{ServerName: "blog." + custom, InsecureSkipVerify: true}}
-		conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
+		conn, err := d.DialContext(ctx, "tcp", edgeTLSAddr)
 		if err == nil {
 			fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: blog.%s\r\nConnection: close\r\n\r\n", custom)
 			cb, _ := io.ReadAll(conn)
@@ -213,7 +183,7 @@ func TestRelayCustomDomainSelfService(t *testing.T) {
 	// Coexistence: the shared-domain URL still serves.
 	hostname := terminatedHostname(t, relayDB)
 	d := &tls.Dialer{Config: &tls.Config{ServerName: hostname, InsecureSkipVerify: true}}
-	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
+	conn, err := d.DialContext(ctx, "tcp", edgeTLSAddr)
 	if err != nil {
 		t.Fatalf("shared-domain dial after custom domain: %v", err)
 	}
@@ -240,41 +210,13 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	apex := "public.localhost"
 	certFile, keyFile := writeSelfSigned(t, apex) // *.public.localhost
 
-	binDir := t.TempDir()
-	for _, c := range []string{"piperd", "piper-relay", "piper"} {
-		b := exec.Command("go", "build", "-o", filepath.Join(binDir, c), "./cmd/"+c)
-		b.Dir = repoRoot
-		if out, err := b.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", c, err, out)
-		}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	relayData := t.TempDir()
-	relayDB := relaytest.DSN(t)
-	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
-	relay.Env = append(os.Environ(),
-		"PIPER_RELAY_DATA_DIR="+relayData,
-		"PIPER_RELAY_DB_URL="+relayDB,
-		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
-		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
-		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
-		"PIPER_RELAY_API_ADDR=127.0.0.1:8080",
-		"PIPER_RELAY_TUNNEL_PUBLIC=127.0.0.1:7000",
-		"PIPER_RELAY_APEX="+apex,
-		"PIPER_RELAY_TLS_CERT="+certFile,
-		"PIPER_RELAY_TLS_KEY="+keyFile,
-		"PIPER_RELAY_FAKE_APPROVE=1",
-	)
-	relay.Stdout, relay.Stderr = os.Stdout, os.Stderr
-	if err := relay.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	killOnCleanup(t, relay)
-	waitPort(t, "127.0.0.1:7000", 10*time.Second)
-	waitPort(t, "127.0.0.1:8080", 10*time.Second)
+	// piper-edge on the public ports with two relays behind it: the
+	// smallest topology both of a box's tunnel sessions can place in (#530).
+	cl := startCluster(t, ctx, clusterOpts{apex: apex, certFile: certFile, keyFile: keyFile})
+	binDir, relayDB := bins(t), cl.dsn
 
 	// Start piperd first, LAN-only (no PIPER_RELAY_* env): its enrollment
 	// socket comes up so `piper login` below can claim it (one-command login).
@@ -306,7 +248,7 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	// relay.json (terminated); piperd re-execs itself to apply it.
 	home := t.TempDir()
 	piperEnv := append(os.Environ(), "HOME="+home, "PIPER_ADDR=", "PIPER_TOKEN=", "PIPER_NO_BROWSER=1")
-	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", "http://127.0.0.1:8080", "--data-dir", piperdData)
+	login := exec.Command(filepath.Join(binDir, "piper"), "login", "--relay", cl.relayAPI(), "--data-dir", piperdData)
 	login.Env = piperEnv
 	if out, err := login.CombinedOutput(); err != nil {
 		t.Fatalf("piper login: %v\n%s", err, out)
@@ -391,7 +333,7 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	// splices passthrough → box :443 terminates.
 	curlCustom := func() string {
 		d := &tls.Dialer{Config: &tls.Config{ServerName: custom, InsecureSkipVerify: true}}
-		conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
+		conn, err := d.DialContext(ctx, "tcp", edgeTLSAddr)
 		if err != nil {
 			return ""
 		}
@@ -417,7 +359,7 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	// plaintext Caddy, which answers 308 to https:// (#357). Without the
 	// redirect route nothing on that server matches the host and the visitor
 	// never reaches the app.
-	httpConn, err := net.Dial("tcp", "127.0.0.1:8880")
+	httpConn, err := net.Dial("tcp", edgeHTTPAddr)
 	if err != nil {
 		t.Fatalf("dial relay :80: %v", err)
 	}
@@ -435,7 +377,7 @@ func TestRelayPerAppCustomDomain(t *testing.T) {
 	// Coexistence: the shared-domain URL still serves.
 	hostname := terminatedHostname(t, relayDB)
 	d := &tls.Dialer{Config: &tls.Config{ServerName: hostname, InsecureSkipVerify: true}}
-	conn, err := d.DialContext(ctx, "tcp", "127.0.0.1:8443")
+	conn, err := d.DialContext(ctx, "tcp", edgeTLSAddr)
 	if err != nil {
 		t.Fatalf("shared-domain dial after custom domain: %v", err)
 	}

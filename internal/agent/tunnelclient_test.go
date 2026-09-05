@@ -1104,3 +1104,102 @@ func TestStatusReportsRetryingWithLastError(t *testing.T) {
 		t.Fatalf("state after Run returns = %q, want off", state)
 	}
 }
+
+// The duplicate wait is a ladder, not a constant: a slot's first refusal
+// waits duplicateFirstRetry, each further one four times longer, capped at
+// duplicateBackoff. The boot race in #548 is lost by milliseconds and clears
+// as soon as the edge reads the owner NOTIFY, so the first retry must be
+// cheap; a genuine one-relay pool still settles to the cap.
+func TestNextDuplicateWaitClimbsToTheCap(t *testing.T) {
+	prev := duplicateBackoff
+	duplicateBackoff = time.Minute
+	t.Cleanup(func() { duplicateBackoff = prev })
+	want := []time.Duration{2 * time.Second, 8 * time.Second, 32 * time.Second, time.Minute, time.Minute}
+	d := duplicateFirstRetry
+	for i, w := range want {
+		if d != w {
+			t.Fatalf("step %d = %s, want %s", i, d, w)
+		}
+		d = nextDuplicateWait(d)
+	}
+}
+
+// bootRaceRelay is the relay side of #548: the first handshake (slot 0) is
+// accepted, the second (slot 1, dialled before the owner row landed) is
+// refused as a duplicate, and every handshake after that is accepted — the
+// edge has read the NOTIFY by then and places slot 1 on the other relay.
+func bootRaceRelay(t *testing.T) (addr string, rejected *atomic.Int32, sessCh chan *tunnel.Session) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	rejected = new(atomic.Int32)
+	sessCh = make(chan *tunnel.Session, 8)
+	var served atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				if served.Add(1) == 2 {
+					_, _ = tunnel.Serve(c, func(_, _ string) error {
+						rejected.Add(1)
+						return tunnel.ErrDuplicateSession
+					})
+					c.Close()
+					return
+				}
+				sess, err := tunnel.Serve(c, func(_, _ string) error { return nil })
+				if err != nil {
+					c.Close()
+					return
+				}
+				sessCh <- sess
+			}()
+		}
+	}()
+	return ln.Addr().String(), rejected, sessCh
+}
+
+// A slot 1 that loses the boot race (#548) is back within duplicateFirstRetry,
+// not duplicateBackoff: the box regains its second session in seconds, not
+// after a minute with no redundancy.
+func TestSecondSlotRecoversALostBootRaceQuickly(t *testing.T) {
+	prevFirst, prevBackoff := duplicateFirstRetry, duplicateBackoff
+	duplicateFirstRetry = 30 * time.Millisecond
+	duplicateBackoff = 10 * time.Second
+	t.Cleanup(func() { duplicateFirstRetry, duplicateBackoff = prevFirst, prevBackoff })
+	logged := captureLog(t)
+	addr, rejected, sessCh := bootRaceRelay(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var c TunnelClient
+	go func() { defer close(done); c.Run(ctx, addr, "tok", "alice.example.com", nil) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return after cancel")
+		}
+	})
+
+	for i := 0; i < 2; i++ {
+		select {
+		case <-sessCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("relay saw %d session(s) in 2s after %d duplicate refusal(s); slot 1 is waiting out duplicateBackoff", i, rejected.Load())
+		}
+	}
+	if rejected.Load() != 1 {
+		t.Fatalf("relay refused %d handshakes, want exactly the lost race", rejected.Load())
+	}
+	if !strings.Contains(logged.String(), "slot 1") || !strings.Contains(logged.String(), "already holds") {
+		t.Fatalf("lost race not logged for slot 1:\n%s", logged.String())
+	}
+}

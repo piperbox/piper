@@ -14,7 +14,9 @@ build:
 test:
 	go test ./...
 # e2e runs the end-to-end suite against real Docker. Needs :80, :2019 and
-# :8088 free — a leftover caddy on those ports fails the suite (see #126).
+# :8088 free — a leftover caddy on those ports fails the suite (see #126) —
+# plus the relay topology's: :7000/:8443/:8880 for piper-edge and the
+# 1xxxx/2xxxx block in test/e2e/main_test.go for the two relays behind it.
 e2e:
 	RUN_E2E=1 go test ./test/e2e/... -count=1 -v
 cross:
