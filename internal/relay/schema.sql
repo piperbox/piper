@@ -153,7 +153,11 @@ CREATE TABLE IF NOT EXISTS relay_instances (
     tls_addr    TEXT NOT NULL,
     http_addr   TEXT NOT NULL,
     tunnel_addr TEXT NOT NULL,
-    api_addr    TEXT NOT NULL
+    api_addr    TEXT NOT NULL,
+    -- Set for the rest of the process's life once it receives SIGTERM (#523):
+    -- edges place no new tunnels or api.<apex> connections here, but keep
+    -- routing the hostnames it owns until their sessions close.
+    draining    BOOLEAN NOT NULL DEFAULT false
 );
 
 -- agent_owners says which instance terminates an agent's tunnel. The

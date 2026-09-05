@@ -253,3 +253,30 @@ func TestHoldsIsExactAndBasesListsAgentsOnly(t *testing.T) {
 		t.Fatalf("Bases() = %v, want the one agent base", got)
 	}
 }
+
+// Sessions is Drain's view of what is still connected: one entry per agent,
+// and a custom domain (which shares byBase) must not make an agent appear
+// twice.
+func TestSessionsListsAgentsNotCustomDomains(t *testing.T) {
+	r := NewRouter()
+	a, _ := pipeSession(t, "a.public.getpiper.co")
+	b, _ := pipeSession(t, "b.public.getpiper.co")
+	r.Register(a)
+	r.Register(b)
+	r.RegisterCustom("shop.example.com", a)
+
+	got := r.Sessions()
+	if len(got) != 2 {
+		t.Fatalf("Sessions() has %d entries, want 2 (custom domain excluded)", len(got))
+	}
+	seen := map[*tunnel.Session]bool{}
+	for _, s := range got {
+		seen[s] = true
+	}
+	if !seen[a] || !seen[b] {
+		t.Fatalf("Sessions() = %v, want both a and b", got)
+	}
+	if got := NewRouter().Sessions(); len(got) != 0 {
+		t.Fatalf("empty router lists %d sessions", len(got))
+	}
+}

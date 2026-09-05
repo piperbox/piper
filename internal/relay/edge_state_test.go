@@ -132,3 +132,36 @@ func TestEdgeStatePickAPIRoundRobins(t *testing.T) {
 		t.Fatalf("pickAPI after evict = (%v, %v), want b", r.ID, ok)
 	}
 }
+
+// A draining relay must get nothing new — no tunnel placement however idle
+// it looks (its session count is falling), no api.<apex> connection — but it
+// still owns the agents it holds, so :443/:80 keep routing to it until each
+// session closes.
+func TestPlacementSkipsDrainingInstances(t *testing.T) {
+	t0 := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	s := newEdgeState()
+	a := instRow("a", t0, 0)
+	a.Draining = true
+	s.setInstances([]InstanceRow{a, instRow("b", t0.Add(time.Minute), 7)})
+	s.setOwners(map[string]string{"x.example": "a"})
+
+	if got, ok := s.pickTunnel(nil); !ok || got.ID != "b" {
+		t.Fatalf("pickTunnel = %+v ok=%v, want b (a is draining, however idle and early)", got, ok)
+	}
+	if got, ok := s.pickAPI(); !ok || got.ID != "b" {
+		t.Fatalf("pickAPI = %+v ok=%v, want b (a is draining)", got, ok)
+	}
+	if got, ok := s.ownerOf("x.example"); !ok || got.ID != "a" {
+		t.Fatalf("ownerOf x = %+v ok=%v, want the draining owner a", got, ok)
+	}
+
+	b := instRow("b", t0.Add(time.Minute), 7)
+	b.Draining = true
+	s.setInstances([]InstanceRow{a, b})
+	if got, ok := s.pickTunnel(nil); ok {
+		t.Fatalf("pickTunnel = %+v on a pool that is all draining, want no candidate", got)
+	}
+	if got, ok := s.pickAPI(); ok {
+		t.Fatalf("pickAPI = %+v on a pool that is all draining, want no candidate", got)
+	}
+}

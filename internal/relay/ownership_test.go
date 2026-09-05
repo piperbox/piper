@@ -246,3 +246,32 @@ func TestAgentForCustomHostMatchesCustomDomainsOnly(t *testing.T) {
 		t.Fatal("shared-domain host matched the :80 rule")
 	}
 }
+
+// A draining relay tells the edge so through its pool row: the flag has to
+// survive the insert, the heartbeat's ON CONFLICT update, and the owner
+// lookup the edge uses for :443/:80.
+func TestUpsertInstanceRoundTripsDraining(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := stampInstance(t, st, "a", "127.0.0.1:1", time.Now())
+	if err := st.SetOwner(en.BaseDomain, "a"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := st.LiveInstances()
+	if err != nil || len(rows) != 1 || rows[0].Draining {
+		t.Fatalf("fresh row: %+v err=%v, want one live row that is not draining", rows, err)
+	}
+	row := inst.row(0)
+	row.Draining = true
+	if err := st.UpsertInstance(row); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = st.LiveInstances()
+	if len(rows) != 1 || !rows[0].Draining {
+		t.Fatalf("after a draining upsert: %+v, want Draining=true", rows)
+	}
+	owner, ok, err := st.OwnerOf(en.BaseDomain)
+	if err != nil || !ok || !owner.Draining {
+		t.Fatalf("OwnerOf = %+v ok=%v err=%v, want the draining owner", owner, ok, err)
+	}
+}

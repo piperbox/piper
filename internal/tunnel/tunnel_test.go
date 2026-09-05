@@ -492,3 +492,49 @@ func TestDialCarriesObservedAddr(t *testing.T) {
 		t.Fatalf("ObservedAddr = %q, want 127.0.0.1", sess.ObservedAddr)
 	}
 }
+
+// NumStreams is what a draining relay waits on: it must see a stream the peer
+// opened, and fall back to zero once both ends have closed it.
+func TestNumStreamsFollowsOpenAndClose(t *testing.T) {
+	c1, c2 := net.Pipe()
+	t.Cleanup(func() { c1.Close(); c2.Close() })
+	srvSess := make(chan *Session, 1)
+	go func() {
+		s, err := Serve(c2, func(_, _ string) error { return nil })
+		if err != nil {
+			t.Errorf("Serve: %v", err)
+			return
+		}
+		srvSess <- s
+	}()
+	cli, err := Dial(c1, "tok", "base.example.com")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	srv := <-srvSess
+	if n := srv.NumStreams(); n != 0 {
+		t.Fatalf("fresh session reports %d streams, want 0", n)
+	}
+
+	stream, err := cli.OpenKind(KindControl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, accepted, err := srv.AcceptKind()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := srv.NumStreams(); n != 1 {
+		t.Fatalf("after one open: %d streams, want 1", n)
+	}
+
+	stream.Close()
+	accepted.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for srv.NumStreams() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("stream count stuck at %d after both ends closed", srv.NumStreams())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

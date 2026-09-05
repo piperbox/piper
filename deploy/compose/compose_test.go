@@ -79,3 +79,13 @@ func TestDockerDocumentation(t *testing.T) {
 		t.Errorf("docs/getting-started.md missing pointer phrase %q", "run piperd in Docker via Compose")
 	}
 }
+
+// The relay drains on SIGTERM (#523): up to 20 s for open streams, 5 s to
+// leave the pool, 35 s for webhook deliveries to park. Compose's default
+// 10 s stop grace would SIGKILL it mid-drain.
+func TestRelayComposeGivesTheDrainItsBudget(t *testing.T) {
+	compose := repositoryFile(t, "deploy", "compose", "relay", "docker-compose.yml")
+	if !strings.Contains(compose, "stop_grace_period: 60s") {
+		t.Error("relay/docker-compose.yml missing \"stop_grace_period: 60s\" on the relay service")
+	}
+}

@@ -26,6 +26,13 @@ import (
 // so this only has to cover that plus the parking write.
 const shutdownGrace = 35 * time.Second
 
+// drainTimeout bounds how long a SIGTERM waits for open streams on held
+// sessions to finish before the remaining sessions are cut (#523). With the
+// 5 s pool leave and shutdownGrace after it, the worst-case exit is 60 s;
+// the compose file's stop_grace_period and the runbook's orchestrator stop
+// timeouts are sized to that.
+const drainTimeout = 20 * time.Second
+
 // versionRequested reports whether args ask for the build version. Kept
 // separate so it can be unit-tested; it also gives piper-relay a symbol that
 // imports internal/version so the release ldflags stamp actually lands.
@@ -309,8 +316,11 @@ func main() {
 	}
 
 	// Pool membership: heartbeat, ownership watch, NOTIFY-woken drains. On
-	// SIGTERM/SIGINT leave the pool first (the row delete is what tells edges
-	// to stop routing here), then let in-flight webhook deliveries park (#295).
+	// SIGTERM/SIGINT drain first (#523): the row flips to draining so edges
+	// place nothing new here while still routing what we own, new tunnels
+	// are refused, and each session closes once its streams end. Only then
+	// leave the pool (the row delete is what tells edges to stop routing
+	// here) and let in-flight webhook deliveries park (#295).
 	ctx, cancel := context.WithCancel(context.Background())
 	poolDone := make(chan struct{})
 	go func() {
@@ -321,7 +331,11 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		s := <-sig
-		log.Printf("piper-relay: %s — leaving the pool and draining", s)
+		log.Printf("piper-relay: %s — draining (deadline %s)", s, drainTimeout)
+		dctx, dcancel := context.WithTimeout(context.Background(), drainTimeout)
+		forced := relay.Drain(dctx, st, inst, router)
+		dcancel()
+		log.Printf("piper-relay: drained; %d session(s) cut at the deadline — leaving the pool", forced)
 		cancel()
 		select {
 		case <-poolDone:

@@ -153,6 +153,23 @@ func acceptTunnels(ln net.Listener, st *Store, router *Router, ghApp *GitHubApp,
 			return
 		}
 		m.ConnAccepted("tunnel")
+		// Draining (#523): the listener stays open so a stale edge's dial
+		// still succeeds — a refused dial would evict us and cascade our
+		// owner rows — but nothing gets a session. The agent retries in 1 s,
+		// by which time the edge has seen draining=true and places it
+		// elsewhere.
+		if inst.Draining() {
+			// RemoteAddr on a proxyproto.Conn (PIPER_RELAY_PROXY_PROTOCOL=1)
+			// lazily parses the PROXY header on first call, bounded by a
+			// 10s read-header timeout (proxyproto.go) — do it off the
+			// accept loop so a peer that never writes a header can't stall
+			// every other accept behind it.
+			go func() {
+				log.Printf("tunnel from %s refused: relay is draining", conn.RemoteAddr())
+				conn.Close()
+			}()
+			continue
+		}
 		go serveTunnel(conn, st, router, st.AgentDisabled, ghApp, delivery, inst)
 	}
 }

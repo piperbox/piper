@@ -33,6 +33,7 @@ type InstanceRow struct {
 	HTTPAddr   string
 	TunnelAddr string
 	APIAddr    string
+	Draining   bool
 }
 
 // execer is the subset of *sql.DB and *sql.Tx that notify needs.
@@ -51,10 +52,10 @@ func notify(ex execer, channel, payload string) error {
 // announces it on piper_instances.
 func (s *Store) UpsertInstance(r InstanceRow) error {
 	if _, err := s.db.Exec(
-		`INSERT INTO relay_instances(id, started_at, last_seen, sessions, tls_addr, http_addr, tunnel_addr, api_addr)
-		 VALUES($1, $2, now(), $3, $4, $5, $6, $7)
-		 ON CONFLICT(id) DO UPDATE SET last_seen = now(), sessions = excluded.sessions`,
-		r.ID, r.StartedAt, r.Sessions, r.TLSAddr, r.HTTPAddr, r.TunnelAddr, r.APIAddr); err != nil {
+		`INSERT INTO relay_instances(id, started_at, last_seen, sessions, tls_addr, http_addr, tunnel_addr, api_addr, draining)
+		 VALUES($1, $2, now(), $3, $4, $5, $6, $7, $8)
+		 ON CONFLICT(id) DO UPDATE SET last_seen = now(), sessions = excluded.sessions, draining = excluded.draining`,
+		r.ID, r.StartedAt, r.Sessions, r.TLSAddr, r.HTTPAddr, r.TunnelAddr, r.APIAddr, r.Draining); err != nil {
 		return err
 	}
 	return notify(s.db, chanInstances, r.ID)
@@ -76,11 +77,11 @@ func (s *Store) PurgeDeadInstances() error {
 	return err
 }
 
-const instanceCols = `id, started_at, sessions, tls_addr, http_addr, tunnel_addr, api_addr`
+const instanceCols = `id, started_at, sessions, tls_addr, http_addr, tunnel_addr, api_addr, draining`
 
 func scanInstance(sc interface{ Scan(...any) error }) (InstanceRow, error) {
 	var r InstanceRow
-	err := sc.Scan(&r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr)
+	err := sc.Scan(&r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining)
 	return r, err
 }
 
@@ -142,7 +143,7 @@ func (s *Store) ClearOwner(baseDomain, instanceID string) error {
 // when nobody does, or when the recorded owner has stopped heartbeating.
 func (s *Store) OwnerOf(baseDomain string) (InstanceRow, bool, error) {
 	r, err := scanInstance(s.db.QueryRow(
-		`SELECT i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr
+		`SELECT i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr, i.draining
 		   FROM agent_owners o
 		   JOIN agents a ON a.name = o.agent_name
 		   JOIN relay_instances i ON i.id = o.instance_id
