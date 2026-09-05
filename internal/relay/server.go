@@ -128,6 +128,12 @@ func Serve(tlsAddr, httpAddr, tunnelAddr string, st *Store, tlsCfg *tls.Config, 
 // production interval; production leaves it at 5s.
 var disabledPollInterval = 5 * time.Second
 
+// duplicatePingTimeout bounds the ping serveTunnel sends a held session when
+// the same agent redials (#538). It must sit well inside the agent's 10s
+// ackReadTimeout, or the verdict would reach a dialer that has already hung
+// up; a package var so tests can drive replacement with a short bound.
+var duplicatePingTimeout = 5 * time.Second
+
 // tunnelAuth is the relay's handshake authorizer: the presented token must
 // resolve to a live (non-disabled) agent whose enrolled base domain matches the
 // one it claims. A disabled account fails here (Authenticate returns ErrBadToken)
@@ -196,8 +202,22 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		// the duplicate confirms nothing to a stranger. A duplicate landing
 		// here at all means the edge had no relay left that does not hold
 		// this agent, or two dials raced (#530).
-		if _, held := router.Holds(base); held {
-			return tunnel.ErrDuplicateSession
+		if held, ok := router.Holds(base); ok {
+			// The same agent redialing is the cheapest signal that the
+			// session we hold may be half-open (#538): the box lost power or
+			// its link blackholed, so no FIN ever came and yamux's keepalive
+			// will not notice for ~30-40s. Ping it: a live session answers at
+			// once and the duplicate is refused as before; a dead one is
+			// closed and unregistered here so the redial's Register below
+			// finds the base free. Its own serveTunnel then sees CloseChan
+			// and runs clearOwner, whose Holds() guard spares the fresh
+			// session's owner row.
+			if err := held.Ping(duplicatePingTimeout); err == nil {
+				return tunnel.ErrDuplicateSession
+			}
+			log.Printf("agent %s: held session did not answer a ping on redial; replacing it", base)
+			held.Close()
+			router.Unregister(held)
 		}
 		return nil
 	}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -620,5 +621,76 @@ func TestOtherRejectionsStayUndifferentiated(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), rejectedReason) {
 		t.Fatalf("Dial error = %q, want the undifferentiated reason %q", err, rejectedReason)
+	}
+}
+
+// swallowWrites is one end of a link whose peer has gone half-open: once
+// dropped is set, its writes vanish without error, so frames from the far
+// side still land (the pipe stays readable) but nothing ever answers them.
+type swallowWrites struct {
+	net.Conn
+	dropped atomic.Bool
+}
+
+func (c *swallowWrites) Write(p []byte) (int, error) {
+	if c.dropped.Load() {
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+// servePair completes a handshake over agentConn/relayConn and returns both
+// ends' sessions.
+func servePair(t *testing.T, agentConn, relayConn net.Conn) (agent, relay *Session) {
+	t.Helper()
+	type res struct {
+		sess *Session
+		err  error
+	}
+	relayCh := make(chan res, 1)
+	go func() {
+		sess, err := Serve(relayConn, func(token, base string) error { return nil })
+		relayCh <- res{sess, err}
+	}()
+	agent, err := Dial(agentConn, "tok", "alice.example.com")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	r := <-relayCh
+	if r.err != nil {
+		t.Fatalf("Serve: %v", r.err)
+	}
+	t.Cleanup(func() { agent.Close(); r.sess.Close() })
+	return agent, r.sess
+}
+
+func TestSessionPingSucceedsOnALiveLink(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	_, relay := servePair(t, c, s)
+	if err := relay.Ping(time.Second); err != nil {
+		t.Fatalf("Ping on a live link = %v, want nil", err)
+	}
+}
+
+// Ping is bounded by the caller's timeout, not yamux's 10s
+// ConnectionWriteTimeout (#538): the relay pings a held session while a
+// redial's handshake waits on the verdict, and the agent abandons that
+// handshake after ackReadTimeout — also 10s — so a bound that only matched
+// yamux's would deliver the verdict to a peer that has already hung up.
+func TestSessionPingFailsWithinTimeoutWhenPeerNeverAnswers(t *testing.T) {
+	c, s := net.Pipe()
+	t.Cleanup(func() { c.Close(); s.Close() })
+	ghost := &swallowWrites{Conn: c}
+	_, relay := servePair(t, ghost, s)
+	ghost.dropped.Store(true)
+
+	start := time.Now()
+	err := relay.Ping(200 * time.Millisecond)
+	if err == nil {
+		t.Fatal("Ping to a peer that never answers = nil, want an error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Ping took %v, want it bounded by the 200ms timeout", elapsed)
 	}
 }

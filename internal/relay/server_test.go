@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -766,5 +767,71 @@ func TestServeTunnelDerivesHostnamesAtRegister(t *testing.T) {
 	waitCond(t, 3*time.Second, host+" derived at register", func() bool {
 		_, ok := router.LookupHost(host)
 		return ok
+	})
+}
+
+// swallowWrites is the agent end of a link whose box has gone half-open: once
+// dropped is set, its writes vanish without error, so the relay's frames
+// still land (the pipe stays readable) but nothing ever answers them — no
+// FIN, no RST, no pong.
+type swallowWrites struct {
+	net.Conn
+	dropped atomic.Bool
+}
+
+func (c *swallowWrites) Write(p []byte) (int, error) {
+	if c.dropped.Load() {
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+// A duplicate dial is the relay's cheapest signal that the session it holds
+// may be dead (#538): the peer has proven it is the same agent, so before
+// refusing, the relay pings the held session. A half-open one fails the ping
+// and is replaced by the new dial instead of blocking it until yamux's
+// keepalive reaps it; the live-session case stays as
+// TestServeTunnelRejectsADuplicateAfterAuth has it.
+func TestServeTunnelReplacesAHalfOpenDuplicate(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+
+	prev := duplicatePingTimeout
+	duplicatePingTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { duplicatePingTimeout = prev })
+
+	cc, sc := net.Pipe()
+	t.Cleanup(func() { cc.Close(); sc.Close() })
+	ghostPeer := &swallowWrites{Conn: cc}
+	go serveTunnel(sc, st, router, st.AgentDisabled, nil, nil, inst)
+	if _, err := tunnel.Dial(ghostPeer, en.Token, en.BaseDomain); err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 3*time.Second, "owner row written", func() bool {
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
+	})
+	ghost, _ := router.Holds(en.BaseDomain)
+	ghostPeer.dropped.Store(true)
+
+	cc2, sc2 := net.Pipe()
+	t.Cleanup(func() { cc2.Close(); sc2.Close() })
+	go serveTunnel(sc2, st, router, st.AgentDisabled, nil, nil, inst)
+	fresh, err := tunnel.Dial(cc2, en.Token, en.BaseDomain)
+	if err != nil {
+		t.Fatalf("redial against a half-open session = %v, want it accepted", err)
+	}
+	defer fresh.Close()
+	waitCond(t, 3*time.Second, "router holds the fresh session", func() bool {
+		s, ok := router.Holds(en.BaseDomain)
+		return ok && s != ghost
+	})
+	if !ghost.Closed() {
+		t.Fatal("half-open session left open after being replaced")
+	}
+	// The ghost's late clearOwner must not take the fresh session's row.
+	waitCond(t, 3*time.Second, "owner row names this relay", func() bool {
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 }
