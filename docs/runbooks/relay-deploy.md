@@ -409,6 +409,15 @@ it defaults to the first non-loopback IPv4 (the container or pod IP), which
 is right on a bridge network and in a pod. Ports are the relay's own listener
 ports.
 
+`PIPER_RELAY_ZONE` is optional: a failure-zone label (an availability zone,
+a rack, a host) the edge uses when placing an agent's second tunnel session
+— it prefers a relay whose zone differs from the one already holding a
+session, so a zone outage does not take both (#531). Unset means unknown
+and never counts as a clash, so set it on every relay or on none: a
+zoneless relay is always eligible as "a different zone", and a mixed pool
+can put both sessions in one physical zone without the edge knowing. On a
+single host leave it unset.
+
 **Single host (compose).** The edge owns the public ports on the host
 network; relays scale on the bridge network with no published ports:
 
@@ -469,7 +478,13 @@ the public IP (or a cloud NLB with PROXY protocol and
 `PIPER_EDGE_PROXY_PROTOCOL=1`; otherwise `externalTrafficPolicy: Local`).
 `piper-relay` as a Deployment with `PIPER_RELAY_ADVERTISE_HOST` from the
 downward API (`status.podIP`), `PIPER_RELAY_PROXY_PROTOCOL=1`, and a
-NetworkPolicy admitting only edge pods and other relays. An L7 ingress may
+NetworkPolicy admitting only edge pods and other relays.
+`PIPER_RELAY_ZONE` comes from the node's `topology.kubernetes.io/zone`
+label: the downward API cannot read node labels, so either run one relay
+Deployment per zone with the value hard-coded and a node selector, or have
+an init step copy the label in. On ECS the task metadata endpoint
+(`${ECS_CONTAINER_METADATA_URI_V4}/task`, field `AvailabilityZone`) reports
+the zone; an entrypoint exports it before `exec`ing `piper-relay`. An L7 ingress may
 terminate `api.<apex>` with a cert-manager certificate and route it to the
 relays' `:8080` Service — that port is plain HTTP written to be fronted with
 TLS — with DNS pointing `api.<apex>` at the ingress and the wildcard at the

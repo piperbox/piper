@@ -172,7 +172,7 @@ Schedule it after #522 and #523, not inside them: #523 is still needed for
 the single-session case and for the edge's own readiness flip, and #522 is
 independent.
 
-### Proposed follow-up 5: failure domains in placement (#531)
+### Follow-up 5: failure domains in placement (#531) — landed
 
 Once an agent has two sessions, make the edge prefer a relay in a different
 zone for the second one. One nullable `zone` column on `relay_instances`,
@@ -181,6 +181,11 @@ the node zone directly, so a node label copied by an init step or the
 topology-aware scheduler's hint; ECS: `AWS_AVAILABILITY_ZONE` is available
 to tasks), and a tie-break in the :7000 placement rule. Nothing else. This
 is Cloudflare's two-prefix split at Piper's scale.
+
+Landed as designed: see
+[the zone-aware placement design](2026-09-05-zone-aware-placement-design.md).
+Zone ranks ahead of session count, not as a literal tie-break, because a
+tie-break that only fires on equal counts would rarely change placement.
 
 ## What not to copy
 
