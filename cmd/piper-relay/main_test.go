@@ -180,11 +180,30 @@ func TestReadAppKeyMissing(t *testing.T) {
 
 func TestAdvertiseHostEnvIsHonoured(t *testing.T) {
 	t.Setenv("PIPER_RELAY_ADVERTISE_HOST", "10.9.8.7")
-	inst, err := relay.NewInstance(env("PIPER_RELAY_ADVERTISE_HOST", ""), ":443", ":80", ":7000", ":8080")
+	inst, err := newInstanceFromEnv(":443", ":80", ":7000", ":8080")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if inst.TunnelAddr != "10.9.8.7:7000" {
 		t.Fatalf("tunnel addr = %q", inst.TunnelAddr)
+	}
+}
+
+func TestZoneEnvIsOptional(t *testing.T) {
+	t.Setenv("PIPER_RELAY_ZONE", "")
+	inst, err := newInstanceFromEnv(":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Zone != "" {
+		t.Fatalf("zone = %q, want empty when PIPER_RELAY_ZONE is unset", inst.Zone)
+	}
+	t.Setenv("PIPER_RELAY_ZONE", "eu-central-1a")
+	inst, err = newInstanceFromEnv(":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Zone != "eu-central-1a" {
+		t.Fatalf("zone = %q, want eu-central-1a", inst.Zone)
 	}
 }

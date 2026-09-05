@@ -59,14 +59,15 @@ func TestHeartbeatPublishesSessionsAndLeavesOnStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	inst.Zone = "zone-a"
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { inst.heartbeat(ctx, st, router); close(done) }()
 
-	waitCond(t, 3*time.Second, "heartbeat row with one session", func() bool {
+	waitCond(t, 3*time.Second, "heartbeat row with one session and its zone", func() bool {
 		rows, _ := st.LiveInstances()
-		return len(rows) == 1 && rows[0].ID == inst.ID && rows[0].Sessions == 1 && rows[0].TLSAddr == "127.0.0.1:443"
+		return len(rows) == 1 && rows[0].ID == inst.ID && rows[0].Sessions == 1 && rows[0].TLSAddr == "127.0.0.1:443" && rows[0].Zone == "zone-a"
 	})
 	cancel()
 	<-done
