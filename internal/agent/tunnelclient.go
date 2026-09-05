@@ -200,6 +200,7 @@ func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, 
 				return // shutdown interrupted the handshake; not a relay problem
 			}
 			if errors.Is(err, tunnel.ErrDuplicateSession) {
+				c.setErr(err)
 				if !dupLogged {
 					log.Printf("tunnel: slot %d: every relay the edge can offer already holds %s (one-relay pool, or a session it has not yet noticed is gone); retrying every %s", slot, baseDomain, duplicateBackoff)
 					dupLogged = true

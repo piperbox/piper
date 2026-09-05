@@ -942,6 +942,23 @@ func TestDuplicateRejectionBacksOffToTheCapAndLogsOnce(t *testing.T) {
 	if state, _ := c.Status(); state != "connected" {
 		t.Fatalf("Status with one live slot = %q, want connected", state)
 	}
+	// The rejected slot's duplicate must still land in lastErr (#530): a
+	// crash restart that stuck every slot on duplicates would otherwise
+	// report "retrying", "" with no reason. The client processes each
+	// rejection slightly after the relay's counter above ticks, so poll.
+	errDeadline := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		lastErr := c.lastErr
+		c.mu.Unlock()
+		if lastErr != "" {
+			break
+		}
+		if time.Now().After(errDeadline) {
+			t.Fatal("duplicate rejection did not record a reason in lastErr")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func TestStatusReportsRetryingWithLastError(t *testing.T) {
