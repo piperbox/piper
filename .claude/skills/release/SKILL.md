@@ -66,13 +66,13 @@ The workflow takes ~4 minutes. goreleaser auto-marks `rc`/`beta`/`alpha` tags as
 
 ## 5. Verify what actually published
 
-**Expect 30 assets.** Three binaries (`piper`, `piperd`, `piper-relay`) × 5 platforms (linux amd64/arm64/armv7, darwin amd64/arm64) = 15, plus six `.deb` packages (`piperd`/`piper` × amd64/arm64/armhf), `piperd.service`, `install.sh`, `piper-relay.service`, `checksums.txt`, and the five `piper-bundle` tarballs (linux amd64/arm64/armv7, darwin amd64/arm64).
+**Expect 35 assets.** Four binaries (`piper`, `piperd`, `piper-relay`, `piper-edge`) × 5 platforms (linux amd64/arm64/armv7, darwin amd64/arm64) = 20, plus six `.deb` packages (`piperd`/`piper` × amd64/arm64/armhf), `piperd.service`, `install.sh`, `piper-relay.service`, `checksums.txt`, and the five `piper-bundle` tarballs (linux amd64/arm64/armv7, darwin amd64/arm64).
 
 ```sh
 gh release view <tag> --json assets --jq '.assets | length'
 ```
 
-Releases before `v0.7.0` had 22 — the four `piperd` unit/env files are no longer published because the CLI embeds them. `v0.13.0` added the debs and `piperd.service` (18 → 25). `v0.14.0` added the five piper-bundle tarballs (25 → 30). If you see 18, the nfpm/deb pipeline regressed.
+Releases before `v0.7.0` had 22 — the four `piperd` unit/env files are no longer published because the CLI embeds them. `v0.13.0` added the debs and `piperd.service` (18 → 25). `v0.14.0` added the five piper-bundle tarballs (25 → 30). `v0.20.0` added the five `piper-edge` tarballs (30 → 35). If you see 18, the nfpm/deb pipeline regressed; 30 means `piper-edge` fell out of the goreleaser build list.
 
 ### Smoke-test the published installer
 
