@@ -214,22 +214,32 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		sess.Close()
 		return
 	}
+	// Derive routes before recording ownership: the piper_owners NOTIFY reaches
+	// the edge in ~1ms, and if this relay were an owner before byHost held the
+	// agent's hostnames, a connection routed here that fast would find no
+	// route (#530).
+	syncRoutes(st, router, sess.BaseDomain, sess)
 	if err := st.SetOwner(sess.BaseDomain, inst.ID); err != nil {
 		log.Printf("agent %s: record owner: %v", sess.BaseDomain, err)
 	}
 	if delivery != nil {
 		delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, sess.BaseDomain) })
 	}
-	syncRoutes(st, router, sess.BaseDomain, sess)
 	// Post-register re-check closes the handshake race deterministically: auth
 	// may have passed before DisableAccount committed, landing Register after
 	// the flag flip. Evict on an affirmative kill read — disabled=true, or
 	// ErrUnknownAccount (the agent row is gone). A transient store error leaves
 	// the fresh session up; the watchdog re-checks next tick.
 	if off, err := disabled(sess.BaseDomain); (err == nil && off) || errors.Is(err, ErrUnknownAccount) {
+		// Close before Unregister/clearOwner (#530): a piper_hostnames NOTIFY
+		// whose handler reads Holds() between Unregister and Close could
+		// re-add routes for this now-doomed session with nothing left to
+		// sweep them. Closing first matches what the CloseChan path below
+		// already guarantees — Unregister only ever runs after the session
+		// is closed.
+		sess.Close()
 		router.Unregister(sess)
 		clearOwner(st, router, sess.BaseDomain, inst)
-		sess.Close()
 		return
 	}
 	log.Printf("agent registered: %s", sess.BaseDomain)
