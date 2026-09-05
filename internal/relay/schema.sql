@@ -157,7 +157,11 @@ CREATE TABLE IF NOT EXISTS relay_instances (
     -- Set for the rest of the process's life once it receives SIGTERM (#523):
     -- edges place no new tunnels or api.<apex> connections here, but keep
     -- routing the hostnames it owns until their sessions close.
-    draining    BOOLEAN NOT NULL DEFAULT false
+    draining    BOOLEAN NOT NULL DEFAULT false,
+    -- Failure zone from PIPER_RELAY_ZONE (#531): :7000 placement prefers a
+    -- relay outside the zones already holding one of the agent's sessions.
+    -- NULL means unknown and never counts as a clash.
+    zone        TEXT
 );
 
 -- agent_owners says which instances terminate an agent's tunnels: one row

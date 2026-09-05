@@ -25,6 +25,8 @@ type Instance struct {
 	HTTPAddr   string
 	TunnelAddr string
 	APIAddr    string
+	// Zone is the failure zone from PIPER_RELAY_ZONE; "" when unset (#531).
+	Zone string
 	// draining is set once, on SIGTERM, and never cleared: from then on the
 	// heartbeat row says so and acceptTunnels refuses new sessions (#523).
 	draining atomic.Bool
@@ -90,7 +92,7 @@ func defaultAdvertiseHost() (string, error) {
 func (i *Instance) row(sessions int) InstanceRow {
 	return InstanceRow{ID: i.ID, StartedAt: i.StartedAt, Sessions: sessions,
 		TLSAddr: i.TLSAddr, HTTPAddr: i.HTTPAddr, TunnelAddr: i.TunnelAddr, APIAddr: i.APIAddr,
-		Draining: i.draining.Load()}
+		Draining: i.draining.Load(), Zone: i.Zone}
 }
 
 // heartbeat upserts the instance row now and every heartbeatInterval until

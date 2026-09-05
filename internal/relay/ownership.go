@@ -34,6 +34,8 @@ type InstanceRow struct {
 	TunnelAddr string
 	APIAddr    string
 	Draining   bool
+	// Zone is the relay's failure zone; "" when it did not set one.
+	Zone string
 }
 
 // execer is the subset of *sql.DB and *sql.Tx that notify needs.
@@ -49,13 +51,14 @@ func notify(ex execer, channel, payload string) error {
 }
 
 // UpsertInstance inserts or refreshes an instance row — the heartbeat — and
-// announces it on piper_instances.
+// announces it on piper_instances. zone is fixed for a process id, so the
+// conflict branch leaves it alone.
 func (s *Store) UpsertInstance(r InstanceRow) error {
 	if _, err := s.db.Exec(
-		`INSERT INTO relay_instances(id, started_at, last_seen, sessions, tls_addr, http_addr, tunnel_addr, api_addr, draining)
-		 VALUES($1, $2, now(), $3, $4, $5, $6, $7, $8)
+		`INSERT INTO relay_instances(id, started_at, last_seen, sessions, tls_addr, http_addr, tunnel_addr, api_addr, draining, zone)
+		 VALUES($1, $2, now(), $3, $4, $5, $6, $7, $8, $9)
 		 ON CONFLICT(id) DO UPDATE SET last_seen = now(), sessions = excluded.sessions, draining = excluded.draining`,
-		r.ID, r.StartedAt, r.Sessions, r.TLSAddr, r.HTTPAddr, r.TunnelAddr, r.APIAddr, r.Draining); err != nil {
+		r.ID, r.StartedAt, r.Sessions, r.TLSAddr, r.HTTPAddr, r.TunnelAddr, r.APIAddr, r.Draining, nullIfEmpty(r.Zone)); err != nil {
 		return err
 	}
 	return notify(s.db, chanInstances, r.ID)
@@ -77,11 +80,13 @@ func (s *Store) PurgeDeadInstances() error {
 	return err
 }
 
-const instanceCols = `id, started_at, sessions, tls_addr, http_addr, tunnel_addr, api_addr, draining`
+const instanceCols = `id, started_at, sessions, tls_addr, http_addr, tunnel_addr, api_addr, draining, zone`
 
 func scanInstance(sc interface{ Scan(...any) error }) (InstanceRow, error) {
 	var r InstanceRow
-	err := sc.Scan(&r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining)
+	var zone sql.NullString
+	err := sc.Scan(&r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining, &zone)
+	r.Zone = zone.String
 	return r, err
 }
 
@@ -152,7 +157,7 @@ func (s *Store) ClearOwner(baseDomain, instanceID string) error {
 
 // ownerSelect is the instance projection OwnerOf and Owners share, with the
 // same total order LiveInstances uses so callers can tie-break the same way.
-var ownerSelect = `SELECT a.base_domain, i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr, i.draining
+var ownerSelect = `SELECT a.base_domain, i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr, i.draining, i.zone
 	   FROM agent_owners o
 	   JOIN agents a ON a.name = o.agent_name
 	   JOIN relay_instances i ON i.id = o.instance_id
@@ -171,9 +176,11 @@ func (s *Store) OwnerOf(baseDomain string) ([]InstanceRow, error) {
 	for rows.Next() {
 		var base string
 		var r InstanceRow
-		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining); err != nil {
+		var zone sql.NullString
+		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining, &zone); err != nil {
 			return nil, err
 		}
+		r.Zone = zone.String
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -191,7 +198,8 @@ func (s *Store) Owners() (map[string][]string, error) {
 	for rows.Next() {
 		var base string
 		var r InstanceRow
-		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining); err != nil {
+		var zone sql.NullString
+		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining, &zone); err != nil {
 			return nil, err
 		}
 		out[base] = append(out[base], r.ID)

@@ -342,3 +342,40 @@ func TestUpsertInstanceRoundTripsDraining(t *testing.T) {
 		t.Fatalf("OwnerOf = %+v err=%v, want the one draining owner", owners, err)
 	}
 }
+
+// The zone a relay heartbeats (#531) must come back through both instance
+// projections the edge reads, and an unset zone must read back empty, not
+// as a scan error on NULL.
+func TestInstanceZoneRoundTripsThroughLiveInstancesAndOwnerOf(t *testing.T) {
+	st := openTestStore(t)
+	// Zone rides the first insert: the heartbeat's conflict branch leaves it
+	// alone, since a zone is fixed for the life of a process id.
+	zoned := &Instance{ID: "zoned", StartedAt: time.Now().Add(-time.Minute).UTC(), Zone: "eu-central-1a",
+		TLSAddr: "127.0.0.1:1", HTTPAddr: "127.0.0.1:1", TunnelAddr: "127.0.0.1:1", APIAddr: "127.0.0.1:1"}
+	if err := st.UpsertInstance(zoned.row(0)); err != nil {
+		t.Fatal(err)
+	}
+	stampInstance(t, st, "zoneless", "127.0.0.1:1", time.Now())
+
+	rows, err := st.LiveInstances()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Zone != "eu-central-1a" || rows[1].Zone != "" {
+		t.Fatalf("LiveInstances zones = %+v, want [eu-central-1a \"\"]", rows)
+	}
+
+	en := enrollTestAgent(t, st)
+	for _, id := range []string{"zoned", "zoneless"} {
+		if err := st.SetOwner(en.BaseDomain, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owners, err := st.OwnerOf(en.BaseDomain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(owners) != 2 || owners[0].Zone != "eu-central-1a" || owners[1].Zone != "" {
+		t.Fatalf("OwnerOf zones = %+v, want [eu-central-1a \"\"]", owners)
+	}
+}
