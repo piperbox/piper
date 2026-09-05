@@ -250,3 +250,26 @@ func (s *Store) DeregisterHostname(baseDomain, hostname string) error {
 	}
 	return notify(s.db, chanHostnames, hostname)
 }
+
+// HostnamesFor lists the relay-terminated hostnames the agent holds, sorted.
+// A relay derives its byHost routes from this at register and on every
+// piper_hostnames NOTIFY (#530), so a hostname registered over the agent's
+// other session routes here too.
+func (s *Store) HostnamesFor(baseDomain string) ([]string, error) {
+	rows, err := s.db.Query(
+		`SELECT h.hostname FROM hostnames h JOIN agents a ON a.name = h.agent_name
+		  WHERE a.base_domain=$1 ORDER BY h.hostname`, baseDomain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}

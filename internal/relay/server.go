@@ -220,14 +220,7 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	if delivery != nil {
 		delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, sess.BaseDomain) })
 	}
-	// Re-derive every live custom domain (active + unexpired pending);
-	// expired pending squats are filtered by the store, so they also die
-	// here even if never contested by a rival claim (#227).
-	if domains, err := st.CustomDomains(sess.BaseDomain); err == nil {
-		for _, d := range domains {
-			router.RegisterCustom(d, sess)
-		}
-	}
+	syncRoutes(st, router, sess.BaseDomain, sess)
 	// Post-register re-check closes the handshake race deterministically: auth
 	// may have passed before DisableAccount committed, landing Register after
 	// the flag flip. Evict on an affirmative kill read — disabled=true, or
@@ -288,6 +281,29 @@ func clearOwner(st *Store, router *Router, baseDomain string, inst *Instance) {
 	}
 	if err := st.ClearOwner(baseDomain, inst.ID); err != nil {
 		log.Printf("agent %s: release owner: %v", baseDomain, err)
+	}
+}
+
+// syncRoutes makes sess's hostname and custom-domain entries exactly what
+// Postgres says the agent holds. Called at register and on every
+// piper_hostnames NOTIFY (#530): with two sessions on two relays, a control
+// op over one session must route on the other relay too, and the store is
+// where both already write. Expired pending custom domains are filtered by
+// the store, so a squat dies here even if never contested (#227). A read
+// failure leaves the current entries in place; the next NOTIFY or beat
+// retries.
+func syncRoutes(st *Store, router *Router, base string, sess *tunnel.Session) {
+	hosts, err := st.HostnamesFor(base)
+	if err != nil {
+		log.Printf("agent %s: derive hostnames: %v", base, err)
+	} else {
+		router.SetHosts(sess, hosts)
+	}
+	domains, err := st.CustomDomains(base)
+	if err != nil {
+		log.Printf("agent %s: derive custom domains: %v", base, err)
+	} else {
+		router.SetCustom(sess, domains)
 	}
 }
 

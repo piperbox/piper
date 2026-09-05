@@ -2,6 +2,7 @@ package relay
 
 import (
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -357,5 +358,29 @@ func TestReconcileHostnamesSkipsASlotItCannotFit(t *testing.T) {
 	}
 	if len(live) != 1 {
 		t.Fatalf("live = %v, want the one slot that fits under the cap", live)
+	}
+}
+
+func TestHostnamesForListsTheAgentsTerminatedHostnames(t *testing.T) {
+	st, base := newAccountAgent(t)
+	if got, err := st.HostnamesFor(base); err != nil || len(got) != 0 {
+		t.Fatalf("HostnamesFor before any register = %v (%v), want none", got, err)
+	}
+	h1, err := st.RegisterHostname(base, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := st.RegisterHostname(base, "blog", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.HostnamesFor(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{h1, h2}
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("HostnamesFor = %v, want %v (sorted)", got, want)
 	}
 }

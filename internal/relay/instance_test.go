@@ -232,3 +232,44 @@ func TestMarkDrainingFlagsEveryHeartbeat(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// A hostname or custom domain written through any relay reaches every relay
+// that holds the agent: piper_hostnames wakes a re-derive from Postgres.
+func TestRunInstanceRederivesRoutesOnHostnameNotify(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go RunInstance(ctx, st, inst, router, nil)
+	sess := dialTestTunnel(t, st, router, inst, en)
+	defer sess.Close()
+
+	// Written "by another relay": straight into the store, no control op here.
+	host, err := st.RegisterHostname(en.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 5*time.Second, "hostname derived after NOTIFY", func() bool {
+		_, ok := router.LookupHost(host)
+		return ok
+	})
+	if err := st.AddCustomDomain(en.BaseDomain, "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 5*time.Second, "custom domain derived after NOTIFY", func() bool {
+		_, ok := router.LookupCustom("shop.example.com")
+		return ok
+	})
+	if err := st.DeregisterHostname(en.BaseDomain, host); err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 5*time.Second, "hostname dropped after NOTIFY", func() bool {
+		_, ok := router.LookupHost(host)
+		return !ok
+	})
+}

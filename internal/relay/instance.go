@@ -136,25 +136,37 @@ func (i *Instance) reassertOwnership(st *Store, router *Router) {
 }
 
 // RunInstance keeps this relay in the pool and reacts to the cluster. It
-// heartbeats until ctx is done, then leaves. Meanwhile it LISTENs for a
-// piper_events payload naming an agent this process holds and drains its
-// parked webhooks. On every listener (re)connect the same check runs over
-// every held agent, so a NOTIFY missed while disconnected is caught up.
-// Ownership needs no listener: two owners is the normal state (#530), so
-// nothing here reacts to another instance taking a row. delivery may be nil
-// (no GitHub App).
+// heartbeats until ctx is done, then leaves. Meanwhile it LISTENs on two
+// channels: a piper_events payload naming an agent this process holds
+// drains its parked webhooks, and any piper_hostnames payload re-derives
+// the routes of every held agent from Postgres — the payload is a hostname,
+// not a base, and the held set is small (#530). On every listener
+// (re)connect both run over every held agent, so a NOTIFY missed while
+// disconnected is caught up. Ownership needs no listener: two owners is the
+// normal state, so nothing here reacts to another instance taking a row.
+// delivery may be nil (no GitHub App).
 func RunInstance(ctx context.Context, st *Store, inst *Instance, router *Router, delivery *TunnelDelivery) {
-	handle := func(channel, base string) {
-		if _, ok := router.Holds(base); !ok || delivery == nil {
-			return
+	handle := func(channel, payload string) {
+		switch channel {
+		case chanEvents:
+			if _, ok := router.Holds(payload); !ok || delivery == nil {
+				return
+			}
+			delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, payload) })
+		case chanHostnames:
+			for _, base := range router.Bases() {
+				if sess, ok := router.Holds(base); ok {
+					syncRoutes(st, router, base, sess)
+				}
+			}
 		}
-		delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, base) })
 	}
 	resync := func() {
 		for _, base := range router.Bases() {
 			handle(chanEvents, base)
 		}
+		handle(chanHostnames, "")
 	}
-	go listen(ctx, st.dsn, []string{chanEvents}, resync, handle)
+	go listen(ctx, st.dsn, []string{chanEvents, chanHostnames}, resync, handle)
 	inst.heartbeat(ctx, st, router)
 }

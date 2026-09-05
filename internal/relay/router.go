@@ -88,6 +88,53 @@ func (r *Router) UnregisterCustom(domain string) {
 	delete(r.custom, domain)
 }
 
+// SetHosts makes sess's terminated-hostname entries exactly hosts: entries
+// it holds outside the set are dropped, missing ones are added, and other
+// sessions' entries are left alone. A closed session only loses entries.
+func (r *Router) SetHosts(sess *tunnel.Session, hosts []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		want[h] = true
+	}
+	for host, s := range r.byHost {
+		if s == sess && !want[host] {
+			delete(r.byHost, host)
+		}
+	}
+	if sess.Closed() {
+		return
+	}
+	for _, h := range hosts {
+		r.byHost[h] = sess
+	}
+}
+
+// SetCustom is SetHosts for BYO custom domains, keeping byBase and custom in
+// step the way RegisterCustom/UnregisterCustom do.
+func (r *Router) SetCustom(sess *tunnel.Session, domains []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		want[d] = true
+	}
+	for domain, s := range r.custom {
+		if s == sess && !want[domain] {
+			delete(r.custom, domain)
+			delete(r.byBase, domain)
+		}
+	}
+	if sess.Closed() {
+		return
+	}
+	for _, d := range domains {
+		r.byBase[d] = sess
+		r.custom[d] = sess
+	}
+}
+
 func (r *Router) Unregister(sess *tunnel.Session) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

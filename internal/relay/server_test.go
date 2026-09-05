@@ -747,3 +747,24 @@ func TestClearOwnerKeepsTheRowWhileTheRouterHoldsTheBase(t *testing.T) {
 		t.Fatalf("owner row survived a clear after the base was released: %v", got)
 	}
 }
+
+// A session that registers on a relay gets every hostname the agent already
+// holds in Postgres, whichever relay's session created them (#530).
+func TestServeTunnelDerivesHostnamesAtRegister(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+	host, err := st.RegisterHostname(en.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := dialTestTunnel(t, st, router, inst, en)
+	defer sess.Close()
+	// dialTestTunnel returns once the base is registered; the route derive
+	// runs right after, so wait for it rather than racing it.
+	waitCond(t, 3*time.Second, host+" derived at register", func() bool {
+		_, ok := router.LookupHost(host)
+		return ok
+	})
+}
