@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/piperbox/piper/internal/client"
-	"github.com/piperbox/piper/internal/relay/relaytest"
 	"github.com/piperbox/piper/internal/store"
 )
 
@@ -41,7 +40,6 @@ func TestWebhookPushAndPreview(t *testing.T) {
 	if os.Getenv("RUN_E2E") != "1" {
 		t.Skip("set RUN_E2E=1 to run (needs Docker; Caddy is embedded)")
 	}
-	repoRoot, _ := filepath.Abs("../..")
 	base := "alice.localhost"
 	const (
 		repo     = "alice/blog"
@@ -79,44 +77,13 @@ func TestWebhookPushAndPreview(t *testing.T) {
 	}))
 	defer gh.Close()
 
-	// Build both binaries.
-	binDir := t.TempDir()
-	for _, c := range []string{"piperd", "piper-relay"} {
-		b := exec.Command("go", "build", "-o", filepath.Join(binDir, c), "./cmd/"+c)
-		b.Dir = repoRoot
-		if out, err := b.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", c, err, out)
-		}
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// Enroll an agent, capture the token, start the relay (as TestRelayLoopback).
-	relayData := t.TempDir()
-	relayDB := relaytest.DSN(t)
-	enroll := exec.Command(filepath.Join(binDir, "piper-relay"), "enroll", "alice", "--domain", base)
-	enroll.Env = append(os.Environ(), "PIPER_RELAY_DATA_DIR="+relayData, "PIPER_RELAY_DB_URL="+relayDB)
-	out, err := enroll.CombinedOutput()
-	if err != nil {
-		t.Fatalf("enroll: %v\n%s", err, out)
-	}
-	token := parseToken(t, string(out))
-
-	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
-	relay.Env = append(os.Environ(),
-		"PIPER_RELAY_DATA_DIR="+relayData,
-		"PIPER_RELAY_DB_URL="+relayDB,
-		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
-		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
-		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
-	)
-	relay.Stdout, relay.Stderr = os.Stdout, os.Stderr
-	if err := relay.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	killOnCleanup(t, relay)
-	waitPort(t, "127.0.0.1:7000", 10*time.Second)
+	// The edge and its two relays, then an enrollment token for the box.
+	cl := startCluster(t, ctx, clusterOpts{apex: "localhost"})
+	token := cl.enroll("alice", base)
+	binDir := bins(t)
 
 	// Seed the BYO GitHub App row before piperd starts (one writer at a time).
 	// store.Open runs the schema, so this also initializes a fresh piper.db.
@@ -145,7 +112,7 @@ func TestWebhookPushAndPreview(t *testing.T) {
 		"PIPER_DATA_DIR="+piperdData,
 		"PIPER_API_ADDR=127.0.0.1:8088",
 		"PIPER_BASE_DOMAIN="+base,
-		"PIPER_RELAY_ADDR=127.0.0.1:7000",
+		"PIPER_RELAY_ADDR="+edgeTunnelAddr,
 		"PIPER_RELAY_TOKEN="+token,
 		"PIPER_TLS_CERT_FILE="+certFile,
 		"PIPER_TLS_KEY_FILE="+keyF,
@@ -228,15 +195,15 @@ func appTarball(t *testing.T, body string) []byte {
 	return buf.Bytes()
 }
 
-// sniClient dials every request to the relay's public TLS port; the URL's
+// sniClient dials every request to the edge's public TLS port; the URL's
 // hostname carries the SNI, exactly as a visitor (or GitHub) arrives once DNS
-// points at the relay.
+// points at the edge.
 func sniClient() *http.Client {
 	return &http.Client{
 		Timeout: 15 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, network, "127.0.0.1:8443")
+				return (&net.Dialer{}).DialContext(ctx, network, edgeTLSAddr)
 			},
 			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
 			DisableKeepAlives: true,

@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/piperbox/piper/internal/relay/relaytest"
 )
 
 // TestOneCommandLogin proves the merged `piper login` end-to-end (#465): a
@@ -23,49 +21,19 @@ func TestOneCommandLogin(t *testing.T) {
 	if os.Getenv("RUN_E2E") != "1" {
 		t.Skip("set RUN_E2E=1 to run (needs Docker; Caddy is embedded)")
 	}
-	repoRoot, _ := filepath.Abs("../..")
 	apex := "public.localhost"
 	certFile, keyFile := writeSelfSigned(t, apex) // *.public.localhost
-
-	binDir := t.TempDir()
-	for _, c := range []string{"piperd", "piper-relay", "piper"} {
-		b := exec.Command("go", "build", "-o", filepath.Join(binDir, c), "./cmd/"+c)
-		b.Dir = repoRoot
-		if out, err := b.CombinedOutput(); err != nil {
-			t.Fatalf("build %s: %v\n%s", c, err, out)
-		}
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	// The in-process relay: fake verifier auto-approves the device flow so the
-	// login needs no real browser/GitHub round-trip (same setup as
-	// TestRelayTerminatedSelfService).
-	relayData := t.TempDir()
-	relayDB := relaytest.DSN(t)
-	relay := exec.CommandContext(ctx, filepath.Join(binDir, "piper-relay"))
-	relay.Env = append(os.Environ(),
-		"PIPER_RELAY_DATA_DIR="+relayData,
-		"PIPER_RELAY_DB_URL="+relayDB,
-		"PIPER_RELAY_TLS_ADDR=127.0.0.1:8443",
-		"PIPER_RELAY_HTTP_ADDR=127.0.0.1:8880",
-		"PIPER_RELAY_TUNNEL_ADDR=127.0.0.1:7000",
-		"PIPER_RELAY_API_ADDR=127.0.0.1:8080",
-		"PIPER_RELAY_TUNNEL_PUBLIC=127.0.0.1:7000",
-		"PIPER_RELAY_APEX="+apex,
-		"PIPER_RELAY_TLS_CERT="+certFile,
-		"PIPER_RELAY_TLS_KEY="+keyFile,
-		"PIPER_RELAY_FAKE_APPROVE=1",
-	)
-	relay.Stdout, relay.Stderr = os.Stdout, os.Stderr
-	if err := relay.Start(); err != nil {
-		t.Fatalf("start relay: %v", err)
-	}
-	killOnCleanup(t, relay)
-	waitPort(t, "127.0.0.1:7000", 10*time.Second)
-	waitPort(t, "127.0.0.1:8080", 10*time.Second)
-	relayAPI := "http://127.0.0.1:8080"
+	// piper-edge on the public ports with two relays behind it: the
+	// smallest topology both of a box's tunnel sessions can place in (#530).
+	// The relays fake-approve the device flow, so the login needs no real
+	// browser/GitHub round-trip (same setup as TestRelayTerminatedSelfService).
+	cl := startCluster(t, ctx, clusterOpts{apex: apex, certFile: certFile, keyFile: keyFile})
+	binDir := bins(t)
+	relayAPI := cl.relayAPI()
 
 	// A dev-tier LAN piperd boot: no PIPER_RELAY_* env, so its enrollment
 	// socket lands at <piperdData>/piperd.sock for `piper login` to claim
