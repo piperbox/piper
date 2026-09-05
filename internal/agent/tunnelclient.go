@@ -24,13 +24,23 @@ var ErrNotConnected = errors.New("relay tunnel not connected")
 // redials. Not a knob: a supported deployment has at least two relays.
 const tunnelSessions = 2
 
-// duplicateBackoff is a slot's retry interval after the relay reported that
+// duplicateBackoff caps a slot's retry interval after the relay reported that
 // every relay the edge could offer already holds this agent — a one-relay
 // pool, or a half-open session the relay has not yet noticed. It is the time
 // to regain redundancy once a relay comes back, so it is short; the dial is
 // cheap and the log line is once per state, so there is nothing to be quiet
 // about. A var so tests can shrink it.
 var duplicateBackoff = time.Minute
+
+// duplicateFirstRetry is where a slot's duplicate ladder starts; each further
+// refusal waits four times longer, up to duplicateBackoff. The first refusal
+// is usually the boot race (#548): slot 1 dials the instant slot 0's
+// handshake returns, which is before the relay has written the owner row the
+// edge places on, so the edge sends it to the relay that already holds slot 0.
+// That clears as soon as the edge reads the NOTIFY — milliseconds — and a
+// minute of single-session for it is a minute a relay roll can drop the box.
+// A var so tests can shrink it.
+var duplicateFirstRetry = 2 * time.Second
 
 // slot0DuplicateRetry is slot 0's retry interval after a duplicate refusal.
 // Slot 0 is the session that wins in a one-relay pool, so a duplicate there
@@ -138,8 +148,10 @@ const relayDialTimeout = 10 * time.Second
 // reconnects with backoff until ctx is cancelled. Slot 2 sends its first
 // dial only after slot 1 has connected once: both boot dials reaching the
 // edge before the first owner row exists would land on the same relay and
-// the second would be rejected on every start. Blocks until every slot has
-// returned.
+// the second would be rejected on every start. The gate narrows that race
+// but does not close it — the relay acks before it writes the owner row
+// (#548) — so the duplicate ladder in runSlot is what makes a lost race
+// cheap. Blocks until every slot has returned.
 func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error)) {
 	c.mu.Lock()
 	c.running = true
@@ -176,13 +188,14 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 
 // runSlot is one slot's dial loop: today's single loop, with the duplicate
 // case on top. On tunnel.ErrDuplicateSession the slot logs once — on the
-// transition into that state — and waits duplicateBackoff instead of
-// climbing the ladder, except slot 0 which waits the shorter
-// slot0DuplicateRetry (see its doc comment); a successful connect resets the
-// gate.
+// transition into that state — and climbs its own ladder from
+// duplicateFirstRetry to duplicateBackoff instead of the 1s→30s fault ladder,
+// except slot 0 which waits the constant slot0DuplicateRetry (see its doc
+// comment); a successful connect resets both the gate and the ladder.
 func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error), connected func(int)) {
 	backoff := time.Second
 	dupLogged := false
+	dupWait := duplicateFirstRetry
 	for ctx.Err() == nil {
 		conn, err := (&net.Dialer{Timeout: relayDialTimeout}).DialContext(ctx, "tcp", relayAddr)
 		if err != nil {
@@ -212,7 +225,7 @@ func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, 
 			}
 			if errors.Is(err, tunnel.ErrDuplicateSession) {
 				c.setErr(err)
-				wait := duplicateBackoff
+				wait := min(dupWait, duplicateBackoff)
 				if slot == 0 {
 					wait = slot0DuplicateRetry
 				}
@@ -220,10 +233,11 @@ func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, 
 					if slot == 0 {
 						log.Printf("tunnel: slot 0: relay still holds a session for %s (a session it has not yet noticed is gone); retrying every %s", baseDomain, wait)
 					} else {
-						log.Printf("tunnel: slot %d: every relay the edge can offer already holds %s (one-relay pool, or a session it has not yet noticed is gone); retrying every %s", slot, baseDomain, wait)
+						log.Printf("tunnel: slot %d: every relay the edge can offer already holds %s (edge placed it before the owner row landed, one-relay pool, or a session it has not yet noticed is gone); retrying in %s, then up to every %s", slot, baseDomain, wait, duplicateBackoff)
 					}
 					dupLogged = true
 				}
+				dupWait = nextDuplicateWait(dupWait)
 				sleep(ctx, wait)
 				continue
 			}
@@ -234,6 +248,7 @@ func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, 
 			continue
 		}
 		dupLogged = false
+		dupWait = duplicateFirstRetry
 		c.setSession(slot, sess)
 		c.setObservedIP(sess.ObservedAddr)
 		connected(slot)
@@ -438,6 +453,14 @@ func nextBackoff(d time.Duration) time.Duration {
 		return 30 * time.Second
 	}
 	return d * 2
+}
+
+// nextDuplicateWait is the duplicate ladder's step: ×4, capped at
+// duplicateBackoff. Steeper than nextBackoff because the first rung is the
+// one that matters (#548) and the cap is the steady state for a pool with
+// nowhere to place the slot.
+func nextDuplicateWait(d time.Duration) time.Duration {
+	return min(d*4, duplicateBackoff)
 }
 
 func sleep(ctx context.Context, d time.Duration) {
