@@ -32,6 +32,15 @@ const tunnelSessions = 2
 // about. A var so tests can shrink it.
 var duplicateBackoff = time.Minute
 
+// slot0DuplicateRetry is slot 0's retry interval after a duplicate refusal.
+// Slot 0 is the session that wins in a one-relay pool, so a duplicate there
+// can only be a ghost of this box's previous life or a half-open session,
+// and the relay reaps both within its keepalive window; retrying every few
+// seconds brings the box back at reap time plus one interval, where the
+// one-minute cap would keep every app dark for the full minute. A var so
+// tests can shrink it.
+var slot0DuplicateRetry = 5 * time.Second
+
 // TunnelClient maintains outbound tunnels to the relay and exposes hostname
 // registration over them. The live sessions are published under a mutex, one
 // per slot, so the deploy path can open control streams on whichever is up.
@@ -168,7 +177,9 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 // runSlot is one slot's dial loop: today's single loop, with the duplicate
 // case on top. On tunnel.ErrDuplicateSession the slot logs once — on the
 // transition into that state — and waits duplicateBackoff instead of
-// climbing the ladder; a successful connect resets the gate.
+// climbing the ladder, except slot 0 which waits the shorter
+// slot0DuplicateRetry (see its doc comment); a successful connect resets the
+// gate.
 func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error), connected func(int)) {
 	backoff := time.Second
 	dupLogged := false
@@ -201,11 +212,19 @@ func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, 
 			}
 			if errors.Is(err, tunnel.ErrDuplicateSession) {
 				c.setErr(err)
+				wait := duplicateBackoff
+				if slot == 0 {
+					wait = slot0DuplicateRetry
+				}
 				if !dupLogged {
-					log.Printf("tunnel: slot %d: every relay the edge can offer already holds %s (one-relay pool, or a session it has not yet noticed is gone); retrying every %s", slot, baseDomain, duplicateBackoff)
+					if slot == 0 {
+						log.Printf("tunnel: slot 0: relay still holds a session for %s (a session it has not yet noticed is gone); retrying every %s", baseDomain, wait)
+					} else {
+						log.Printf("tunnel: slot %d: every relay the edge can offer already holds %s (one-relay pool, or a session it has not yet noticed is gone); retrying every %s", slot, baseDomain, wait)
+					}
 					dupLogged = true
 				}
-				sleep(ctx, duplicateBackoff)
+				sleep(ctx, wait)
 				continue
 			}
 			c.setErr(err)

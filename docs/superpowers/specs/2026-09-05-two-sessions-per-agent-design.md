@@ -226,6 +226,16 @@ backoff. The cap is the time to regain redundancy after a relay comes back,
 so it is short; the dial is cheap and the log is once per state, so there is
 nothing to be quiet about.
 
+Slot 1 is the exception to the one-minute cap. It is the session that wins
+in a one-relay pool, so a duplicate there cannot be the permanent condition
+slot 2 hits in that pool — it can only be a ghost of this box's own previous
+life, or a half-open session, and the relay reaps both within its keepalive
+window. Slot 1 retries every 5 s instead (`slot0DuplicateRetry` in code), so
+a crash-restarted box regains its first session at reap time plus a few
+seconds rather than staying fully dark for up to a minute; slot 2 still
+waits the full cap, since a genuinely one-relay pool has nothing to gain
+from retrying fast.
+
 `piperd` needs no change.
 
 ### 6. Failure walk-throughs

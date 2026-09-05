@@ -495,9 +495,11 @@ A clean `piperd` stop or restart (SIGTERM, which is what upgrades and
 unregister them immediately and the restarted agent reconnects right away.
 After an unclean stop (crash, power loss, network blackhole) both relays
 keep the stale sessions until the yamux keepalive reaps them (about 30 s),
-every redial in that window is refused as a duplicate, and the slots wait
-the one-minute duplicate backoff before trying again — so the box's apps
-can be unreachable for about a minute.
+and every redial in that window is refused as a duplicate. Slot 0 retries
+every 5 s rather than waiting the one-minute duplicate backoff, so the
+box's apps are unreachable for the keepalive reap window plus at most five
+seconds — about 40 s, not a minute. #538 tracks a relay-side ping that would
+cut the reap window itself to about 10 s.
 
 ## Single host with compose
 

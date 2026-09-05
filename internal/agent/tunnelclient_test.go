@@ -969,6 +969,105 @@ func TestDuplicateRejectionBacksOffToTheCapAndLogsOnce(t *testing.T) {
 	}
 }
 
+// dupThenAcceptRelay refuses the first n handshakes as a duplicate, then
+// accepts every handshake after that as a normal session — the shape of a
+// ghost session that the relay reaps mid-retry (slot 0's case, #530).
+func dupThenAcceptRelay(t *testing.T, n int) (addr string, rejected *atomic.Int32, sessCh chan *tunnel.Session) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	rejected = new(atomic.Int32)
+	sessCh = make(chan *tunnel.Session, 8)
+	var served atomic.Int32
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				if served.Add(1) <= int32(n) {
+					_, _ = tunnel.Serve(c, func(_, _ string) error {
+						rejected.Add(1)
+						return tunnel.ErrDuplicateSession
+					})
+					c.Close()
+					return
+				}
+				sess, err := tunnel.Serve(c, func(_, _ string) error { return nil })
+				if err != nil {
+					c.Close()
+					return
+				}
+				sessCh <- sess
+			}()
+		}
+	}()
+	return ln.Addr().String(), rejected, sessCh
+}
+
+// Slot 0 is the session that wins in a one-relay pool, so a duplicate there
+// can only be a ghost of this box's previous life or a half-open session,
+// both reaped by the relay well inside a minute — so slot 0 must retry much
+// faster than duplicateBackoff, or the whole box (slot 1 is gated on slot 0)
+// stays dark for the full minute over a condition that clears in seconds.
+func TestSlotZeroRetriesADuplicateQuicklyAndConnectsWhenTheGhostClears(t *testing.T) {
+	prevSlot0 := slot0DuplicateRetry
+	prevBackoff := duplicateBackoff
+	slot0DuplicateRetry = 30 * time.Millisecond
+	duplicateBackoff = 10 * time.Second
+	logged := captureLog(t)
+	addr, rejected, sessCh := dupThenAcceptRelay(t, 3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var c TunnelClient
+	go func() { defer close(done); c.Run(ctx, addr, "tok", "alice.example.com", nil) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Run did not return after cancel")
+		}
+		slot0DuplicateRetry = prevSlot0
+		duplicateBackoff = prevBackoff
+	})
+
+	deadline := time.Now().Add(time.Second)
+	for rejected.Load() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d duplicate rejections in 1s; slot 0 is not using the fast retry", rejected.Load())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case <-sessCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay never saw slot 0 connect after the duplicate cleared")
+	}
+	stateDeadline := time.Now().Add(2 * time.Second)
+	for {
+		if state, _ := c.Status(); state == "connected" {
+			break
+		}
+		if time.Now().After(stateDeadline) {
+			t.Fatal("Status never reported connected after the ghost cleared")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(logged.String(), "slot 0") {
+		t.Fatalf("no slot-0 duplicate log line:\n%s", logged.String())
+	}
+	if n := strings.Count(logged.String(), "retrying every"); n != 1 {
+		t.Fatalf("slot-0 duplicate logged %d times, want once:\n%s", n, logged.String())
+	}
+}
+
 func TestStatusReportsRetryingWithLastError(t *testing.T) {
 	c := &TunnelClient{}
 	if state, _ := c.Status(); state != "off" {
