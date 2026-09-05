@@ -202,19 +202,25 @@ func NewControlProxy(st *Store, router *Router, self *Instance) http.Handler {
 		},
 	}
 
-	// liveOwner is the cluster half of liveness: the live instance holding
-	// base, if it is not this process. The error surfaces a broken lookup to
-	// the caller instead of swallowing it — a query-level failure here must
-	// not be silently read as "nobody owns it".
+	// liveOwner is the cluster half of liveness: a live instance holding
+	// base that is not this process. With two sessions per agent (#530) any
+	// other owner will do. The error surfaces a broken lookup to the caller
+	// instead of swallowing it — a query-level failure here must not be
+	// silently read as "nobody owns it".
 	liveOwner := func(base string) (InstanceRow, bool, error) {
 		if self == nil {
 			return InstanceRow{}, false, nil
 		}
-		owner, ok, err := st.OwnerOf(base)
+		owners, err := st.OwnerOf(base)
 		if err != nil {
 			return InstanceRow{}, false, err
 		}
-		return owner, ok && owner.ID != self.ID, nil
+		for _, o := range owners {
+			if o.ID != self.ID {
+				return o, true, nil
+			}
+		}
+		return InstanceRow{}, false, nil
 	}
 	connected := func(base string) (bool, error) {
 		if _, ok := router.Lookup(base); ok {

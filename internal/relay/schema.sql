@@ -160,13 +160,16 @@ CREATE TABLE IF NOT EXISTS relay_instances (
     draining    BOOLEAN NOT NULL DEFAULT false
 );
 
--- agent_owners says which instance terminates an agent's tunnel. The
--- instance cascade takes ownership down with a deleted instance row; the
--- agents cascade lets DeleteAgent stay unchanged.
+-- agent_owners says which instances terminate an agent's tunnels: one row
+-- per live session, two in steady state (#530). Ownership is every live row,
+-- not whoever registered last. The instance cascade takes ownership down
+-- with a deleted instance row; the agents cascade lets DeleteAgent stay
+-- unchanged.
 CREATE TABLE IF NOT EXISTS agent_owners (
-    agent_name  TEXT PRIMARY KEY REFERENCES agents(name) ON DELETE CASCADE,
+    agent_name  TEXT NOT NULL REFERENCES agents(name) ON DELETE CASCADE,
     instance_id TEXT NOT NULL REFERENCES relay_instances(id) ON DELETE CASCADE,
-    since       TIMESTAMPTZ NOT NULL
+    since       TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (agent_name, instance_id)
 );
 
 -- Login-flow state (#522). Each row is one in-flight login step that has to

@@ -18,38 +18,63 @@ import (
 // ErrNotConnected is returned by Register/Deregister when no relay session is live.
 var ErrNotConnected = errors.New("relay tunnel not connected")
 
-// TunnelClient maintains an outbound tunnel to the relay and exposes hostname
-// registration over it. The current session is published under a mutex so the
-// deploy path can open control streams on whatever session is live.
+// tunnelSessions is how many relay sessions a box holds, on distinct relays
+// when the pool allows (#530). Two is what makes a relay's rolling restart
+// zero-drop: the edge routes to the surviving owner while the lost slot
+// redials. Not a knob: a supported deployment has at least two relays.
+const tunnelSessions = 2
+
+// duplicateBackoff is a slot's retry interval after the relay reported that
+// every relay the edge could offer already holds this agent — a one-relay
+// pool, or a half-open session the relay has not yet noticed. It is the time
+// to regain redundancy once a relay comes back, so it is short; the dial is
+// cheap and the log line is once per state, so there is nothing to be quiet
+// about. A var so tests can shrink it.
+var duplicateBackoff = time.Minute
+
+// slot0DuplicateRetry is slot 0's retry interval after a duplicate refusal.
+// Slot 0 is the session that wins in a one-relay pool, so a duplicate there
+// can only be a ghost of this box's previous life or a half-open session,
+// and the relay reaps both within its keepalive window; retrying every few
+// seconds brings the box back at reap time plus one interval, where the
+// one-minute cap would keep every app dark for the full minute. A var so
+// tests can shrink it.
+var slot0DuplicateRetry = 5 * time.Second
+
+// TunnelClient maintains outbound tunnels to the relay and exposes hostname
+// registration over them. The live sessions are published under a mutex, one
+// per slot, so the deploy path can open control streams on whichever is up.
 type TunnelClient struct {
 	mu         sync.Mutex
-	sess       *tunnel.Session
+	sess       [tunnelSessions]*tunnel.Session
 	running    bool
 	lastErr    string
 	observedIP string // last relay-reported source host; sticky across reconnects
 
 	// OnConnect, if set before Run, is invoked in its own goroutine each time a
 	// relay session is established — piperd uses it to provision the relay's
-	// control bearer (see the control-stream routing design).
+	// control bearer (see the control-stream routing design). With two slots
+	// it fires per slot; everything it does is idempotent.
 	OnConnect func()
 }
 
 // Status reports the tunnel's state for the enrollment socket's status
-// surface: "connected" with a live session, "retrying" while Run is looping
-// without one (lastErr is the most recent dial/handshake failure — the only
-// place a rejected enrollment token becomes visible outside the log), "off"
-// when Run is not running.
+// surface: "connected" with at least one live session, "retrying" while Run
+// is looping without one (lastErr is the most recent dial/handshake failure
+// from any slot — the only place a rejected enrollment token becomes visible
+// outside the log), "off" when Run is not running.
 func (c *TunnelClient) Status() (state, lastErr string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	switch {
-	case c.sess != nil:
-		return "connected", ""
-	case c.running:
-		return "retrying", c.lastErr
-	default:
-		return "off", c.lastErr
+	for _, s := range c.sess {
+		if s != nil {
+			return "connected", ""
+		}
 	}
+	if c.running {
+		return "retrying", c.lastErr
+	}
+	return "off", c.lastErr
 }
 
 func (c *TunnelClient) setErr(err error) {
@@ -58,19 +83,25 @@ func (c *TunnelClient) setErr(err error) {
 	c.mu.Unlock()
 }
 
-func (c *TunnelClient) setSession(s *tunnel.Session) {
+func (c *TunnelClient) setSession(slot int, s *tunnel.Session) {
 	c.mu.Lock()
-	c.sess = s
+	c.sess[slot] = s
 	if s != nil {
 		c.lastErr = ""
 	}
 	c.mu.Unlock()
 }
 
+// current returns any live session, lowest slot first.
 func (c *TunnelClient) current() *tunnel.Session {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.sess
+	for _, s := range c.sess {
+		if s != nil {
+			return s
+		}
+	}
+	return nil
 }
 
 // ObservedIP is the source host the relay last saw this box connect from —
@@ -100,11 +131,15 @@ func (c *TunnelClient) setObservedIP(ip string) {
 // the shutdown signal lands.
 const relayDialTimeout = 10 * time.Second
 
-// Run maintains the tunnel to relayAddr, registering baseDomain, and forwards
-// each relay-opened stream to dialLocal(kind, stream). dialLocal may peek
-// (read) bytes from stream before choosing a backend; it must replay whatever
-// it consumed into the returned conn. It reconnects with backoff until ctx is
-// cancelled. Blocks.
+// Run maintains tunnelSessions tunnels to relayAddr, registering baseDomain
+// on each, and forwards each relay-opened stream to dialLocal(kind, stream).
+// dialLocal may peek (read) bytes from stream before choosing a backend; it
+// must replay whatever it consumed into the returned conn. Each slot
+// reconnects with backoff until ctx is cancelled. Slot 2 sends its first
+// dial only after slot 1 has connected once: both boot dials reaching the
+// edge before the first owner row exists would land on the same relay and
+// the second would be rejected on every start. Blocks until every slot has
+// returned.
 func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error)) {
 	c.mu.Lock()
 	c.running = true
@@ -114,7 +149,40 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 		c.running = false
 		c.mu.Unlock()
 	}()
+	first := make(chan struct{})
+	var firstOnce sync.Once
+	connected := func(slot int) {
+		if slot == 0 {
+			firstOnce.Do(func() { close(first) })
+		}
+	}
+	var wg sync.WaitGroup
+	for slot := 0; slot < tunnelSessions; slot++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			if slot > 0 {
+				select {
+				case <-first:
+				case <-ctx.Done():
+					return
+				}
+			}
+			c.runSlot(ctx, slot, relayAddr, token, baseDomain, dialLocal, connected)
+		}(slot)
+	}
+	wg.Wait()
+}
+
+// runSlot is one slot's dial loop: today's single loop, with the duplicate
+// case on top. On tunnel.ErrDuplicateSession the slot logs once — on the
+// transition into that state — and waits duplicateBackoff instead of
+// climbing the ladder, except slot 0 which waits the shorter
+// slot0DuplicateRetry (see its doc comment); a successful connect resets the
+// gate.
+func (c *TunnelClient) runSlot(ctx context.Context, slot int, relayAddr, token, baseDomain string, dialLocal func(kind byte, stream net.Conn) (net.Conn, error), connected func(int)) {
 	backoff := time.Second
+	dupLogged := false
 	for ctx.Err() == nil {
 		conn, err := (&net.Dialer{Timeout: relayDialTimeout}).DialContext(ctx, "tcp", relayAddr)
 		if err != nil {
@@ -122,7 +190,7 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 				return // shutdown interrupted the dial; not a relay problem
 			}
 			c.setErr(err)
-			log.Printf("tunnel: dial relay: %v (retry in %s)", err, backoff)
+			log.Printf("tunnel: slot %d: dial relay: %v (retry in %s)", slot, err, backoff)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
@@ -142,21 +210,40 @@ func (c *TunnelClient) Run(ctx context.Context, relayAddr, token, baseDomain str
 			if ctx.Err() != nil {
 				return // shutdown interrupted the handshake; not a relay problem
 			}
+			if errors.Is(err, tunnel.ErrDuplicateSession) {
+				c.setErr(err)
+				wait := duplicateBackoff
+				if slot == 0 {
+					wait = slot0DuplicateRetry
+				}
+				if !dupLogged {
+					if slot == 0 {
+						log.Printf("tunnel: slot 0: relay still holds a session for %s (a session it has not yet noticed is gone); retrying every %s", baseDomain, wait)
+					} else {
+						log.Printf("tunnel: slot %d: every relay the edge can offer already holds %s (one-relay pool, or a session it has not yet noticed is gone); retrying every %s", slot, baseDomain, wait)
+					}
+					dupLogged = true
+				}
+				sleep(ctx, wait)
+				continue
+			}
 			c.setErr(err)
-			log.Printf("tunnel: handshake: %v (retry in %s)", err, backoff)
+			log.Printf("tunnel: slot %d: handshake: %v (retry in %s)", slot, err, backoff)
 			sleep(ctx, backoff)
 			backoff = nextBackoff(backoff)
 			continue
 		}
-		log.Printf("tunnel: connected to relay %s as %s", relayAddr, baseDomain)
-		c.setSession(sess)
+		dupLogged = false
+		c.setSession(slot, sess)
 		c.setObservedIP(sess.ObservedAddr)
+		connected(slot)
+		log.Printf("tunnel: slot %d: connected to relay %s as %s", slot, relayAddr, baseDomain)
 		if c.OnConnect != nil {
 			go c.OnConnect()
 		}
 		start := time.Now()
 		serveStreams(ctx, sess, dialLocal)
-		c.setSession(nil)
+		c.setSession(slot, nil)
 		if time.Since(start) > healthyThreshold {
 			backoff = time.Second
 		}

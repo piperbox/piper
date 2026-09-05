@@ -189,7 +189,17 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	var claimedBase string
 	auth := func(token, base string) error {
 		claimedBase = base
-		return tunnelAuth(st)(token, base)
+		if err := tunnelAuth(st)(token, base); err != nil {
+			return err
+		}
+		// Post-auth only: the peer has proven which agent it is, so naming
+		// the duplicate confirms nothing to a stranger. A duplicate landing
+		// here at all means the edge had no relay left that does not hold
+		// this agent, or two dials raced (#530).
+		if _, held := router.Holds(base); held {
+			return tunnel.ErrDuplicateSession
+		}
+		return nil
 	}
 	sess, err := tunnel.Serve(conn, auth)
 	if err != nil {
@@ -197,20 +207,23 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		conn.Close()
 		return
 	}
-	router.Register(sess)
+	// Two handshakes for one base can both pass the check above; the router
+	// is the tie-break.
+	if err := router.Register(sess); err != nil {
+		log.Printf("agent %s from %s: %v; closing", sess.BaseDomain, conn.RemoteAddr(), err)
+		sess.Close()
+		return
+	}
+	// Derive routes before recording ownership: the piper_owners NOTIFY reaches
+	// the edge in ~1ms, and if this relay were an owner before byHost held the
+	// agent's hostnames, a connection routed here that fast would find no
+	// route (#530).
+	syncRoutes(st, router, sess.BaseDomain, sess)
 	if err := st.SetOwner(sess.BaseDomain, inst.ID); err != nil {
 		log.Printf("agent %s: record owner: %v", sess.BaseDomain, err)
 	}
 	if delivery != nil {
 		delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, sess.BaseDomain) })
-	}
-	// Re-derive every live custom domain (active + unexpired pending);
-	// expired pending squats are filtered by the store, so they also die
-	// here even if never contested by a rival claim (#227).
-	if domains, err := st.CustomDomains(sess.BaseDomain); err == nil {
-		for _, d := range domains {
-			router.RegisterCustom(d, sess)
-		}
 	}
 	// Post-register re-check closes the handshake race deterministically: auth
 	// may have passed before DisableAccount committed, landing Register after
@@ -218,9 +231,15 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	// ErrUnknownAccount (the agent row is gone). A transient store error leaves
 	// the fresh session up; the watchdog re-checks next tick.
 	if off, err := disabled(sess.BaseDomain); (err == nil && off) || errors.Is(err, ErrUnknownAccount) {
+		// Close before Unregister/clearOwner (#530): a piper_hostnames NOTIFY
+		// whose handler reads Holds() between Unregister and Close could
+		// re-add routes for this now-doomed session with nothing left to
+		// sweep them. Closing first matches what the CloseChan path below
+		// already guarantees — Unregister only ever runs after the session
+		// is closed.
+		sess.Close()
 		router.Unregister(sess)
 		clearOwner(st, router, sess.BaseDomain, inst)
-		sess.Close()
 		return
 	}
 	log.Printf("agent registered: %s", sess.BaseDomain)
@@ -272,6 +291,29 @@ func clearOwner(st *Store, router *Router, baseDomain string, inst *Instance) {
 	}
 	if err := st.ClearOwner(baseDomain, inst.ID); err != nil {
 		log.Printf("agent %s: release owner: %v", baseDomain, err)
+	}
+}
+
+// syncRoutes makes sess's hostname and custom-domain entries exactly what
+// Postgres says the agent holds. Called at register and on every
+// piper_hostnames NOTIFY (#530): with two sessions on two relays, a control
+// op over one session must route on the other relay too, and the store is
+// where both already write. Expired pending custom domains are filtered by
+// the store, so a squat dies here even if never contested (#227). A read
+// failure leaves the current entries in place; the next NOTIFY or beat
+// retries.
+func syncRoutes(st *Store, router *Router, base string, sess *tunnel.Session) {
+	hosts, err := st.HostnamesFor(base)
+	if err != nil {
+		log.Printf("agent %s: derive hostnames: %v", base, err)
+	} else {
+		router.SetHosts(sess, hosts)
+	}
+	domains, err := st.CustomDomains(base)
+	if err != nil {
+		log.Printf("agent %s: derive custom domains: %v", base, err)
+	} else {
+		router.SetCustom(sess, domains)
 	}
 }
 

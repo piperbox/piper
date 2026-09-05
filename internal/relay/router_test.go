@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -182,36 +183,34 @@ func TestRouterCustomDomain(t *testing.T) {
 	}
 }
 
-// TestUnregisterKeepsSuccessorEntries pins the invariant that makes a late
-// unregister harmless: when an agent reconnects before the relay has noticed
-// the old session dying, the new session overwrites every entry, and the old
-// session's Unregister — which may land seconds later — must sweep only its
-// own. Unregister matches on session identity, so this holds, and it is why
-// the reconnect path never has to wait for the dead session to be reaped
-// (#368; the delay there was TCP declining to report the peer's close for a
-// full macOS MSL).
-func TestUnregisterKeepsSuccessorEntries(t *testing.T) {
+// A relay holds at most one session per agent (#530): a second Register for
+// a held base is refused and the first session keeps every entry. Once the
+// first is unregistered the base is free again.
+func TestRegisterRefusesAHeldBase(t *testing.T) {
 	r := NewRouter()
 	base := "alice.example.com"
-	old := &tunnel.Session{BaseDomain: base}
-	fresh := &tunnel.Session{BaseDomain: base}
+	first := &tunnel.Session{BaseDomain: base}
+	second := &tunnel.Session{BaseDomain: base}
 
-	for _, s := range []*tunnel.Session{old, fresh} {
-		r.Register(s)
-		r.RegisterHost("blog-alice.public.getpiper.co", s)
-		r.RegisterCustom("shop.dev", s)
+	if err := r.Register(first); err != nil {
+		t.Fatal(err)
 	}
-
-	r.Unregister(old)
-
-	if s, ok := r.Lookup(base); !ok || s != fresh {
-		t.Fatalf("base domain = %v (%p), want the reconnected session %p", ok, s, fresh)
+	r.RegisterHost("blog-alice.public.getpiper.co", first)
+	if err := r.Register(second); !errors.Is(err, tunnel.ErrDuplicateSession) {
+		t.Fatalf("second Register = %v, want ErrDuplicateSession", err)
 	}
-	if s, ok := r.LookupHost("blog-alice.public.getpiper.co"); !ok || s != fresh {
-		t.Fatalf("terminated hostname = %v (%p), want the reconnected session %p", ok, s, fresh)
+	if s, ok := r.Lookup(base); !ok || s != first {
+		t.Fatalf("Lookup after refused duplicate = %v (%p), want the first session %p", ok, s, first)
 	}
-	if s, ok := r.LookupCustom("shop.dev"); !ok || s != fresh {
-		t.Fatalf("custom domain = %v (%p), want the reconnected session %p", ok, s, fresh)
+	if err := r.Register(first); err != nil {
+		t.Fatalf("re-registering the same session = %v, want nil (idempotent)", err)
+	}
+	r.Unregister(first)
+	if err := r.Register(second); err != nil {
+		t.Fatalf("Register after the holder left = %v, want nil", err)
+	}
+	if s, ok := r.Lookup(base); !ok || s != second {
+		t.Fatal("freed base did not take the new session")
 	}
 }
 
@@ -278,5 +277,54 @@ func TestSessionsListsAgentsNotCustomDomains(t *testing.T) {
 	}
 	if got := NewRouter().Sessions(); len(got) != 0 {
 		t.Fatalf("empty router lists %d sessions", len(got))
+	}
+}
+
+// SetHosts and SetCustom make one session's entries exactly the given set,
+// so a relay can re-derive an agent's routes from Postgres without touching
+// what other sessions hold.
+func TestSetHostsAndSetCustomReconcileOneSession(t *testing.T) {
+	r := NewRouter()
+	alice := &tunnel.Session{BaseDomain: "alice.example.com"}
+	bob := &tunnel.Session{BaseDomain: "bob.example.com"}
+	if err := r.Register(alice); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Register(bob); err != nil {
+		t.Fatal(err)
+	}
+	r.RegisterHost("old-alice.public.getpiper.co", alice)
+	r.RegisterHost("blog-bob.public.getpiper.co", bob)
+	r.RegisterCustom("old.alice.dev", alice)
+	r.RegisterCustom("shop.bob.dev", bob)
+
+	r.SetHosts(alice, []string{"blog-alice.public.getpiper.co", "pr-3-blog-alice.public.getpiper.co"})
+	r.SetCustom(alice, []string{"shop.alice.dev"})
+
+	for _, host := range []string{"blog-alice.public.getpiper.co", "pr-3-blog-alice.public.getpiper.co"} {
+		if s, ok := r.LookupHost(host); !ok || s != alice {
+			t.Errorf("%s not routed to alice after SetHosts", host)
+		}
+	}
+	if _, ok := r.LookupHost("old-alice.public.getpiper.co"); ok {
+		t.Error("SetHosts kept an entry that is no longer in the set")
+	}
+	if s, ok := r.LookupHost("blog-bob.public.getpiper.co"); !ok || s != bob {
+		t.Error("SetHosts on alice touched bob's hostname")
+	}
+	if s, ok := r.LookupCustom("shop.alice.dev"); !ok || s != alice {
+		t.Error("shop.alice.dev not routed after SetCustom")
+	}
+	if _, ok := r.Lookup("old.alice.dev"); ok {
+		t.Error("SetCustom kept a custom domain that is no longer in the set")
+	}
+	if s, ok := r.LookupCustom("shop.bob.dev"); !ok || s != bob {
+		t.Error("SetCustom on alice touched bob's custom domain")
+	}
+	if s, ok := r.Lookup("alice.example.com"); !ok || s != alice {
+		t.Error("SetCustom removed the agent's own base entry")
+	}
+	if a, h, c := r.Counts(); a != 2 || h != 3 || c != 2 {
+		t.Fatalf("Counts() = %d,%d,%d; want 2,3,2", a, h, c)
 	}
 }

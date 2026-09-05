@@ -24,13 +24,22 @@ func NewRouter() *Router {
 	}
 }
 
-func (r *Router) Register(sess *tunnel.Session) {
+// Register maps sess's base domain to it. A base already held by a
+// different session is refused with tunnel.ErrDuplicateSession: a relay
+// holds one session per agent (#530), and the edge's placement is what
+// spreads an agent's two sessions across relays. Re-registering the same
+// session is a no-op. A closed session is refused silently (see below).
+func (r *Router) Register(sess *tunnel.Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if sess.Closed() {
-		return
+		return nil
+	}
+	if held, ok := r.byBase[sess.BaseDomain]; ok && held != sess {
+		return tunnel.ErrDuplicateSession
 	}
 	r.byBase[sess.BaseDomain] = sess
+	return nil
 }
 
 // RegisterHost maps an exact relay-terminated hostname to a session.
@@ -77,6 +86,53 @@ func (r *Router) UnregisterCustom(domain string) {
 	defer r.mu.Unlock()
 	delete(r.byBase, domain)
 	delete(r.custom, domain)
+}
+
+// SetHosts makes sess's terminated-hostname entries exactly hosts: entries
+// it holds outside the set are dropped, missing ones are added, and other
+// sessions' entries are left alone. A closed session only loses entries.
+func (r *Router) SetHosts(sess *tunnel.Session, hosts []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		want[h] = true
+	}
+	for host, s := range r.byHost {
+		if s == sess && !want[host] {
+			delete(r.byHost, host)
+		}
+	}
+	if sess.Closed() {
+		return
+	}
+	for _, h := range hosts {
+		r.byHost[h] = sess
+	}
+}
+
+// SetCustom is SetHosts for BYO custom domains, keeping byBase and custom in
+// step the way RegisterCustom/UnregisterCustom do.
+func (r *Router) SetCustom(sess *tunnel.Session, domains []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	want := make(map[string]bool, len(domains))
+	for _, d := range domains {
+		want[d] = true
+	}
+	for domain, s := range r.custom {
+		if s == sess && !want[domain] {
+			delete(r.custom, domain)
+			delete(r.byBase, domain)
+		}
+	}
+	if sess.Closed() {
+		return
+	}
+	for _, d := range domains {
+		r.byBase[d] = sess
+		r.custom[d] = sess
+	}
 }
 
 func (r *Router) Unregister(sess *tunnel.Session) {

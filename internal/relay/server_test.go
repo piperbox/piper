@@ -2,15 +2,13 @@ package relay
 
 import (
 	"bufio"
-	"bytes"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -641,13 +639,11 @@ func TestServeTunnelRecordsAndClearsOwner(t *testing.T) {
 
 	sess := dialTestTunnel(t, st, router, inst, en)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 	sess.Close()
 	waitCond(t, 3*time.Second, "owner row cleared", func() bool {
-		_, ok, _ := st.OwnerOf(en.BaseDomain)
-		return !ok
+		return len(ownerIDs(t, st, en.BaseDomain)) == 0
 	})
 }
 
@@ -660,8 +656,7 @@ func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
 
 	sess := dialTestTunnel(t, st, router, mine, en)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == mine.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == mine.ID
 	})
 	// The agent reconnected elsewhere while our half-open session lingers.
 	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
@@ -672,80 +667,104 @@ func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
 		_, ok := router.Lookup(en.BaseDomain)
 		return !ok
 	})
-	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
-		t.Fatalf("owner after stale unregister = %+v ok=%v, want %s", r, ok, other.ID)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != other.ID {
+		t.Fatalf("owners after stale unregister = %v, want [%s]", got, other.ID)
 	}
 }
 
-// tunnelLogSpy is a race-safe log sink. serveTunnel logs "agent gone" from its
-// own goroutine *after* it has released ownership, so the line is the sync
-// point that proves a teardown finished — without it a test asserting the
-// owner row survived could pass before the teardown ever ran.
-type tunnelLogSpy struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (s *tunnelLogSpy) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.buf.Write(p)
-}
-
-func (s *tunnelLogSpy) saw(sub string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return strings.Contains(s.buf.String(), sub)
-}
-
-// TestServeTunnelKeepsOwnerWhenItStillHoldsANewerSession: the agent's TCP goes
-// half-open and it redials, and the edge places it back on *this* relay. The
-// new session re-records the same owner row; when the old session's keepalive
-// finally fires, its teardown must not delete it. WHERE instance_id = me does
-// not help here — both sessions are this instance — so the guard has to be the
-// router: we still hold the base, so the row is not ours to clear.
-func TestServeTunnelKeepsOwnerWhenItStillHoldsANewerSession(t *testing.T) {
-	spy := &tunnelLogSpy{}
-	prevOut, prevFlags := log.Writer(), log.Flags()
-	log.SetOutput(spy)
-	log.SetFlags(0)
-	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
-
+// The duplicate check runs after auth: a second dial for a base this relay
+// holds is rejected with the named reason, and the first session keeps its
+// registration and its owner row.
+func TestServeTunnelRejectsADuplicateAfterAuth(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
 	inst := testInstance(t, st)
 	router := NewRouter()
 
 	first := dialTestTunnel(t, st, router, inst, en)
-	stale, _ := router.Holds(en.BaseDomain)
+	held, _ := router.Holds(en.BaseDomain)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 
-	// The redial lands on the same relay.
 	cc, sc := net.Pipe()
 	t.Cleanup(func() { cc.Close(); sc.Close() })
 	go serveTunnel(sc, st, router, st.AgentDisabled, nil, nil, inst)
-	second, err := tunnel.Dial(cc, en.Token, en.BaseDomain)
+	if _, err := tunnel.Dial(cc, en.Token, en.BaseDomain); !errors.Is(err, tunnel.ErrDuplicateSession) {
+		t.Fatalf("second dial = %v, want ErrDuplicateSession", err)
+	}
+	if s, ok := router.Holds(en.BaseDomain); !ok || s != held {
+		t.Fatal("first session lost its registration to the refused duplicate")
+	}
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != inst.ID {
+		t.Fatalf("owners after refused duplicate = %v, want [%s]", got, inst.ID)
+	}
+	first.Close()
+}
+
+// The check must not run before auth, or an unauthenticated peer could learn
+// which agents a relay holds: a bad token for a held base gets the generic
+// reason, not the duplicate one.
+func TestServeTunnelDoesNotNameADuplicateToABadToken(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+	dialTestTunnel(t, st, router, inst, en)
+
+	cc, sc := net.Pipe()
+	t.Cleanup(func() { cc.Close(); sc.Close() })
+	go serveTunnel(sc, st, router, st.AgentDisabled, nil, nil, inst)
+	_, err := tunnel.Dial(cc, "not-the-token", en.BaseDomain)
+	if err == nil || errors.Is(err, tunnel.ErrDuplicateSession) {
+		t.Fatalf("bad token on a held base = %v, want a generic rejection", err)
+	}
+}
+
+// clearOwner's router guard: on one instance an unregister, a fresh register
+// of the same agent, and the late clear can interleave, and both sessions
+// map to the same (agent, instance) row. While the router still holds the
+// base, the row is the newer session's and must stay.
+func TestClearOwnerKeepsTheRowWhileTheRouterHoldsTheBase(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+	if err := st.SetOwner(en.BaseDomain, inst.ID); err != nil {
+		t.Fatal(err)
+	}
+	sess := &tunnel.Session{BaseDomain: en.BaseDomain}
+	if err := router.Register(sess); err != nil {
+		t.Fatal(err)
+	}
+	clearOwner(st, router, en.BaseDomain, inst)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != inst.ID {
+		t.Fatalf("owner row cleared while the base is still held: %v", got)
+	}
+	router.Unregister(sess)
+	clearOwner(st, router, en.BaseDomain, inst)
+	if got := ownerIDs(t, st, en.BaseDomain); len(got) != 0 {
+		t.Fatalf("owner row survived a clear after the base was released: %v", got)
+	}
+}
+
+// A session that registers on a relay gets every hostname the agent already
+// holds in Postgres, whichever relay's session created them (#530).
+func TestServeTunnelDerivesHostnamesAtRegister(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	inst := testInstance(t, st)
+	router := NewRouter()
+	host, err := st.RegisterHostname(en.BaseDomain, "blog", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { second.Close() })
-	waitCond(t, 3*time.Second, "newer session registered", func() bool {
-		s, ok := router.Holds(en.BaseDomain)
-		return ok && s != stale
+	sess := dialTestTunnel(t, st, router, inst, en)
+	defer sess.Close()
+	// dialTestTunnel returns once the base is registered; the route derive
+	// runs right after, so wait for it rather than racing it.
+	waitCond(t, 3*time.Second, host+" derived at register", func() bool {
+		_, ok := router.LookupHost(host)
+		return ok
 	})
-
-	first.Close()
-	waitCond(t, 3*time.Second, "stale session torn down", func() bool {
-		return spy.saw("agent gone: " + en.BaseDomain)
-	})
-
-	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != inst.ID {
-		t.Fatalf("owner after stale teardown = %+v ok=%v, want %s", r, ok, inst.ID)
-	}
-	if s, ok := router.Holds(en.BaseDomain); !ok || s == stale {
-		t.Fatal("newer session lost its registration")
-	}
 }

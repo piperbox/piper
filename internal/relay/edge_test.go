@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -427,14 +428,16 @@ func TestEdgeClusterControlHopWebhookDrainAndOwnershipMove(t *testing.T) {
 	})
 	// The edge only learns an owner from the row, so the row already moved;
 	// assert it directly so a future in-memory shortcut cannot hide that.
-	if r, ok, err := st.OwnerOf(en1.BaseDomain); err != nil || !ok || r.ID != otherRelay.inst.ID {
-		t.Fatalf("agent_owners after the move: %+v ok=%v err=%v, want %s", r, ok, err, otherRelay.inst.ID)
+	if got := ownerIDs(t, st, en1.BaseDomain); strings.Join(got, ",") != otherRelay.inst.ID {
+		t.Fatalf("agent_owners after the move: %v, want [%s]", got, otherRelay.inst.ID)
 	}
 }
 
 // TestEdgeEvictsDeadRelayOnDialFailureAndRetriesOnceOnTunnel: :7000 placement
-// is a choice among equals, so a relay that does not answer costs one retry —
-// and the eviction that pays for it takes its ownership rows with it.
+// excludes an agent's current owners first (#530), so both must already own
+// the base to force the fallback that considers them as equals; a relay that
+// does not answer then costs one retry, and the eviction that pays for it
+// takes its ownership rows with it.
 func TestEdgeEvictsDeadRelayOnDialFailureAndRetriesOnceOnTunnel(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
@@ -446,72 +449,70 @@ func TestEdgeEvictsDeadRelayOnDialFailureAndRetriesOnceOnTunnel(t *testing.T) {
 	}
 	t.Cleanup(func() { liveLn.Close() })
 	stampInstance(t, st, "live", liveLn.Addr().String(), time.Now())
-	if err := st.SetOwner(en.BaseDomain, "dead"); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"dead", "live"} {
+		if err := st.SetOwner(en.BaseDomain, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg, _ := startEdge(t, st)
 
-	// :7000 — equal load, so the earliest (dead) is tried first; the refused
-	// dial evicts it and the single retry lands on live.
+	// :7000 — both already own the base, so placement falls back to
+	// treating them as equals; equal load means the earliest (dead) is
+	// tried first, and the refused dial evicts it and the single retry
+	// lands on live.
 	accepted := acceptOne(liveLn)
 	conn, err := net.Dial("tcp", cfg.TunnelAddr)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
+	go tunnel.Dial(conn, "tok", en.BaseDomain) // writes the preface; the ack never comes
 	awaitAccept(t, accepted).Close()
 	waitCond(t, 5*time.Second, "dead row deleted", func() bool {
 		rows, _ := st.LiveInstances()
 		return len(rows) == 1 && rows[0].ID == "live"
 	})
-	if _, ok, _ := st.OwnerOf(en.BaseDomain); ok {
-		t.Fatal("ownership survived its instance's eviction")
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != "live" {
+		t.Fatalf("owners after eviction = %v, want [live]", got)
 	}
 }
 
-// TestEdgeNeverRetriesOnTLS is the other half of that rule: an agent's tunnel
-// lives in exactly one process, so :443 has no second candidate. A dead owner
-// costs the client its connection — never a splice to a relay that would
-// answer for a box it does not hold.
-func TestEdgeNeverRetriesOnTLS(t *testing.T) {
+// TestEdgeRetriesOnceOnTLSAcrossOwners: with two owners per agent (#530)
+// :443 has a second candidate. A dead owner costs one retry, and the eviction
+// that pays for it takes the dead relay's rows with it; the connection that
+// discovers the dead relay is still served.
+func TestEdgeRetriesOnceOnTLSAcrossOwners(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
 	deadAddr := freeTCPAddr(t)
-	stampInstance(t, st, "dead", deadAddr, time.Now())
+	stampInstance(t, st, "dead", deadAddr, time.Now().Add(-time.Minute))
 	liveLn, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { liveLn.Close() })
 	stampInstance(t, st, "live", liveLn.Addr().String(), time.Now())
-	if err := st.SetOwner(en.BaseDomain, "dead"); err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"dead", "live"} {
+		if err := st.SetOwner(en.BaseDomain, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cfg, e := startEdge(t, st)
 
+	// Equal load, so the earliest (dead) owner is tried first; the refused
+	// dial evicts it and the single retry lands on live.
 	accepted := acceptOne(liveLn)
-	conn := sendClientHello(t, cfg.TLSAddr, "app."+en.BaseDomain)
-	// The edge closes the client: the owner is dead and :443 has no second candidate.
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, err := conn.Read(make([]byte, 1)); err == nil {
-		t.Fatal("edge kept the connection open after the owner dial failed")
-	}
-	select {
-	case r := <-accepted:
-		if r.conn != nil {
-			r.conn.Close()
-		}
-		t.Fatal(":443 retried onto a relay that does not own the agent")
-	case <-time.After(300 * time.Millisecond):
-	}
+	sendClientHello(t, cfg.TLSAddr, "app."+en.BaseDomain)
+	awaitAccept(t, accepted).Close()
 	waitCond(t, 5*time.Second, "dead row deleted", func() bool {
 		rows, _ := st.LiveInstances()
 		return len(rows) == 1 && rows[0].ID == "live"
 	})
-	// The connection was accepted and matched an owner, but the owner was
-	// dead: it counts as unrouted so accepted decomposes into routed +
-	// unrouted + dropped on :443 the way it already does on :7000 (#526).
-	waitForScrape(t, e.m, `piper_edge_conns_unrouted_total{listener="tls"} 1`)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != "live" {
+		t.Fatalf("owners after eviction = %v, want [live]", got)
+	}
+	// The retry succeeded, so the connection counts as routed, not unrouted.
+	waitForScrape(t, e.m, `piper_edge_conns_routed_total{listener="tls"} 1`)
 }
 
 // TestEdgeCountsDroppedHeads pins the counter #526 asked for: a connection
@@ -521,20 +522,22 @@ func TestEdgeNeverRetriesOnTLS(t *testing.T) {
 func TestEdgeCountsDroppedHeads(t *testing.T) {
 	st := openTestStore(t)
 	cfg, e := startEdge(t, st)
-	for _, addr := range []string{cfg.TLSAddr, cfg.HTTPAddr} {
+	for _, addr := range []string{cfg.TLSAddr, cfg.HTTPAddr, cfg.TunnelAddr} {
 		conn, err := net.Dial("tcp", addr)
 		if err != nil {
 			t.Fatal(err)
 		}
 		// Not a TLS record and not an HTTP request line: readSNI/readHost
-		// both reject it, and the close ends any further read.
+		// both reject it. On :7000 it is a 2-byte length header of 1
+		// followed by one payload byte that is not JSON, so readPreface
+		// rejects it the same way. The close ends any further read.
 		_, _ = conn.Write([]byte("\x00\x01\x02 not a hello\n"))
 		conn.Close()
 	}
 	// Every accepted connection (including startEdge's own readiness probe
 	// on :443) was dropped at the head read, so accepted must decompose
 	// fully into dropped with nothing left over.
-	for _, listener := range []string{"tls", "http"} {
+	for _, listener := range []string{"tls", "http", "tunnel"} {
 		accepted := `piper_edge_conns_accepted_total{listener="` + listener + `"}`
 		dropped := `piper_edge_conns_dropped_total{listener="` + listener + `"}`
 		waitCond(t, 2*time.Second, listener+" accepted == dropped", func() bool {
@@ -545,6 +548,100 @@ func TestEdgeCountsDroppedHeads(t *testing.T) {
 	if got := scrapeMetrics(t, e.m); strings.Contains(got, "piper_edge_conns_unrouted_total") {
 		t.Fatalf("a dropped head must not count as unrouted:\n%s", got)
 	}
+}
+
+// TestEdgeGivesAnAgentTwoRelays is #530's contract end to end: an agent's
+// two dials land on two different relays, both route its traffic, a
+// hostname registered over one session routes through both, a relay dying
+// leaves the agent served through the other — including the connection
+// that discovers the death — and the second session re-places once a relay
+// is back.
+func TestEdgeGivesAnAgentTwoRelays(t *testing.T) {
+	st := openTestStore(t)
+	st.Configure("public.getpiper.co", 3, 10, 5)
+	acc, err := st.UpsertAccount("sub-1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	en, err := st.EnrollForAccount(acc.ID, "box-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, key := writeWildcard(t, "public.getpiper.co")
+	tlsCfg, err := LoadWildcardConfig(cert, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rA := startRelayBehindEdge(t, st, tlsCfg)
+	rB := startRelayBehindEdge(t, st, tlsCfg)
+	cfg, e := startEdge(t, st)
+
+	// Slot 1, then slot 2 once the edge has seen slot 1's owner row.
+	s1, _ := dialAgentThroughEdge(t, cfg, en)
+	first := waitEdgeOwner(t, e, en.BaseDomain)
+	waitEdgeSessions(t, e, first.ID, 1)
+	s2, _ := dialAgentThroughEdge(t, cfg, en)
+	waitCond(t, 5*time.Second, "two owners", func() bool { return len(e.state.ownersOf(en.BaseDomain)) == 2 })
+	if got := ownerIDs(t, st, en.BaseDomain); len(got) != 2 || got[0] == got[1] {
+		t.Fatalf("owners = %v, want two distinct relays", got)
+	}
+	relayOf := func(id string) *edgeRelay {
+		if id == rA.inst.ID {
+			return rA
+		}
+		return rB
+	}
+	firstRelay := relayOf(first.ID)
+	var secondRelay *edgeRelay
+	for _, id := range ownerIDs(t, st, en.BaseDomain) {
+		if id != first.ID {
+			secondRelay = relayOf(id)
+		}
+	}
+
+	// Both sessions answer passthrough; the edge may use either owner.
+	snis := make(chan string, 8)
+	go fakeAgent(s1, snis, make(chan string, 4))
+	go fakeAgent(s2, snis, make(chan string, 4))
+	sendClientHello(t, cfg.TLSAddr, "app."+en.BaseDomain)
+	expectString(t, snis, "app."+en.BaseDomain, "passthrough with two owners")
+
+	// A hostname registered over slot 1's session routes on both relays.
+	host := controlOp(t, s1, tunnel.ControlRequest{Op: "register", App: "blog"}, false).Hostname
+	for _, r := range []*edgeRelay{rA, rB} {
+		waitCond(t, 5*time.Second, "relay "+r.inst.ID+" routes "+host, func() bool {
+			_, ok := r.router.LookupHost(host)
+			return ok
+		})
+	}
+
+	// The relay holding slot 1 leaves the pool. Whether the edge has already
+	// seen its row go or discovers the dead dial itself (the retry path
+	// TestEdgeRetriesOnceOnTLSAcrossOwners pins), the next connection is
+	// served through the survivor.
+	firstRelay.stop()
+	sendClientHello(t, cfg.TLSAddr, "app."+en.BaseDomain)
+	expectString(t, snis, "app."+en.BaseDomain, "passthrough after one owner died")
+	waitCond(t, 5*time.Second, "edge drops the dead relay", func() bool {
+		owners := e.state.ownersOf(en.BaseDomain)
+		return len(owners) == 1 && owners[0].ID == secondRelay.inst.ID
+	})
+
+	// A replacement joins; the lost slot redials and lands on it, not on the
+	// survivor that already holds the agent.
+	rC := startRelayBehindEdge(t, st, tlsCfg)
+	s1.Close()
+	waitCond(t, 5*time.Second, "edge sees the replacement", func() bool {
+		e.state.mu.RLock()
+		defer e.state.mu.RUnlock()
+		_, ok := e.state.instances[rC.inst.ID]
+		return ok
+	})
+	dialAgentThroughEdge(t, cfg, en)
+	waitCond(t, 5*time.Second, "second session re-placed on the replacement", func() bool {
+		got := ownerIDs(t, st, en.BaseDomain)
+		return len(got) == 2 && slices.Contains(got, secondRelay.inst.ID) && slices.Contains(got, rC.inst.ID)
+	})
 }
 
 // counterValue reads one series from a scrape; 0 when it has not appeared yet.

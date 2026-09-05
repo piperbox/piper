@@ -131,6 +131,12 @@ each relay termination is the agent's only link going away.
 
 ### Proposed follow-up 4: two sessions per agent on two relays (#530)
 
+> Designed in
+> [`2026-09-05-two-sessions-per-agent-design.md`](2026-09-05-two-sessions-per-agent-design.md),
+> which departs from the sketch below in one place: the edge peeks the agent
+> base from a routing preface frame instead of relying on rejection alone,
+> because deterministic placement never converges under rejection.
+
 Let each agent keep two tunnel sessions, placed on different relays. A
 rolling restart then drops one of two, the edge routes to whichever owner
 row survives, and the agent redials the lost one in the background. #523

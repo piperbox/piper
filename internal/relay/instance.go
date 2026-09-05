@@ -120,28 +120,15 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 	}
 }
 
-// reassertOwnership re-records this instance as the owner of every base its
-// router holds that no live instance owns. Ownership is otherwise written
-// once, at register, so a relay whose row was deleted — by an edge that found
-// it undialable for one dial, say — comes back from the cascade with none of
-// its agents owned, and each stays dark at :443/:80 until it reconnects. It
-// runs inside the beat, after the upsert, so our own row is live before the
-// owner rows point at it. A base a *different* live instance owns is left
-// alone: the agent moved there, and RunInstance closes our stale session.
+// reassertOwnership records this instance as an owner of every base its
+// router holds. SetOwner is idempotent and silent when the row exists, so
+// this is one cheap insert per base per beat, and a relay whose row was
+// cascaded away — by an edge that found it undialable for one dial, say —
+// gets every owner row back on the next beat instead of staying dark until
+// each agent reconnects. It runs inside the beat, after the upsert, so our
+// own row is live before the owner rows point at it.
 func (i *Instance) reassertOwnership(st *Store, router *Router) {
-	bases := router.Bases()
-	if len(bases) == 0 {
-		return
-	}
-	owners, err := st.Owners()
-	if err != nil {
-		log.Printf("relay: read owners: %v", err)
-		return
-	}
-	for _, base := range bases {
-		if _, owned := owners[base]; owned {
-			continue
-		}
+	for _, base := range router.Bases() {
 		if err := st.SetOwner(base, i.ID); err != nil {
 			log.Printf("agent %s: re-record owner: %v", base, err)
 		}
@@ -150,39 +137,36 @@ func (i *Instance) reassertOwnership(st *Store, router *Router) {
 
 // RunInstance keeps this relay in the pool and reacts to the cluster. It
 // heartbeats until ctx is done, then leaves. Meanwhile it LISTENs on two
-// channels: a piper_owners payload naming an agent this process holds that
-// is now owned by another live instance closes the stale session (the agent
-// has reconnected elsewhere; a late webhook drain or control answer from
-// here would be wrong), and a piper_events payload naming an agent this
-// process holds drains its parked webhooks. On every listener (re)connect the
-// same checks run over every held agent, so a NOTIFY missed while
-// disconnected is caught up. delivery may be nil (no GitHub App).
+// channels: a piper_events payload naming an agent this process holds
+// drains its parked webhooks, and any piper_hostnames payload re-derives
+// the routes of every held agent from Postgres — the payload is a hostname,
+// not a base, and the held set is small (#530). On every listener
+// (re)connect both run over every held agent, so a NOTIFY missed while
+// disconnected is caught up. Ownership needs no listener: two owners is the
+// normal state, so nothing here reacts to another instance taking a row.
+// delivery may be nil (no GitHub App).
 func RunInstance(ctx context.Context, st *Store, inst *Instance, router *Router, delivery *TunnelDelivery) {
-	handle := func(channel, base string) {
-		sess, ok := router.Holds(base)
-		if !ok {
-			return
-		}
+	handle := func(channel, payload string) {
 		switch channel {
-		case chanOwners:
-			owner, live, err := st.OwnerOf(base)
-			if err != nil || !live || owner.ID == inst.ID {
+		case chanEvents:
+			if _, ok := router.Holds(payload); !ok || delivery == nil {
 				return
 			}
-			log.Printf("agent %s reconnected on %s; closing stale session", base, owner.ID)
-			sess.Close()
-		case chanEvents:
-			if delivery != nil {
-				delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, base) })
+			delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, payload) })
+		case chanHostnames:
+			for _, base := range router.Bases() {
+				if sess, ok := router.Holds(base); ok {
+					syncRoutes(st, router, base, sess)
+				}
 			}
 		}
 	}
 	resync := func() {
 		for _, base := range router.Bases() {
-			handle(chanOwners, base)
 			handle(chanEvents, base)
 		}
+		handle(chanHostnames, "")
 	}
-	go listen(ctx, st.dsn, []string{chanOwners, chanEvents}, resync, handle)
+	go listen(ctx, st.dsn, []string{chanEvents, chanHostnames}, resync, handle)
 	inst.heartbeat(ctx, st, router)
 }

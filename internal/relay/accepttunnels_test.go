@@ -89,20 +89,21 @@ func TestAcceptTunnelsRebindsCustomDomainOnReconnect(t *testing.T) {
 	})
 	first, _ := router.Lookup(customDomain)
 
-	// The rebind must not wait on the old session being swept: serveTunnel
-	// re-derives custom domains for every connect, so the new session's
-	// registration overwrites the entry whatever state the old one is in.
-	//
-	// Deliberately NOT asserted here: that the entry disappears in between.
-	// Unregistration is driven by the relay observing the peer's close, and TCP
-	// does not promise that promptly — a socket closed with unread data in
-	// flight can produce no FIN at all, only an RST once the kernel reaps the
-	// orphan (macOS net.inet.tcp.msl, 15s). That is what made this test flaky
-	// on a loaded box (#368); it was pinning transport timing, not relay
-	// behaviour. The invariant that actually matters — the stale session's late
-	// Unregister must not evict its successor — is proven directly and
-	// deterministically by TestUnregisterKeepsSuccessorEntries.
+	// Register now refuses a second session on the same base domain while the
+	// first is still held (see router.go), so the reconnect must wait for the
+	// relay to observe sess1's close — via CloseChan() — before dialing sess2,
+	// or the auth handshake fails outright with ErrDuplicateSession instead of
+	// racing safely the way a silent overwrite once did. The relay learns of
+	// the close from the raw TCP connection, which offers no delivery-time
+	// guarantee (a close with unread data in flight can arrive as an RST only
+	// once the kernel reaps the orphan — macOS net.inet.tcp.msl, 15s) — the
+	// same transport slack #368 hit — so the wait allows generous headroom
+	// above that rather than a tight bound.
 	sess1.Close()
+	waitCond(t, 20*time.Second, "router releases hold after first session closes", func() bool {
+		_, held := router.Holds(en.BaseDomain)
+		return !held
+	})
 
 	sess2 := connect()
 	waitFor("custom domain rebind after reconnect", func() bool {

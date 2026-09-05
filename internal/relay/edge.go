@@ -11,6 +11,8 @@ import (
 	"time"
 
 	proxyproto "github.com/pires/go-proxyproto"
+
+	"github.com/piperbox/piper/internal/tunnel"
 )
 
 // EdgeConfig is what ServeEdge needs; cmd/piper-edge fills it from the
@@ -156,17 +158,17 @@ func (e *edge) onNotify(channel, payload string) {
 			e.state.setInstances(rows)
 		}
 	case chanOwners:
-		owner, ok, err := e.st.OwnerOf(payload)
+		owners, err := e.st.OwnerOf(payload)
 		if err != nil {
 			e.dbLost(err)
 			return
 		}
 		e.dbBack()
-		if ok {
-			e.state.setOwner(payload, owner.ID)
-		} else {
-			e.state.setOwner(payload, "")
+		ids := make([]string, 0, len(owners))
+		for _, o := range owners {
+			ids = append(ids, o.ID)
 		}
+		e.state.setOwner(payload, ids)
 	case chanHostnames:
 		e.state.clearNames()
 	}
@@ -232,6 +234,16 @@ func (e *edge) resolveAgent(host string, customOnly bool) (string, bool) {
 	return got, ok
 }
 
+// readPreface peeks the tunnel handshake's routing preface — the sibling of
+// readSNI and readHost — under the same unauthenticated-read deadline. The
+// bytes returned are exactly the preface frame, replayed to the relay
+// verbatim; the credential frame behind it is never read here (#530).
+func readPreface(conn net.Conn) (string, []byte, error) {
+	_ = conn.SetReadDeadline(time.Now().Add(preAuthReadTimeout))
+	defer conn.SetReadDeadline(time.Time{})
+	return tunnel.ReadPreface(conn)
+}
+
 func (e *edge) handleTLS(conn net.Conn) {
 	defer conn.Close()
 	sni, buffered, err := readSNI(conn)
@@ -239,23 +251,19 @@ func (e *edge) handleTLS(conn net.Conn) {
 		e.m.ConnDropped("tls")
 		return
 	}
-	var target InstanceRow
-	var ok bool
 	if sni == e.apiHost {
-		target, ok = e.state.pickAPI()
-	} else if agent, found := e.resolveAgent(sni, false); found {
-		target, ok = e.state.ownerOf(agent)
+		target, ok := e.state.pickAPI()
+		if !ok || e.forward("tls", conn, buffered, target, target.TLSAddr) != nil {
+			e.m.ConnUnrouted("tls")
+		}
+		return
 	}
-	if !ok {
+	agent, found := e.resolveAgent(sni, false)
+	if !found {
 		e.m.ConnUnrouted("tls")
 		return
 	}
-	// No retry here: the owner is unique. If it is dead the agent will
-	// reconnect and a new owner row will arrive; meanwhile the connection
-	// went nowhere, so it counts as unrouted like :7000's exhausted retry.
-	if e.forward("tls", conn, buffered, target, target.TLSAddr) != nil {
-		e.m.ConnUnrouted("tls")
-	}
+	e.forwardToOwners("tls", conn, buffered, agent, func(r InstanceRow) string { return r.TLSAddr })
 }
 
 func (e *edge) handleHTTP(conn net.Conn) {
@@ -265,32 +273,53 @@ func (e *edge) handleHTTP(conn net.Conn) {
 		e.m.ConnDropped("http")
 		return
 	}
-	var target InstanceRow
-	var ok bool
-	if agent, found := e.resolveAgent(host, true); found {
-		target, ok = e.state.ownerOf(agent)
-	}
-	if !ok {
+	agent, found := e.resolveAgent(host, true)
+	if !found {
 		e.m.ConnUnrouted("http")
 		return
 	}
-	if e.forward("http", conn, buffered, target, target.HTTPAddr) != nil {
-		e.m.ConnUnrouted("http")
-	}
+	e.forwardToOwners("http", conn, buffered, agent, func(r InstanceRow) string { return r.HTTPAddr })
 }
 
-// handleTunnel places a new agent on the least-loaded relay. A dial failure
-// evicts that relay and retries the next candidate exactly once; the pool is
-// small and a second failure means something bigger is wrong.
+// forwardToOwners splices conn to agent's preferred owner, and on a failed
+// dial evicts that relay and retries exactly once on the next owner: with
+// two sessions per agent (#530) a dead owner is discovered by the first
+// connection that tries it, and that connection is still served. If the
+// agent has no live owner, or both dials fail, the connection went nowhere
+// and counts as unrouted.
+func (e *edge) forwardToOwners(listener string, conn net.Conn, buffered []byte, agent string, addrOf func(InstanceRow) string) {
+	owners := e.state.ownersOf(agent)
+	if len(owners) > 2 {
+		owners = owners[:2]
+	}
+	for _, target := range owners {
+		if err := e.forward(listener, conn, buffered, target, addrOf(target)); !errors.Is(err, errBackendDial) {
+			return
+		}
+	}
+	e.m.ConnUnrouted(listener)
+}
+
+// handleTunnel places an agent's dial on the least-loaded relay that does
+// not already hold that agent, which is how its two sessions end up on two
+// relays (#530). A dial failure evicts that relay and retries the next
+// candidate exactly once; the pool is small and a second failure means
+// something bigger is wrong. A connection that sends no usable preface is
+// dropped, like a bad ClientHello on :443.
 func (e *edge) handleTunnel(conn net.Conn) {
 	defer conn.Close()
+	base, preface, err := readPreface(conn)
+	if err != nil {
+		e.m.ConnDropped("tunnel")
+		return
+	}
 	exclude := map[string]bool{}
 	for attempt := 0; attempt < 2; attempt++ {
-		target, ok := e.state.pickTunnel(exclude)
+		target, ok := e.state.pickTunnel(base, exclude)
 		if !ok {
 			break
 		}
-		if err := e.forward("tunnel", conn, nil, target, target.TunnelAddr); !errors.Is(err, errBackendDial) {
+		if err := e.forward("tunnel", conn, preface, target, target.TunnelAddr); !errors.Is(err, errBackendDial) {
 			return
 		}
 		exclude[target.ID] = true
