@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log"
 	"net"
 	"strings"
 	"sync"
@@ -14,8 +15,8 @@ import (
 	"github.com/piperbox/piper/internal/tunnel"
 )
 
-// fakeRelay accepts one agent tunnel and exposes its session for the test to
-// drive (open T/H streams, accept C streams).
+// fakeRelay accepts every agent tunnel and hands each session to the test
+// (buffered: the client opens two slots, tests usually drive the first).
 func fakeRelay(t *testing.T) (addr string, sessCh chan *tunnel.Session) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -23,17 +24,22 @@ func fakeRelay(t *testing.T) (addr string, sessCh chan *tunnel.Session) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ln.Close() })
-	sessCh = make(chan *tunnel.Session, 1)
+	sessCh = make(chan *tunnel.Session, 8)
 	go func() {
-		c, err := ln.Accept()
-		if err != nil {
-			return
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				sess, err := tunnel.Serve(c, func(_, _ string) error { return nil })
+				if err != nil {
+					c.Close()
+					return
+				}
+				sessCh <- sess
+			}()
 		}
-		sess, err := tunnel.Serve(c, func(_, _ string) error { return nil })
-		if err != nil {
-			return
-		}
-		sessCh <- sess
 	}()
 	return ln.Addr().String(), sessCh
 }
@@ -723,6 +729,218 @@ func TestObservedIPStickyAcrossDisconnect(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if got := c.ObservedIP(); got != "127.0.0.1" {
 		t.Fatalf("ObservedIP after disconnect = %q, want 127.0.0.1", got)
+	}
+}
+
+// syncBuf is a race-safe log sink for counting log lines.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func captureLog(t *testing.T) *syncBuf {
+	t.Helper()
+	var b syncBuf
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&b)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	return &b
+}
+
+// The client holds two sessions (#530), both live at once.
+func TestTunnelClientHoldsTwoSessions(t *testing.T) {
+	addr, sessCh := fakeRelay(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var c TunnelClient
+	go c.Run(ctx, addr, "tok", "alice.example.com", func(byte, net.Conn) (net.Conn, error) {
+		return nil, errors.New("no local dials expected")
+	})
+	var got []*tunnel.Session
+	for len(got) < 2 {
+		select {
+		case s := <-sessCh:
+			got = append(got, s)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("relay saw %d sessions, want 2", len(got))
+		}
+	}
+	if got[0] == got[1] {
+		t.Fatal("the two sessions are the same object")
+	}
+	// The relay pushes each accepted session to sessCh the instant tunnel.Serve
+	// returns, which lands a hair before the client's own Dial finishes
+	// yamux-side setup and calls setSession — poll briefly rather than race it.
+	live := 0
+	deadlineLive := time.Now().Add(time.Second)
+	for {
+		c.mu.Lock()
+		live = 0
+		for _, s := range c.sess {
+			if s != nil {
+				live++
+			}
+		}
+		c.mu.Unlock()
+		if live == 2 {
+			break
+		}
+		if time.Now().After(deadlineLive) {
+			t.Fatalf("client reports %d live slots, want 2", live)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// One session dying leaves the other as the session control ops use.
+	got[0].Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		live = 0
+		for _, s := range c.sess {
+			if s != nil {
+				live++
+			}
+		}
+		c.mu.Unlock()
+		if live == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client reports %d live slots after one session closed, want 1", live)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if c.current() == nil {
+		t.Fatal("current() is nil with one slot still live")
+	}
+	if state, _ := c.Status(); state != "connected" {
+		t.Fatalf("Status with one live slot = %q, want connected", state)
+	}
+}
+
+// Slot 2 dials only after slot 1 has connected once: both boot dials
+// reaching the edge before the first owner row exists would land on the
+// same relay and the second would be rejected on every start.
+func TestSecondSlotWaitsForTheFirstConnect(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	var accepted atomic.Int32
+	release := make(chan struct{})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			go func() {
+				<-release // hold every handshake until the test releases
+				tunnel.Serve(c, func(_, _ string) error { return nil })
+			}()
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var c TunnelClient
+	go c.Run(ctx, ln.Addr().String(), "tok", "alice.example.com", nil)
+
+	time.Sleep(300 * time.Millisecond)
+	if n := accepted.Load(); n != 1 {
+		t.Fatalf("%d connections before the first handshake completed, want 1", n)
+	}
+	close(release)
+	deadline := time.Now().Add(5 * time.Second)
+	for accepted.Load() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("second slot never dialled after the first connected")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// dupRelay serves the first session and rejects every later handshake as a
+// duplicate: the shape of a pool with one relay.
+func dupRelay(t *testing.T) (addr string, rejected *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	rejected = new(atomic.Int32)
+	var served atomic.Int32
+	var keep []*tunnel.Session
+	var mu sync.Mutex
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				if served.Add(1) == 1 {
+					sess, err := tunnel.Serve(c, func(_, _ string) error { return nil })
+					if err == nil {
+						mu.Lock()
+						keep = append(keep, sess)
+						mu.Unlock()
+					}
+					return
+				}
+				_, _ = tunnel.Serve(c, func(_, _ string) error {
+					rejected.Add(1)
+					return tunnel.ErrDuplicateSession
+				})
+				c.Close()
+			}()
+		}
+	}()
+	return ln.Addr().String(), rejected
+}
+
+// A duplicate rejection is not a fault to back off from on the 1s→30s
+// ladder: the slot waits duplicateBackoff and says so once, not per attempt.
+func TestDuplicateRejectionBacksOffToTheCapAndLogsOnce(t *testing.T) {
+	prev := duplicateBackoff
+	duplicateBackoff = 30 * time.Millisecond
+	t.Cleanup(func() { duplicateBackoff = prev })
+	logged := captureLog(t)
+	addr, rejected := dupRelay(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var c TunnelClient
+	go c.Run(ctx, addr, "tok", "alice.example.com", nil)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for rejected.Load() < 4 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d duplicate rejections in 5s; the slot is on the slow ladder, not duplicateBackoff", rejected.Load())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := strings.Count(logged.String(), "already holds"); n != 1 {
+		t.Fatalf("duplicate logged %d times across %d rejections, want once:\n%s", n, rejected.Load(), logged.String())
+	}
+	if state, _ := c.Status(); state != "connected" {
+		t.Fatalf("Status with one live slot = %q, want connected", state)
 	}
 }
 
