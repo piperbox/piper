@@ -24,13 +24,22 @@ func NewRouter() *Router {
 	}
 }
 
-func (r *Router) Register(sess *tunnel.Session) {
+// Register maps sess's base domain to it. A base already held by a
+// different session is refused with tunnel.ErrDuplicateSession: a relay
+// holds one session per agent (#530), and the edge's placement is what
+// spreads an agent's two sessions across relays. Re-registering the same
+// session is a no-op. A closed session is refused silently (see below).
+func (r *Router) Register(sess *tunnel.Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if sess.Closed() {
-		return
+		return nil
+	}
+	if held, ok := r.byBase[sess.BaseDomain]; ok && held != sess {
+		return tunnel.ErrDuplicateSession
 	}
 	r.byBase[sess.BaseDomain] = sess
+	return nil
 }
 
 // RegisterHost maps an exact relay-terminated hostname to a session.

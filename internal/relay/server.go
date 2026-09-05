@@ -189,7 +189,17 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 	var claimedBase string
 	auth := func(token, base string) error {
 		claimedBase = base
-		return tunnelAuth(st)(token, base)
+		if err := tunnelAuth(st)(token, base); err != nil {
+			return err
+		}
+		// Post-auth only: the peer has proven which agent it is, so naming
+		// the duplicate confirms nothing to a stranger. A duplicate landing
+		// here at all means the edge had no relay left that does not hold
+		// this agent, or two dials raced (#530).
+		if _, held := router.Holds(base); held {
+			return tunnel.ErrDuplicateSession
+		}
+		return nil
 	}
 	sess, err := tunnel.Serve(conn, auth)
 	if err != nil {
@@ -197,7 +207,13 @@ func serveTunnel(conn net.Conn, st *Store, router *Router, disabled func(string)
 		conn.Close()
 		return
 	}
-	router.Register(sess)
+	// Two handshakes for one base can both pass the check above; the router
+	// is the tie-break.
+	if err := router.Register(sess); err != nil {
+		log.Printf("agent %s from %s: %v; closing", sess.BaseDomain, conn.RemoteAddr(), err)
+		sess.Close()
+		return
+	}
 	if err := st.SetOwner(sess.BaseDomain, inst.ID); err != nil {
 		log.Printf("agent %s: record owner: %v", sess.BaseDomain, err)
 	}
