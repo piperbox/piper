@@ -104,20 +104,31 @@ func (s *Store) LiveInstances() ([]InstanceRow, error) {
 	return out, rows.Err()
 }
 
-// SetOwner records that instanceID now terminates baseDomain's tunnel. An
-// upsert: an agent that reconnected elsewhere is the truth, so the new owner
-// overwrites. Unknown agents are ErrBadToken.
+// SetOwner records that instanceID terminates one of baseDomain's tunnels.
+// Idempotent: a row that already exists is left alone and nothing is
+// announced, which is what lets the heartbeat call it for every held base on
+// every beat. A new row is announced on piper_owners. Unknown agents are
+// ErrBadToken, told apart from "already there" by a separate existence check
+// in the same statement.
 func (s *Store) SetOwner(baseDomain, instanceID string) error {
-	res, err := s.db.Exec(
-		`INSERT INTO agent_owners(agent_name, instance_id, since)
-		 SELECT name, $2, now() FROM agents WHERE base_domain=$1
-		 ON CONFLICT(agent_name) DO UPDATE SET instance_id = excluded.instance_id, since = excluded.since`,
-		baseDomain, instanceID)
+	var inserted int
+	var known bool
+	err := s.db.QueryRow(
+		`WITH ins AS (
+		    INSERT INTO agent_owners(agent_name, instance_id, since)
+		    SELECT name, $2, now() FROM agents WHERE base_domain=$1
+		    ON CONFLICT DO NOTHING
+		    RETURNING 1)
+		 SELECT (SELECT count(*) FROM ins), EXISTS(SELECT 1 FROM agents WHERE base_domain=$1)`,
+		baseDomain, instanceID).Scan(&inserted, &known)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if !known {
 		return ErrBadToken
+	}
+	if inserted == 0 {
+		return nil
 	}
 	return notify(s.db, chanOwners, baseDomain)
 }
@@ -139,43 +150,51 @@ func (s *Store) ClearOwner(baseDomain, instanceID string) error {
 	return notify(s.db, chanOwners, baseDomain)
 }
 
-// OwnerOf returns the live instance holding baseDomain's tunnel. ok is false
-// when nobody does, or when the recorded owner has stopped heartbeating.
-func (s *Store) OwnerOf(baseDomain string) (InstanceRow, bool, error) {
-	r, err := scanInstance(s.db.QueryRow(
-		`SELECT i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr, i.draining
-		   FROM agent_owners o
-		   JOIN agents a ON a.name = o.agent_name
-		   JOIN relay_instances i ON i.id = o.instance_id
-		  WHERE a.base_domain=$1 AND i.`+liveWhere, baseDomain))
-	if errors.Is(err, sql.ErrNoRows) {
-		return InstanceRow{}, false, nil
-	}
-	if err != nil {
-		return InstanceRow{}, false, err
-	}
-	return r, true, nil
-}
+// ownerSelect is the instance projection OwnerOf and Owners share, with the
+// same total order LiveInstances uses so callers can tie-break the same way.
+var ownerSelect = `SELECT a.base_domain, i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr, i.draining
+	   FROM agent_owners o
+	   JOIN agents a ON a.name = o.agent_name
+	   JOIN relay_instances i ON i.id = o.instance_id
+	  WHERE i.` + liveWhere
 
-// Owners maps every agent base domain to the id of its live owner.
-func (s *Store) Owners() (map[string]string, error) {
-	rows, err := s.db.Query(
-		`SELECT a.base_domain, o.instance_id
-		   FROM agent_owners o
-		   JOIN agents a ON a.name = o.agent_name
-		   JOIN relay_instances i ON i.id = o.instance_id
-		  WHERE i.` + liveWhere)
+// OwnerOf returns the live instances holding baseDomain's tunnels, earliest
+// started first. Empty when nobody does, or when every recorded owner has
+// stopped heartbeating.
+func (s *Store) OwnerOf(baseDomain string) ([]InstanceRow, error) {
+	rows, err := s.db.Query(ownerSelect+` AND a.base_domain=$1 ORDER BY i.started_at, i.id`, baseDomain)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	var out []InstanceRow
 	for rows.Next() {
-		var base, id string
-		if err := rows.Scan(&base, &id); err != nil {
+		var base string
+		var r InstanceRow
+		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining); err != nil {
 			return nil, err
 		}
-		out[base] = id
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Owners maps every agent base domain to the ids of its live owners,
+// earliest started first.
+func (s *Store) Owners() (map[string][]string, error) {
+	rows, err := s.db.Query(ownerSelect + ` ORDER BY i.started_at, i.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var base string
+		var r InstanceRow
+		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining); err != nil {
+			return nil, err
+		}
+		out[base] = append(out[base], r.ID)
 	}
 	return out, rows.Err()
 }

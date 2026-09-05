@@ -3,6 +3,7 @@ package relay
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,30 +97,89 @@ func TestPurgeDeadInstancesDeletesOnlyStaleRows(t *testing.T) {
 	}
 }
 
-func TestSetOwnerOverwritesAndClearOwnerIsConditional(t *testing.T) {
+// ownerIDs is the live owner set for base, in OwnerOf's order.
+func ownerIDs(t *testing.T, st *Store, base string) []string {
+	t.Helper()
+	rows, err := st.OwnerOf(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+func TestSetOwnerAddsRowsAndClearOwnerRemovesOnlyItsOwn(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
-	stampInstance(t, st, "a", "127.0.0.1:1", time.Now())
-	stampInstance(t, st, "b", "127.0.0.1:1", time.Now())
+	t0 := time.Now()
+	stampInstance(t, st, "a", "127.0.0.1:1", t0)
+	stampInstance(t, st, "b", "127.0.0.1:1", t0.Add(time.Second))
 
+	if err := st.SetOwner(en.BaseDomain, "b"); err != nil {
+		t.Fatal(err)
+	}
 	if err := st.SetOwner(en.BaseDomain, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetOwner(en.BaseDomain, "b"); err != nil {
-		t.Fatal(err)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != "a,b" {
+		t.Fatalf("owners = %v, want [a b] (both rows, earliest started first)", got)
 	}
 	// a's late unregister must not remove b's row.
 	if err := st.ClearOwner(en.BaseDomain, "a"); err != nil {
 		t.Fatal(err)
 	}
-	if r, ok, err := st.OwnerOf(en.BaseDomain); err != nil || !ok || r.ID != "b" {
-		t.Fatalf("owner after conditional clear = %+v ok=%v err=%v, want b", r, ok, err)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != "b" {
+		t.Fatalf("owners after a cleared = %v, want [b]", got)
 	}
 	if err := st.ClearOwner(en.BaseDomain, "b"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, _ := st.OwnerOf(en.BaseDomain); ok {
-		t.Fatal("owner still set after the holder cleared it")
+	if got := ownerIDs(t, st, en.BaseDomain); len(got) != 0 {
+		t.Fatalf("owners after both cleared = %v, want none", got)
+	}
+}
+
+// SetOwner is what the heartbeat calls for every held base on every beat,
+// so a repeat must be a silent no-op: one row, one NOTIFY.
+func TestSetOwnerIsIdempotentAndNotifiesOnce(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	stampInstance(t, st, "a", "127.0.0.1:1", time.Now())
+	got, _ := startListener(t, st, chanOwners)
+
+	for i := 0; i < 3; i++ {
+		if err := st.SetOwner(en.BaseDomain, "a"); err != nil {
+			t.Fatalf("SetOwner #%d: %v", i+1, err)
+		}
+	}
+	var n int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM agent_owners`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("agent_owners rows = %d (%v), want 1", n, err)
+	}
+	// A probe after the three inserts bounds the wait: everything the
+	// inserts fired has landed once the probe has.
+	if err := notify(st.db, chanOwners, "probe"); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	for {
+		select {
+		case nt := <-got:
+			if nt.payload == "probe" {
+				if seen != 1 {
+					t.Fatalf("piper_owners fired %d times for one new row, want 1", seen)
+				}
+				return
+			}
+			if nt.payload == en.BaseDomain {
+				seen++
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("probe NOTIFY never arrived")
+		}
 	}
 }
 
@@ -151,35 +211,42 @@ func TestOwnerOfIgnoresDeadOwner(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
 	stampInstance(t, st, "a", "127.0.0.1:1", time.Now())
-	if err := st.SetOwner(en.BaseDomain, "a"); err != nil {
-		t.Fatal(err)
+	stampInstance(t, st, "b", "127.0.0.1:1", time.Now())
+	for _, id := range []string{"a", "b"} {
+		if err := st.SetOwner(en.BaseDomain, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	ageInstance(t, st, "a")
-	if _, ok, err := st.OwnerOf(en.BaseDomain); err != nil || ok {
-		t.Fatalf("dead owner reported live (ok=%v err=%v)", ok, err)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != "b" {
+		t.Fatalf("owners with a dead = %v, want [b]", got)
 	}
 	owners, err := st.Owners()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := owners[en.BaseDomain]; ok {
-		t.Fatalf("Owners() lists a dead owner: %v", owners)
+	if got := owners[en.BaseDomain]; strings.Join(got, ",") != "b" {
+		t.Fatalf("Owners() = %v, want %s→[b]", owners, en.BaseDomain)
 	}
 }
 
-func TestOwnersMapsBaseDomainToLiveInstance(t *testing.T) {
+func TestOwnersMapsBaseDomainToItsLiveInstances(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
-	stampInstance(t, st, "a", "127.0.0.1:1", time.Now())
-	if err := st.SetOwner(en.BaseDomain, "a"); err != nil {
-		t.Fatal(err)
+	t0 := time.Now()
+	stampInstance(t, st, "a", "127.0.0.1:1", t0)
+	stampInstance(t, st, "b", "127.0.0.1:1", t0.Add(time.Second))
+	for _, id := range []string{"b", "a"} {
+		if err := st.SetOwner(en.BaseDomain, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 	owners, err := st.Owners()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if owners[en.BaseDomain] != "a" {
-		t.Fatalf("Owners() = %v, want %s→a", owners, en.BaseDomain)
+	if got := owners[en.BaseDomain]; strings.Join(got, ",") != "a,b" {
+		t.Fatalf("Owners() = %v, want %s→[a b]", owners, en.BaseDomain)
 	}
 }
 
@@ -270,8 +337,8 @@ func TestUpsertInstanceRoundTripsDraining(t *testing.T) {
 	if len(rows) != 1 || !rows[0].Draining {
 		t.Fatalf("after a draining upsert: %+v, want Draining=true", rows)
 	}
-	owner, ok, err := st.OwnerOf(en.BaseDomain)
-	if err != nil || !ok || !owner.Draining {
-		t.Fatalf("OwnerOf = %+v ok=%v err=%v, want the draining owner", owner, ok, err)
+	owners, err := st.OwnerOf(en.BaseDomain)
+	if err != nil || len(owners) != 1 || !owners[0].Draining {
+		t.Fatalf("OwnerOf = %+v err=%v, want the one draining owner", owners, err)
 	}
 }

@@ -55,18 +55,18 @@ func TestOwnerOfRequiresALiveInstanceAndEvictCascades(t *testing.T) {
 	t0 := time.Now()
 	s := newEdgeState()
 	s.setInstances([]InstanceRow{instRow("a", t0, 0), instRow("b", t0, 0)})
-	s.setOwners(map[string]string{"x.example": "a", "y.example": "b"})
+	s.setOwners(map[string][]string{"x.example": {"a"}, "y.example": {"b"}})
 	if got, ok := s.ownerOf("x.example"); !ok || got.TLSAddr != "a:443" {
 		t.Fatalf("ownerOf x = %+v ok=%v", got, ok)
 	}
 	if _, ok := s.ownerOf("nobody.example"); ok {
 		t.Fatal("unowned agent resolved")
 	}
-	s.setOwner("x.example", "")
+	s.setOwner("x.example", nil)
 	if _, ok := s.ownerOf("x.example"); ok {
 		t.Fatal("cleared owner still resolved")
 	}
-	s.setOwner("x.example", "a")
+	s.setOwner("x.example", []string{"a"})
 	s.evict("a")
 	if _, ok := s.ownerOf("x.example"); ok {
 		t.Fatal("owner survived its instance's eviction")
@@ -75,7 +75,7 @@ func TestOwnerOfRequiresALiveInstanceAndEvictCascades(t *testing.T) {
 		t.Fatalf("after evict pickTunnel = %+v ok=%v, want b", got, ok)
 	}
 	// An owner row that points at an unknown (dead) instance is unroutable.
-	s.setOwner("y.example", "ghost")
+	s.setOwner("y.example", []string{"ghost"})
 	if _, ok := s.ownerOf("y.example"); ok {
 		t.Fatal("owner naming an unknown instance resolved")
 	}
@@ -143,7 +143,7 @@ func TestPlacementSkipsDrainingInstances(t *testing.T) {
 	a := instRow("a", t0, 0)
 	a.Draining = true
 	s.setInstances([]InstanceRow{a, instRow("b", t0.Add(time.Minute), 7)})
-	s.setOwners(map[string]string{"x.example": "a"})
+	s.setOwners(map[string][]string{"x.example": {"a"}})
 
 	if got, ok := s.pickTunnel(nil); !ok || got.ID != "b" {
 		t.Fatalf("pickTunnel = %+v ok=%v, want b (a is draining, however idle and early)", got, ok)
@@ -163,5 +163,36 @@ func TestPlacementSkipsDrainingInstances(t *testing.T) {
 	}
 	if got, ok := s.pickAPI(); ok {
 		t.Fatalf("pickAPI = %+v on a pool that is all draining, want no candidate", got)
+	}
+}
+
+// With two owners per agent (#530) the edge chooses: a non-draining owner
+// over a draining one, then the one with fewer sessions, then the earliest.
+func TestOwnersOfPrefersNonDrainingThenFewestThenEarliest(t *testing.T) {
+	t0 := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
+	s := newEdgeState()
+	draining := instRow("draining-idle", t0, 0)
+	draining.Draining = true
+	s.setInstances([]InstanceRow{
+		draining,
+		instRow("busy-early", t0.Add(time.Second), 9),
+		instRow("quiet-late", t0.Add(time.Minute), 2),
+		instRow("quiet-early", t0.Add(2*time.Second), 2),
+	})
+	s.setOwners(map[string][]string{"x.example": {"draining-idle", "busy-early", "quiet-late", "quiet-early", "ghost"}})
+	got := s.ownersOf("x.example")
+	var ids []string
+	for _, r := range got {
+		ids = append(ids, r.ID)
+	}
+	if want := "quiet-early,quiet-late,busy-early,draining-idle"; strings.Join(ids, ",") != want {
+		t.Fatalf("ownersOf = %v, want %s (ghost is not a live instance)", ids, want)
+	}
+	if first, ok := s.ownerOf("x.example"); !ok || first.ID != "quiet-early" {
+		t.Fatalf("ownerOf = %+v ok=%v, want quiet-early", first, ok)
+	}
+	s.evict("quiet-early")
+	if first, ok := s.ownerOf("x.example"); !ok || first.ID != "quiet-late" {
+		t.Fatalf("ownerOf after evict = %+v ok=%v, want quiet-late", first, ok)
 	}
 }

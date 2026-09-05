@@ -641,13 +641,11 @@ func TestServeTunnelRecordsAndClearsOwner(t *testing.T) {
 
 	sess := dialTestTunnel(t, st, router, inst, en)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 	sess.Close()
 	waitCond(t, 3*time.Second, "owner row cleared", func() bool {
-		_, ok, _ := st.OwnerOf(en.BaseDomain)
-		return !ok
+		return len(ownerIDs(t, st, en.BaseDomain)) == 0
 	})
 }
 
@@ -660,8 +658,7 @@ func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
 
 	sess := dialTestTunnel(t, st, router, mine, en)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == mine.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == mine.ID
 	})
 	// The agent reconnected elsewhere while our half-open session lingers.
 	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
@@ -672,8 +669,8 @@ func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
 		_, ok := router.Lookup(en.BaseDomain)
 		return !ok
 	})
-	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
-		t.Fatalf("owner after stale unregister = %+v ok=%v, want %s", r, ok, other.ID)
+	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != other.ID {
+		t.Fatalf("owners after stale unregister = %v, want [%s]", got, other.ID)
 	}
 }
 
@@ -719,8 +716,7 @@ func TestServeTunnelKeepsOwnerWhenItStillHoldsANewerSession(t *testing.T) {
 	first := dialTestTunnel(t, st, router, inst, en)
 	stale, _ := router.Holds(en.BaseDomain)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 
 	// The redial lands on the same relay.
@@ -742,8 +738,8 @@ func TestServeTunnelKeepsOwnerWhenItStillHoldsANewerSession(t *testing.T) {
 		return spy.saw("agent gone: " + en.BaseDomain)
 	})
 
-	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != inst.ID {
-		t.Fatalf("owner after stale teardown = %+v ok=%v, want %s", r, ok, inst.ID)
+	if strings.Join(ownerIDs(t, st, en.BaseDomain), ",") != inst.ID {
+		t.Fatalf("owner after stale teardown = %v, want [%s]", ownerIDs(t, st, en.BaseDomain), inst.ID)
 	}
 	if s, ok := router.Holds(en.BaseDomain); !ok || s == stale {
 		t.Fatal("newer session lost its registration")

@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -93,27 +95,23 @@ func TestHeartbeatReassertsOwnershipAfterTheInstanceRowIsDeleted(t *testing.T) {
 
 	dialTestTunnel(t, st, router, inst, en)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 
 	if err := st.DeleteInstance(inst.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok, _ := st.OwnerOf(en.BaseDomain); ok {
+	if len(ownerIDs(t, st, en.BaseDomain)) != 0 {
 		t.Fatal("cascade did not take the owner row")
 	}
 	waitCond(t, 3*time.Second, "ownership re-asserted", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
 }
 
-// TestHeartbeatDoesNotStealOwnershipFromAnotherLiveInstance is the other half
-// of the re-assert: a base owned by a different live relay means the agent
-// moved there. RunInstance closes our stale session; the beat must not race it
-// by claiming the row back.
-func TestHeartbeatDoesNotStealOwnershipFromAnotherLiveInstance(t *testing.T) {
+// Two owners is the normal state (#530): another live relay's row for a base
+// we hold is left alone, and ours is kept alongside it on every beat.
+func TestHeartbeatKeepsBothOwnerRows(t *testing.T) {
 	st := openTestStore(t)
 	en := enrollTestAgent(t, st)
 	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
@@ -127,12 +125,8 @@ func TestHeartbeatDoesNotStealOwnershipFromAnotherLiveInstance(t *testing.T) {
 
 	dialTestTunnel(t, st, router, inst, en)
 	waitCond(t, 3*time.Second, "owner row written", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == inst.ID
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == inst.ID
 	})
-
-	// The agent reconnected on another live relay while we still hold the
-	// session (no RunInstance here to close it).
 	other := testInstance(t, st)
 	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
 		t.Fatal(err)
@@ -145,54 +139,14 @@ func TestHeartbeatDoesNotStealOwnershipFromAnotherLiveInstance(t *testing.T) {
 		}
 		return ts
 	}
-	// Three beats is proof the loop ran with the foreign owner in place.
+	// Three beats is proof the loop ran with the second owner in place.
 	for i := 0; i < 3; i++ {
 		was := lastSeen()
 		waitCond(t, 3*time.Second, "heartbeat tick", func() bool { return lastSeen().After(was) })
 	}
-	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
-		t.Fatalf("owner after three beats = %+v ok=%v, want %s", r, ok, other.ID)
-	}
-}
-
-func TestRunInstanceClosesSessionOwnedElsewhere(t *testing.T) {
-	st := openTestStore(t)
-	en := enrollTestAgent(t, st)
-	mine, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
-	if err != nil {
-		t.Fatal(err)
-	}
-	other := testInstance(t, st)
-	router := NewRouter()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	go RunInstance(ctx, st, mine, router, nil)
-	waitCond(t, 3*time.Second, "instance live", func() bool {
-		rows, _ := st.LiveInstances()
-		for _, r := range rows {
-			if r.ID == mine.ID {
-				return true
-			}
-		}
-		return false
-	})
-
-	dialTestTunnel(t, st, router, mine, en)
-	waitCond(t, 3*time.Second, "owned by mine", func() bool {
-		r, ok, _ := st.OwnerOf(en.BaseDomain)
-		return ok && r.ID == mine.ID
-	})
-	// The agent reconnected on another live relay: our copy must go.
-	if err := st.SetOwner(en.BaseDomain, other.ID); err != nil {
-		t.Fatal(err)
-	}
-	waitCond(t, 3*time.Second, "stale session closed", func() bool {
-		_, ok := router.Holds(en.BaseDomain)
-		return !ok
-	})
-	if r, ok, _ := st.OwnerOf(en.BaseDomain); !ok || r.ID != other.ID {
-		t.Fatalf("owner after stale close = %+v ok=%v, want %s", r, ok, other.ID)
+	got := ownerIDs(t, st, en.BaseDomain)
+	if len(got) != 2 || !slices.Contains(got, inst.ID) || !slices.Contains(got, other.ID) {
+		t.Fatalf("owners after three beats = %v, want both %s and %s", got, inst.ID, other.ID)
 	}
 }
 

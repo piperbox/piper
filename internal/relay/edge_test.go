@@ -427,8 +427,8 @@ func TestEdgeClusterControlHopWebhookDrainAndOwnershipMove(t *testing.T) {
 	})
 	// The edge only learns an owner from the row, so the row already moved;
 	// assert it directly so a future in-memory shortcut cannot hide that.
-	if r, ok, err := st.OwnerOf(en1.BaseDomain); err != nil || !ok || r.ID != otherRelay.inst.ID {
-		t.Fatalf("agent_owners after the move: %+v ok=%v err=%v, want %s", r, ok, err, otherRelay.inst.ID)
+	if got := ownerIDs(t, st, en1.BaseDomain); strings.Join(got, ",") != otherRelay.inst.ID {
+		t.Fatalf("agent_owners after the move: %v, want [%s]", got, otherRelay.inst.ID)
 	}
 }
 
@@ -464,7 +464,7 @@ func TestEdgeEvictsDeadRelayOnDialFailureAndRetriesOnceOnTunnel(t *testing.T) {
 		rows, _ := st.LiveInstances()
 		return len(rows) == 1 && rows[0].ID == "live"
 	})
-	if _, ok, _ := st.OwnerOf(en.BaseDomain); ok {
+	if len(ownerIDs(t, st, en.BaseDomain)) != 0 {
 		t.Fatal("ownership survived its instance's eviction")
 	}
 }

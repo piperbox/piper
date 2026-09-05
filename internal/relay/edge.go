@@ -156,17 +156,17 @@ func (e *edge) onNotify(channel, payload string) {
 			e.state.setInstances(rows)
 		}
 	case chanOwners:
-		owner, ok, err := e.st.OwnerOf(payload)
+		owners, err := e.st.OwnerOf(payload)
 		if err != nil {
 			e.dbLost(err)
 			return
 		}
 		e.dbBack()
-		if ok {
-			e.state.setOwner(payload, owner.ID)
-		} else {
-			e.state.setOwner(payload, "")
+		ids := make([]string, 0, len(owners))
+		for _, o := range owners {
+			ids = append(ids, o.ID)
 		}
+		e.state.setOwner(payload, ids)
 	case chanHostnames:
 		e.state.clearNames()
 	}
