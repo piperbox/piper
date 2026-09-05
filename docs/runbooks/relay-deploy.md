@@ -466,9 +466,12 @@ hostnames are dark for the 1–3 s it takes to redial onto a survivor; #530
 (two sessions per agent) closes that gap. Restarting the edge on a single
 host drops every tunnel through it (on Kubernetes the Service holds the port
 across a rolling restart). Both relays drain at once if they are recreated
-together: `docker compose up -d` recreates replicas in parallel, so a
-rolling relay upgrade needs `COMPOSE_PARALLEL_LIMIT=1` in the environment
-(to be confirmed on the Hetzner host at the next upgrade).
+together, and on compose they are: `docker compose up -d` recreates every
+replica of a scaled service within the same second, and
+`COMPOSE_PARALLEL_LIMIT=1` does not change that (confirmed on the Hetzner
+host 2026-09-05; it bounds concurrent engine calls, not replica order). A
+true one-at-a-time relay roll on compose is #535; on Kubernetes or ECS the
+orchestrator's rolling update already provides it.
 
 ## Single host with compose
 
@@ -573,14 +576,16 @@ Relay before agents, as always; nothing on the boxes changes.
 
 - `enroll` / `admin`: `sudo docker compose exec relay piper-relay admin …`.
 - Upgrade: set `PIPER_RELAY_VERSION` and `PIPER_EDGE_VERSION` in `.env`, then
-  `sudo docker compose pull && sudo COMPOSE_PARALLEL_LIMIT=1 docker compose up -d --scale relay=2`
-  so the relays are recreated one at a time and each drains (#523) while the
-  other serves. Restarting a relay still drops its tunnels once their
-  streams end (agents redial onto the survivor) until #530; restarting the
-  edge drops every tunnel until it is back. For a schema-change release,
-  drop the named tables first with
-  `sudo docker compose exec postgres psql -U piper_relay piper_relay`, and
-  roll relays before the edge.
+  `sudo docker compose pull`, then relays before the edge:
+  `sudo docker compose up -d --no-deps --scale relay=2 relay`, check the
+  pool rows and owners are back, then `sudo docker compose up -d --no-deps edge`.
+  Compose recreates both relay replicas together (#535), so every agent
+  redials once; each relay drains (#523) so requests in flight finish first.
+  Restarting the edge drops every tunnel until it is back. For a
+  schema-change release, drop the named tables first with
+  `sudo docker compose exec postgres psql -U piper_relay piper_relay`,
+  immediately before the relay `up` so the new binaries re-create them
+  within seconds.
 - Logs and metrics: `127.0.0.1:9090` (and the `tailscale serve` in front of
   it) is the edge's ops endpoint. A relay's is on its container IP:
   `curl http://$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' piper-relay-relay-1):9090/logs`.
