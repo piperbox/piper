@@ -497,13 +497,12 @@ sessions, and the edge routes through the other while the lost slot redials
 onto the replacement (#530); nothing is unrouted. Restarting the edge on a
 single host drops every tunnel through it (on Kubernetes the Service holds
 the port across a rolling restart). Both relays drain at once if they are
-recreated together, and on compose they are: `docker compose up -d`
+recreated together, and a plain `docker compose up -d` does that: it
 recreates every replica of a scaled service within the same second, and
-`COMPOSE_PARALLEL_LIMIT=1` does not change that (confirmed on the Hetzner
-host 2026-09-05; it bounds concurrent engine calls, not replica order). On
-compose that means every agent loses both sessions for the seconds both
-relays are down; a true one-at-a-time relay roll on compose is #535. On
-Kubernetes or ECS the orchestrator's rolling update already provides it.
+`COMPOSE_PARALLEL_LIMIT=1` does not change it (it bounds concurrent engine
+calls, not replica order). Replace the replicas one at a time instead, as
+in "Single host with compose" below (#535); on Kubernetes or ECS the
+orchestrator's rolling update already provides it.
 
 A clean `piperd` stop or restart (SIGTERM, which is what upgrades and
 `systemctl restart` send) closes both sessions at once; both relays
@@ -619,16 +618,33 @@ Relay before agents, as always; nothing on the boxes changes.
 
 - `enroll` / `admin`: `sudo docker compose exec relay piper-relay admin …`.
 - Upgrade: set `PIPER_RELAY_VERSION` and `PIPER_EDGE_VERSION` in `.env`, then
-  `sudo docker compose pull`, then relays before the edge:
-  `sudo docker compose up -d --no-deps --scale relay=2 relay`, check the
-  pool rows and owners are back, then `sudo docker compose up -d --no-deps edge`.
-  Compose recreates both relay replicas together (#535), so every agent
-  loses both sessions until they are back (#535); each relay drains (#523)
-  so requests in flight finish first.
-  Restarting the edge drops every tunnel until it is back. For a
-  schema-change release, drop the named tables first with
-  `sudo docker compose exec postgres psql -U piper_relay piper_relay`,
-  immediately before the relay `up` so the new binaries re-create them
+  `sudo docker compose pull`, then replace the relay replicas **one at a
+  time**, then the edge. A plain `up -d --scale relay=2 relay` recreates
+  both replicas in the same second (#535), so every agent loses both
+  sessions at once; instead, per replica:
+
+  ```bash
+  sudo docker stop -t 60 piper-relay-relay-1      # SIGTERM → drain (#523)
+  sudo docker rm piper-relay-relay-1
+  sudo docker compose up -d --no-deps --no-recreate --scale relay=2 relay
+  ```
+
+  `--no-recreate` is what keeps compose from also recreating the other,
+  still-running replica when the image changed; the `up` only creates the
+  missing one, on the new image. Wait for `agent_owners` to show two rows
+  per agent again (about ten seconds: the lost slot redials onto the new
+  replica) before doing the next. Compose names the new container with
+  the next free index, so after one full roll the replicas may be
+  `relay-2` and `relay-3`; use `docker compose ps` for the names. Verified
+  on the hosted relay for v0.23.0: no request dropped across both
+  replacements. Then `sudo docker compose up -d --no-deps edge`: restarting
+  the edge drops every tunnel until it is back, and each agent runs on one
+  session for about a minute until its second slot's backoff expires.
+  For a schema-change release, add or drop the named columns or tables
+  first with `sudo docker compose exec postgres psql -U piper_relay
+  piper_relay`, immediately before the first relay replacement; an added
+  nullable column (`ALTER TABLE … ADD COLUMN`) is harmless to the old
+  binaries still running, a dropped table is re-created by the new ones
   within seconds.
 - Logs and metrics: `127.0.0.1:9090` (and the `tailscale serve` in front of
   it) is the edge's ops endpoint. A relay's is on its container IP:

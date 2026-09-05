@@ -6,7 +6,10 @@
 # routes each connection to the relay that owns the agent's tunnel, adding a
 # PROXY v2 header so relays still see real client IPs. Relays run on the
 # bridge network with no published ports (reachable only through the edge)
-# and scale with `docker compose up -d --scale relay=N`. Host networking has
+# and scale with `docker compose up -d --scale relay=N`. Upgrade them one
+# replica at a time — stop, rm, `up -d --no-deps --no-recreate --scale
+# relay=N relay` — because a plain `up` recreates every replica in the same
+# second (#535); the runbook has the full sequence. Host networking has
 # no compose service DNS, so Postgres publishes on the host loopback for the
 # edge; relays reach it by service name.
 services:
