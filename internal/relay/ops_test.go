@@ -266,3 +266,12 @@ func TestOpsHandlerWithoutReadinessHasNoProbes(t *testing.T) {
 		t.Fatalf("/readyz with nil Readiness = %d, want 404", code)
 	}
 }
+
+func TestReadinessNilIsSafe(t *testing.T) {
+	var r *Readiness
+	r.SetReady()
+	r.SetDraining()
+	if r.Ready() || r.String() != "starting" {
+		t.Fatalf("nil Readiness: ready=%v state=%q", r.Ready(), r.String())
+	}
+}

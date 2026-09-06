@@ -154,16 +154,30 @@ const (
 	readyDraining
 )
 
+// The methods are nil-safe, like Metrics: an Instance built as a literal in
+// a test has no Readiness, and its transitions must not matter.
+
 // SetReady moves starting → ready. A draining instance stays draining.
-func (r *Readiness) SetReady() { r.state.CompareAndSwap(readyStarting, readyReady) }
+func (r *Readiness) SetReady() {
+	if r != nil {
+		r.state.CompareAndSwap(readyStarting, readyReady)
+	}
+}
 
 // SetDraining is final: from here /readyz is 503 until the process exits.
-func (r *Readiness) SetDraining() { r.state.Store(readyDraining) }
+func (r *Readiness) SetDraining() {
+	if r != nil {
+		r.state.Store(readyDraining)
+	}
+}
 
 // Ready reports whether /readyz answers 200.
-func (r *Readiness) Ready() bool { return r.state.Load() == readyReady }
+func (r *Readiness) Ready() bool { return r != nil && r.state.Load() == readyReady }
 
 func (r *Readiness) String() string {
+	if r == nil {
+		return "starting"
+	}
 	switch r.state.Load() {
 	case readyReady:
 		return "ready"
