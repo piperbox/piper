@@ -49,6 +49,42 @@ func fakeRelay(t *testing.T) (addr string, sessCh chan *tunnel.Session) {
 	return ln.Addr().String(), sessCh
 }
 
+// serveControl answers every control stream on every session the fake relay
+// hands out. The client holds two slots (#530) and the relay pushes sessions
+// in Serve-completion order, so the first on sessCh is not reliably the slot
+// control ops go over; a test that served only that one hung for a whole
+// controlTimeout whenever slot 1 landed first. handle returns the reply.
+func serveControl(t *testing.T, sessCh <-chan *tunnel.Session, handle func(tunnel.ControlRequest) tunnel.ControlResponse) {
+	t.Helper()
+	ctx := t.Context()
+	go func() {
+		for {
+			var sess *tunnel.Session
+			select {
+			case <-ctx.Done():
+				return
+			case sess = <-sessCh:
+			}
+			go func() {
+				for {
+					kind, stream, err := sess.AcceptKind()
+					if err != nil {
+						return
+					}
+					if kind != tunnel.KindControl {
+						stream.Close()
+						continue
+					}
+					var req tunnel.ControlRequest
+					_ = tunnel.ReadMsg(stream, &req)
+					_ = tunnel.WriteMsg(stream, handle(req))
+					stream.Close()
+				}
+			}()
+		}
+	}()
+}
+
 // The tunnel client forwards an accepted stream to the local dialer. We stand up
 // a real relay-side listener + tunnel.Serve, run the client against it, open a
 // passthrough stream from the server, and check bytes reach a fake "local Caddy".
@@ -146,19 +182,10 @@ func TestTunnelClientRegister(t *testing.T) {
 	go c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
 		return net.Dial("tcp", "127.0.0.1:9") // unused in this test
 	})
-	relaySess := <-sessCh
-
 	// Relay control handler: answer register with a canned hostname.
-	go func() {
-		kind, stream, err := relaySess.AcceptKind()
-		if err != nil || kind != tunnel.KindControl {
-			return
-		}
-		var req tunnel.ControlRequest
-		_ = tunnel.ReadMsg(stream, &req)
-		_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{Hostname: req.App + "-alice.public.getpiper.co"})
-		stream.Close()
-	}()
+	serveControl(t, sessCh, func(req tunnel.ControlRequest) tunnel.ControlResponse {
+		return tunnel.ControlResponse{Hostname: req.App + "-alice.public.getpiper.co"}
+	})
 
 	// Give Run a moment to publish its session.
 	var host string
@@ -194,19 +221,11 @@ func TestTunnelClientControlTimesOut(t *testing.T) {
 	go c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
 		return net.Dial("tcp", "127.0.0.1:9") // unused in this test
 	})
-	relaySess := <-sessCh
-
 	// A relay that reads the request and then goes quiet — connected, but wedged.
-	go func() {
-		_, stream, err := relaySess.AcceptKind()
-		if err != nil {
-			return
-		}
-		var req tunnel.ControlRequest
-		_ = tunnel.ReadMsg(stream, &req)
+	serveControl(t, sessCh, func(tunnel.ControlRequest) tunnel.ControlResponse {
 		<-ctx.Done()
-		stream.Close()
-	}()
+		return tunnel.ControlResponse{}
+	})
 
 	// Wait for Run to publish its session, then time the wedged call.
 	deadline := time.Now().Add(2 * time.Second)
@@ -502,20 +521,11 @@ func TestTunnelClientProvision(t *testing.T) {
 	go c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
 		return nil, errors.New("no local dials expected")
 	})
-	relaySess := <-sessCh
-
 	got := make(chan tunnel.ControlRequest, 1)
-	go func() {
-		kind, stream, err := relaySess.AcceptKind()
-		if err != nil || kind != tunnel.KindControl {
-			return
-		}
-		var req tunnel.ControlRequest
-		_ = tunnel.ReadMsg(stream, &req)
+	serveControl(t, sessCh, func(req tunnel.ControlRequest) tunnel.ControlResponse {
 		got <- req
-		_ = tunnel.WriteMsg(stream, tunnel.ControlResponse{})
-		stream.Close()
-	}()
+		return tunnel.ControlResponse{}
+	})
 
 	// Retry until Run publishes its session.
 	var err error
@@ -563,30 +573,15 @@ func TestTunnelClientDomainOps(t *testing.T) {
 	go c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
 		return nil, errors.New("no local dials expected")
 	})
-	relaySess := <-sessCh
-
 	got := make(chan tunnel.ControlRequest, 3)
-	go func() {
-		for {
-			kind, stream, err := relaySess.AcceptKind()
-			if err != nil {
-				return
-			}
-			if kind != tunnel.KindControl {
-				stream.Close()
-				continue
-			}
-			var req tunnel.ControlRequest
-			_ = tunnel.ReadMsg(stream, &req)
-			got <- req
-			resp := tunnel.ControlResponse{}
-			if req.Domain == "taken.example.com" {
-				resp.Error = "domain already in use"
-			}
-			_ = tunnel.WriteMsg(stream, resp)
-			stream.Close()
+	serveControl(t, sessCh, func(req tunnel.ControlRequest) tunnel.ControlResponse {
+		got <- req
+		resp := tunnel.ControlResponse{}
+		if req.Domain == "taken.example.com" {
+			resp.Error = "domain already in use"
 		}
-	}()
+		return resp
+	})
 
 	calls := []struct {
 		name   string
@@ -630,30 +625,15 @@ func TestTunnelClientRepoOps(t *testing.T) {
 	go c.Run(ctx, addr, "tok", "base.example.com", func(byte, net.Conn) (net.Conn, error) {
 		return nil, errors.New("no local dials expected")
 	})
-	relaySess := <-sessCh
-
 	got := make(chan tunnel.ControlRequest, 3)
-	go func() {
-		for {
-			kind, stream, err := relaySess.AcceptKind()
-			if err != nil {
-				return
-			}
-			if kind != tunnel.KindControl {
-				stream.Close()
-				continue
-			}
-			var req tunnel.ControlRequest
-			_ = tunnel.ReadMsg(stream, &req)
-			got <- req
-			resp := tunnel.ControlResponse{}
-			if req.Op == "gh-token" {
-				resp.Token = "ghs_x"
-			}
-			_ = tunnel.WriteMsg(stream, resp)
-			stream.Close()
+	serveControl(t, sessCh, func(req tunnel.ControlRequest) tunnel.ControlResponse {
+		got <- req
+		resp := tunnel.ControlResponse{}
+		if req.Op == "gh-token" {
+			resp.Token = "ghs_x"
 		}
-	}()
+		return resp
+	})
 
 	// Retry until the session is up, exactly as TestTunnelClientDomainOps does.
 	var err error
