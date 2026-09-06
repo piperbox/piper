@@ -33,6 +33,8 @@ services:
   edge:
     image: ghcr.io/piperbox/piper-edge:${PIPER_EDGE_VERSION:?set PIPER_EDGE_VERSION in .env (e.g. 0.20.0)}
     restart: unless-stopped
+    # SIGTERM drains (#534): up to 20s for the connections it carries.
+    stop_grace_period: 30s
     network_mode: host
     depends_on:
       postgres:
