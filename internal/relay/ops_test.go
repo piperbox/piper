@@ -17,7 +17,7 @@ import (
 func scrapeMetrics(t *testing.T, m *Metrics) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	NewOpsHandler(m, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	NewOpsHandler(m, nil, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	return rec.Body.String()
 }
 
@@ -81,7 +81,7 @@ func TestOpsHandlerLogs(t *testing.T) {
 	ring := NewLogRing(8)
 	ring.Write([]byte("first\nsecond\n"))
 	rec := httptest.NewRecorder()
-	NewOpsHandler(nil, ring).ServeHTTP(rec, httptest.NewRequest("GET", "/logs", nil))
+	NewOpsHandler(nil, ring, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/logs", nil))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("GET /logs = %d, want 200", rec.Code)
 	}
@@ -100,11 +100,11 @@ func TestOpsHandlerDisabledEndpoints404(t *testing.T) {
 		path string
 		want int
 	}{
-		{"metrics off", NewOpsHandler(nil, NewLogRing(8)), "/metrics", http.StatusNotFound},
-		{"logs off", NewOpsHandler(NewMetrics(NewRouter()), nil), "/logs", http.StatusNotFound},
-		{"metrics on", NewOpsHandler(NewMetrics(NewRouter()), nil), "/metrics", http.StatusOK},
-		{"logs on", NewOpsHandler(nil, NewLogRing(8)), "/logs", http.StatusOK},
-		{"unknown path", NewOpsHandler(NewMetrics(NewRouter()), NewLogRing(8)), "/nope", http.StatusNotFound},
+		{"metrics off", NewOpsHandler(nil, NewLogRing(8), nil), "/metrics", http.StatusNotFound},
+		{"logs off", NewOpsHandler(NewMetrics(NewRouter()), nil, nil), "/logs", http.StatusNotFound},
+		{"metrics on", NewOpsHandler(NewMetrics(NewRouter()), nil, nil), "/metrics", http.StatusOK},
+		{"logs on", NewOpsHandler(nil, NewLogRing(8), nil), "/logs", http.StatusOK},
+		{"unknown path", NewOpsHandler(NewMetrics(NewRouter()), NewLogRing(8), nil), "/nope", http.StatusNotFound},
 	}
 	for _, c := range cases {
 		rec := httptest.NewRecorder()
@@ -196,7 +196,7 @@ func TestEdgeMetricsUseTheEdgePrefixAndCountDialFailures(t *testing.T) {
 	m.ConnAccepted("tls")
 	m.DialFailed("tunnel")
 	rr := httptest.NewRecorder()
-	NewOpsHandler(m, nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	NewOpsHandler(m, nil, nil).ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	body := rr.Body.String()
 	for _, want := range []string{
 		`piper_edge_conns_accepted_total{listener="tls"} 1`,
@@ -208,5 +208,61 @@ func TestEdgeMetricsUseTheEdgePrefixAndCountDialFailures(t *testing.T) {
 	}
 	if strings.Contains(body, "piper_edge_agents_connected") {
 		t.Error("edge exposes a router gauge it has no router for")
+	}
+}
+
+func probe(t *testing.T, h http.Handler, path string) (int, string) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+	return rec.Code, strings.TrimSpace(rec.Body.String())
+}
+
+func TestReadinessTransitions(t *testing.T) {
+	var r Readiness
+	if r.Ready() || r.String() != "starting" {
+		t.Fatalf("fresh: ready=%v state=%q", r.Ready(), r.String())
+	}
+	r.SetReady()
+	if !r.Ready() || r.String() != "ready" {
+		t.Fatalf("after SetReady: ready=%v state=%q", r.Ready(), r.String())
+	}
+	r.SetDraining()
+	if r.Ready() || r.String() != "draining" {
+		t.Fatalf("after SetDraining: ready=%v state=%q", r.Ready(), r.String())
+	}
+	r.SetReady() // draining is final
+	if r.Ready() {
+		t.Fatal("SetReady reopened a draining instance")
+	}
+}
+
+func TestOpsHandlerProbes(t *testing.T) {
+	var r Readiness
+	h := NewOpsHandler(nil, nil, &r) // probes alone, no metrics, no logs
+
+	if code, body := probe(t, h, "/livez"); code != 200 || body != "ok" {
+		t.Fatalf("/livez = %d %q", code, body)
+	}
+	if code, body := probe(t, h, "/readyz"); code != 503 || body != "starting" {
+		t.Fatalf("/readyz before ready = %d %q", code, body)
+	}
+	r.SetReady()
+	if code, body := probe(t, h, "/readyz"); code != 200 || body != "ready" {
+		t.Fatalf("/readyz ready = %d %q", code, body)
+	}
+	r.SetDraining()
+	if code, body := probe(t, h, "/readyz"); code != 503 || body != "draining" {
+		t.Fatalf("/readyz draining = %d %q", code, body)
+	}
+	if code, _ := probe(t, h, "/metrics"); code != 404 {
+		t.Fatalf("/metrics with nil Metrics = %d, want 404", code)
+	}
+}
+
+func TestOpsHandlerWithoutReadinessHasNoProbes(t *testing.T) {
+	h := NewOpsHandler(NewMetrics(NewRouter()), nil, nil)
+	if code, _ := probe(t, h, "/readyz"); code != 404 {
+		t.Fatalf("/readyz with nil Readiness = %d, want 404", code)
 	}
 }

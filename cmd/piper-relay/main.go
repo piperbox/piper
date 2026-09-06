@@ -300,7 +300,7 @@ func main() {
 		log.SetOutput(io.MultiWriter(os.Stderr, ring))
 	}
 	if metricsOn || logsOn {
-		opsHandler := relay.NewOpsHandler(metrics, ring)
+		opsHandler := relay.NewOpsHandler(metrics, ring, nil)
 		go func() {
 			log.Printf("piper-relay: ops endpoint %s (metrics=%v logs=%v)", opsAddr, metricsOn, logsOn)
 			srv := &http.Server{Addr: opsAddr, Handler: opsHandler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
