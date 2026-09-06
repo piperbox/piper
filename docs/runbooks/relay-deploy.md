@@ -3,7 +3,10 @@
 How to stand up a self-hosted relay from a release, and — the part no other doc
 covers — how to **upgrade a running relay**, including across a schema change.
 The hosted relay runs this same open-source binary; this procedure applies to it
-too.
+too. Since 2026-09-06 the hosted relay runs the [Kubernetes](#kubernetes) layout
+on a single-node k3s cluster, reconciled by Flux from a private manifests repo
+(`piperbox/relay-ops`); its rollout policy is under
+[Rolling out with Flux](#rolling-out-with-flux).
 
 Building from source instead? [manual-setup.md](../manual-setup.md#run-the-relay-as-a-service)
 covers the from-checkout install; [git-deploy-e2e.md Part B](git-deploy-e2e.md)
@@ -561,6 +564,34 @@ calls, not replica order). Replace the replicas one at a time instead, as
 in "Single host with compose" below (#535); on Kubernetes or ECS the
 orchestrator's rolling update already provides it.
 
+### Rolling out with Flux
+
+The hosted relay is the stanzas above, applied by Flux from a private repo
+(`piperbox/relay-ops`, one Kustomization per directory, secrets created on the
+node and never committed). Nothing on that cluster is `kubectl apply`ed by
+hand: Flux reverts drift within its ten-minute interval, so every change is a
+commit. Two image policies (`ghcr.io/piperbox/piper-relay` and `piper-edge`)
+drive upgrades:
+
+- **Patch releases roll themselves.** The policies follow a semver range
+  pinned to the current minor (`>=0.23.1 <0.24.0`); a new tag inside it makes
+  Flux commit the bump into the two Deployments and apply it — relays
+  surge-1/unavailable-0, then the edge's `Recreate` (one tunnel drop, agents
+  redial). Expect the new version live within about ten minutes of the tag.
+  Verify with `flux get images all`, `kubectl -n piper rollout status
+  deployment/relay`, and two sessions per agent in `relay_instances`.
+- **Minor releases are deliberate**, because by the release convention a
+  relay `schema.sql` change forces a minor bump and pre-1.x has no
+  migrations. Run the `ALTER TABLE` / `DROP TABLE` first, on the cluster's
+  Postgres (`kubectl -n piper exec postgres-0 -- psql -U piper_relay
+  piper_relay`), then widen both policy ranges in git; that commit is the
+  rollout. The corollary for anyone cutting a release: **a relay schema change
+  must never ship as a patch** — the hosted relay would roll it onto a
+  database with the old shape.
+- **Rollback** is reverting the bump commit; a schema change additionally
+  needs the nightly dump (`/var/backups/piper-relay-<date>.sql.gz` on the
+  node, taken from `postgres-0`).
+
 A clean `piperd` stop or restart (SIGTERM, which is what upgrades and
 `systemctl restart` send) closes both sessions at once; both relays
 unregister them immediately and the restarted agent reconnects right away.
@@ -575,8 +606,9 @@ cut the reap window itself to about 10 s.
 ## Single host with compose
 
 The generic compose above is written for bridge networking. A relay that owns a
-public IP — the hosted relay's Hetzner layout, with certbot on the host and a
-colocated `piperd` — wants four things done differently. The ready-made file is
+public IP — the layout the hosted relay ran on its Hetzner box until it moved to
+Kubernetes, with certbot on the host and a colocated `piperd` — wants four
+things done differently. The ready-made file is
 [`deploy/compose/relay/docker-compose.yml`](../../deploy/compose/relay/docker-compose.yml);
 this section explains it and walks the cutover from the systemd unit.
 
