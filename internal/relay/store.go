@@ -72,6 +72,10 @@ func (s *Store) maxAgentsOrDefault() int {
 	return s.maxAgents
 }
 
+// schemaLockKey serializes concurrent schema applies (#555). Any constant
+// works; it only has to be the same in every relay and edge on the database.
+const schemaLockKey int64 = 0x70697065725f7265 // "piper_re"
+
 // Open connects to the Postgres database at dsn (a postgres:// URL) and
 // applies schema.sql. Several relay processes may share one database; the
 // store relies on row locks, not on being the only writer.
@@ -84,9 +88,28 @@ func Open(dsn string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("connect: %w", err)
 	}
+	// Serialize concurrent starters: CREATE ... IF NOT EXISTS races across
+	// sessions on an empty database and the loser dies on a catalog
+	// duplicate key. The transaction-scoped advisory lock makes them queue;
+	// each sees the tables the winner created.
+	tx, err := db.Begin()
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock($1)`, schemaLockKey); err != nil {
+		tx.Rollback()
+		db.Close()
+		return nil, fmt.Errorf("apply schema: lock: %w", err)
+	}
 	// No arguments ⇒ pgx uses the simple protocol, which accepts the
 	// multi-statement schema in one round trip.
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := tx.Exec(schema); err != nil {
+		tx.Rollback()
+		db.Close()
+		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
 	}

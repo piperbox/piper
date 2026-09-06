@@ -163,3 +163,30 @@ func TestOpenCreatesOrgTables(t *testing.T) {
 		}
 	}
 }
+
+// N relays starting against an empty database apply the schema at once.
+// Postgres's CREATE ... IF NOT EXISTS is not atomic across sessions, so
+// without the advisory lock in Open one of them dies on a catalog
+// duplicate-key error (#555).
+func TestOpenConcurrentOnEmptyDatabase(t *testing.T) {
+	dsn := relaytest.DSN(t)
+	const n = 8
+	errs := make(chan error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		go func() {
+			<-start
+			st, err := Open(dsn)
+			if err == nil {
+				st.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	for i := 0; i < n; i++ {
+		if err := <-errs; err != nil {
+			t.Fatalf("concurrent Open: %v", err)
+		}
+	}
+}
