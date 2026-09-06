@@ -123,30 +123,66 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 }
 
 // reassertOwnership records this instance as an owner of every base its
-// router holds. SetOwner is idempotent and silent when the row exists, so
-// this is one cheap insert per base per beat, and a relay whose row was
-// cascaded away — by an edge that found it undialable for one dial, say —
-// gets every owner row back on the next beat instead of staying dark until
-// each agent reconnects. It runs inside the beat, after the upsert, so our
-// own row is live before the owner rows point at it.
+// router holds. SetOwners is idempotent and silent for rows that exist, so
+// this is one statement per beat however many agents are held (#540), and
+// a relay whose rows were cascaded away — by an edge that found it
+// undialable for one dial, say — gets every owner row back on the next
+// beat instead of staying dark until each agent reconnects. It runs inside
+// the beat, after the upsert, so our own row is live before the owner rows
+// point at it.
 func (i *Instance) reassertOwnership(st *Store, router *Router) {
-	for _, base := range router.Bases() {
-		if err := st.SetOwner(base, i.ID); err != nil {
-			log.Printf("agent %s: re-record owner: %v", base, err)
+	bases := router.Bases()
+	if len(bases) == 0 {
+		return
+	}
+	if err := st.SetOwners(bases, i.ID); err != nil {
+		log.Printf("re-record %d owner rows: %v", len(bases), err)
+	}
+}
+
+// basesToResync names the held agents a piper_hostnames payload can
+// concern (#540). The payload is one hostname or custom domain, never a
+// base, so it maps to at most two agents: the one the store now gives it
+// to (an add), and the one whose router entry still carries it (a drop, or
+// the loser of a move). An empty payload is the listener's resync and a
+// store read failure loses nothing by sweeping: both return every held base.
+func basesToResync(st *Store, router *Router, payload string) []string {
+	if payload == "" {
+		return router.Bases()
+	}
+	seen := map[string]bool{}
+	var out []string
+	add := func(base string) {
+		if _, held := router.Holds(base); held && !seen[base] {
+			seen[base] = true
+			out = append(out, base)
 		}
 	}
+	base, ok, err := st.AgentForHost(payload)
+	if err != nil {
+		return router.Bases()
+	}
+	if ok {
+		add(base)
+	}
+	if sess, ok := router.LookupHost(payload); ok {
+		add(sess.BaseDomain)
+	}
+	if sess, ok := router.LookupCustom(payload); ok {
+		add(sess.BaseDomain)
+	}
+	return out
 }
 
 // RunInstance keeps this relay in the pool and reacts to the cluster. It
 // heartbeats until ctx is done, then leaves. Meanwhile it LISTENs on two
 // channels: a piper_events payload naming an agent this process holds
-// drains its parked webhooks, and any piper_hostnames payload re-derives
-// the routes of every held agent from Postgres — the payload is a hostname,
-// not a base, and the held set is small (#530). On every listener
-// (re)connect both run over every held agent, so a NOTIFY missed while
-// disconnected is caught up. Ownership needs no listener: two owners is the
-// normal state, so nothing here reacts to another instance taking a row.
-// delivery may be nil (no GitHub App).
+// drains its parked webhooks, and a piper_hostnames payload re-derives the
+// routes of the held agents it can concern from Postgres (#530, #540). On
+// every listener (re)connect both run over every held agent, so a NOTIFY
+// missed while disconnected is caught up. Ownership needs no listener: two
+// owners is the normal state, so nothing here reacts to another instance
+// taking a row. delivery may be nil (no GitHub App).
 func RunInstance(ctx context.Context, st *Store, inst *Instance, router *Router, delivery *TunnelDelivery) {
 	handle := func(channel, payload string) {
 		switch channel {
@@ -156,7 +192,7 @@ func RunInstance(ctx context.Context, st *Store, inst *Instance, router *Router,
 			}
 			delivery.Dispatch(func(ctx context.Context) { delivery.DrainFor(ctx, payload) })
 		case chanHostnames:
-			for _, base := range router.Bases() {
+			for _, base := range basesToResync(st, router, payload) {
 				if sess, ok := router.Holds(base); ok {
 					syncRoutes(st, router, base, sess)
 				}

@@ -316,3 +316,58 @@ func TestSyncRoutesKeepsRoutesOnReadError(t *testing.T) {
 		t.Fatalf("closed-store read logged:\n%s", got)
 	}
 }
+
+// A piper_hostnames payload names one hostname or custom domain, so only
+// the agents it can concern are re-derived (#540): the base the store now
+// maps it to (an add), and the base whose router entry still carries it (a
+// drop, or the loser of a move). An empty payload — the reconnect resync —
+// still sweeps every held base.
+func TestBasesToResyncNamesOnlyTheAffectedAgents(t *testing.T) {
+	st := openTestStore(t)
+	en1 := enrollTestAgent(t, st)
+	acc, err := st.UpsertAccount("sub-1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	en2, err := st.EnrollForAccount(acc.ID, "box-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter()
+	s1 := &tunnel.Session{BaseDomain: en1.BaseDomain}
+	s2 := &tunnel.Session{BaseDomain: en2.BaseDomain}
+	for _, s := range []*tunnel.Session{s1, s2} {
+		if err := router.Register(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	added, err := st.RegisterHostname(en1.BaseDomain, "blog", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router.RegisterHost("gone-alice.public.getpiper.co", s2)
+	router.RegisterCustom("shop.example.com", s2)
+	if err := st.AddCustomDomain(en1.BaseDomain, "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		payload string
+		want    []string
+	}{
+		{added, []string{en1.BaseDomain}},                              // add: the store's holder
+		{"gone-alice.public.getpiper.co", []string{en2.BaseDomain}},    // drop: the router's holder
+		{"shop.example.com", []string{en1.BaseDomain, en2.BaseDomain}}, // move: both
+		{"nobody.public.getpiper.co", nil},                             // held elsewhere: nothing
+		{"", []string{en1.BaseDomain, en2.BaseDomain}},                 // resync: everything
+	}
+	for _, c := range cases {
+		got := basesToResync(st, router, c.payload)
+		slices.Sort(got)
+		want := slices.Clone(c.want)
+		slices.Sort(want)
+		if !slices.Equal(got, want) {
+			t.Errorf("basesToResync(%q) = %v, want %v", c.payload, got, want)
+		}
+	}
+}
