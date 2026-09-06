@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -294,6 +295,11 @@ func TestSyncRoutesKeepsRoutesOnReadError(t *testing.T) {
 	}
 	router.SetHosts(sess, []string{"blog-alice.public.getpiper.co"})
 	router.SetCustom(sess, []string{"shop.example.com"})
+	var logged syncLogBuffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
 	st.Close()
 
 	syncRoutes(st, router, sess.BaseDomain, sess)
@@ -302,5 +308,11 @@ func TestSyncRoutesKeepsRoutesOnReadError(t *testing.T) {
 	}
 	if _, ok := router.LookupCustom("shop.example.com"); !ok {
 		t.Fatal("custom domain dropped after a failed store read")
+	}
+	// A store closed by shutdown is not an error worth a line: a clean
+	// relay stop and every test teardown would otherwise print one per
+	// held agent.
+	if got := logged.String(); got != "" {
+		t.Fatalf("closed-store read logged:\n%s", got)
 	}
 }

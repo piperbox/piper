@@ -157,7 +157,7 @@ func readFrame(r io.Reader) ([]byte, error) {
 func ReadPreface(r io.Reader) (string, []byte, error) {
 	payload, raw, err := readFrameRaw(r)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("reading preface frame: %w", err)
 	}
 	var p preface
 	if err := json.Unmarshal(payload, &p); err != nil {

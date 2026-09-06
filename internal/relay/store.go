@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -37,6 +38,7 @@ type Store struct {
 	maxApps    int
 	maxDomains int
 	nowFunc    func() time.Time
+	closed     atomic.Bool
 }
 
 // Configure sets the free-tier apex, the per-account agent cap (EnrollForAccount),
@@ -91,7 +93,14 @@ func Open(dsn string) (*Store, error) {
 	return &Store{db: db, dsn: dsn, nowFunc: time.Now}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.closed.Store(true)
+	return s.db.Close()
+}
+
+// Closed reports whether Close has been called, so a read that fails during
+// shutdown can be told apart from one that failed on a live store.
+func (s *Store) Closed() bool { return s.closed.Load() }
 
 func hashToken(tok string) string {
 	sum := sha256.Sum256([]byte(tok))

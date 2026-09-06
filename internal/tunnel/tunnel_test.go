@@ -607,6 +607,17 @@ func TestReadPrefaceRejectsAnEmptyBase(t *testing.T) {
 	}
 }
 
+// A short read carries frame context the way Dial's and Serve's own errors do.
+func TestReadPrefaceWrapsAShortRead(t *testing.T) {
+	c, s := net.Pipe()
+	c.Close()
+	t.Cleanup(func() { s.Close() })
+	_, _, err := ReadPreface(s)
+	if err == nil || !strings.Contains(err.Error(), "reading preface frame") {
+		t.Fatalf("ReadPreface error = %v, want frame context", err)
+	}
+}
+
 // A duplicate is the one rejection the relay may name: it is checked only
 // after the token has been validated, so the peer has proven who it is.
 func TestDuplicateRejectionSurvivesTheAck(t *testing.T) {
