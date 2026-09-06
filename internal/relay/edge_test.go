@@ -477,6 +477,44 @@ func TestEdgeEvictsDeadRelayOnDialFailureAndRetriesOnceOnTunnel(t *testing.T) {
 	}
 }
 
+// TestEdgeEvictsDeadRelayInTheStrictPass: the owner-excluding first pass of
+// :7000 placement (#530) retries after a refused dial too, not only the
+// all-owners fallback above. The edge never checks the claimed base against
+// the store, so a foreign base makes both relays non-owners; the dead one is
+// tried first and its eviction takes the row it holds for the enrolled base.
+func TestEdgeEvictsDeadRelayInTheStrictPass(t *testing.T) {
+	st := openTestStore(t)
+	en := enrollTestAgent(t, st)
+	deadAddr := freeTCPAddr(t)
+	stampInstance(t, st, "dead", deadAddr, time.Now().Add(-time.Minute))
+	liveLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { liveLn.Close() })
+	stampInstance(t, st, "live", liveLn.Addr().String(), time.Now())
+	if err := st.SetOwner(en.BaseDomain, "dead"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := startEdge(t, st)
+
+	accepted := acceptOne(liveLn)
+	conn, err := net.Dial("tcp", cfg.TunnelAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	go tunnel.Dial(conn, "tok", "other.example") // neither relay owns it: strict pass, dead first
+	awaitAccept(t, accepted).Close()
+	waitCond(t, 5*time.Second, "dead row deleted", func() bool {
+		rows, _ := st.LiveInstances()
+		return len(rows) == 1 && rows[0].ID == "live"
+	})
+	if got := ownerIDs(t, st, en.BaseDomain); len(got) != 0 {
+		t.Fatalf("owners after eviction = %v, want none", got)
+	}
+}
+
 // TestEdgeRetriesOnceOnTLSAcrossOwners: with two owners per agent (#530)
 // :443 has a second candidate. A dead owner costs one retry, and the eviction
 // that pays for it takes the dead relay's rows with it; the connection that

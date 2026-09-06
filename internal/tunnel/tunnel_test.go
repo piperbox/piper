@@ -558,7 +558,11 @@ func TestNumStreamsFollowsOpenAndClose(t *testing.T) {
 func TestReadPrefaceReturnsBaseAndLeavesCredentialUnread(t *testing.T) {
 	c, s := net.Pipe()
 	t.Cleanup(func() { c.Close(); s.Close() })
-	go Dial(c, "tok-123", "alice.example.com")
+	dialErr := make(chan error, 1)
+	go func() {
+		_, err := Dial(c, "tok-123", "alice.example.com")
+		dialErr <- err
+	}()
 
 	base, raw, err := ReadPreface(s)
 	if err != nil {
@@ -582,6 +586,12 @@ func TestReadPrefaceReturnsBaseAndLeavesCredentialUnread(t *testing.T) {
 	var cred credential
 	if err := json.Unmarshal(next, &cred); err != nil || cred.Token != "tok-123" {
 		t.Fatalf("credential frame = %q (%v), want the token", next, err)
+	}
+	// Dial got both frames out and is waiting on the ack: hanging up now
+	// must fail it there, not earlier in the handshake write.
+	s.Close()
+	if err := <-dialErr; err == nil || !strings.Contains(err.Error(), "awaiting relay handshake ack") {
+		t.Fatalf("Dial error = %v, want it to fail at the ack wait", err)
 	}
 }
 

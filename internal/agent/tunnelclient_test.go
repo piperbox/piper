@@ -17,6 +17,8 @@ import (
 
 // fakeRelay accepts every agent tunnel and hands each session to the test
 // (buffered: the client opens two slots, tests usually drive the first).
+// Sessions past the buffer are dropped rather than blocking the handler
+// goroutine for the life of the binary.
 func fakeRelay(t *testing.T) (addr string, sessCh chan *tunnel.Session) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -37,7 +39,10 @@ func fakeRelay(t *testing.T) (addr string, sessCh chan *tunnel.Session) {
 					c.Close()
 					return
 				}
-				sessCh <- sess
+				select {
+				case sessCh <- sess:
+				default: // reconnect churn past the buffer: drop, do not strand the goroutine
+				}
 			}()
 		}
 	}()
@@ -760,6 +765,29 @@ func captureLog(t *testing.T) *syncBuf {
 	return &b
 }
 
+// waitLiveSlots polls until c reports exactly want non-nil slots.
+func waitLiveSlots(t *testing.T, c *TunnelClient, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c.mu.Lock()
+		live := 0
+		for _, s := range c.sess {
+			if s != nil {
+				live++
+			}
+		}
+		c.mu.Unlock()
+		if live == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("client reports %d live slots, want %d", live, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // The client holds two sessions (#530), both live at once.
 func TestTunnelClientHoldsTwoSessions(t *testing.T) {
 	addr, sessCh := fakeRelay(t)
@@ -783,46 +811,11 @@ func TestTunnelClientHoldsTwoSessions(t *testing.T) {
 	}
 	// The relay pushes each accepted session to sessCh the instant tunnel.Serve
 	// returns, which lands a hair before the client's own Dial finishes
-	// yamux-side setup and calls setSession — poll briefly rather than race it.
-	live := 0
-	deadlineLive := time.Now().Add(time.Second)
-	for {
-		c.mu.Lock()
-		live = 0
-		for _, s := range c.sess {
-			if s != nil {
-				live++
-			}
-		}
-		c.mu.Unlock()
-		if live == 2 {
-			break
-		}
-		if time.Now().After(deadlineLive) {
-			t.Fatalf("client reports %d live slots, want 2", live)
-		}
-		time.Sleep(time.Millisecond)
-	}
+	// yamux-side setup and calls setSession — poll rather than race it.
+	waitLiveSlots(t, &c, 2)
 	// One session dying leaves the other as the session control ops use.
 	got[0].Close()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		c.mu.Lock()
-		live = 0
-		for _, s := range c.sess {
-			if s != nil {
-				live++
-			}
-		}
-		c.mu.Unlock()
-		if live == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("client reports %d live slots after one session closed, want 1", live)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitLiveSlots(t, &c, 1)
 	if c.current() == nil {
 		t.Fatal("current() is nil with one slot still live")
 	}
@@ -861,7 +854,14 @@ func TestSecondSlotWaitsForTheFirstConnect(t *testing.T) {
 	var c TunnelClient
 	go c.Run(ctx, ln.Addr().String(), "tok", "alice.example.com", nil)
 
-	time.Sleep(300 * time.Millisecond)
+	// A negative proof: for a bounded window, exactly one connection
+	// arrives. Polled rather than slept so a second dial fails the test
+	// the moment it lands instead of after the window.
+	for window := time.Now().Add(300 * time.Millisecond); time.Now().Before(window); time.Sleep(5 * time.Millisecond) {
+		if n := accepted.Load(); n > 1 {
+			t.Fatalf("%d connections before the first handshake completed, want 1", n)
+		}
+	}
 	if n := accepted.Load(); n != 1 {
 		t.Fatalf("%d connections before the first handshake completed, want 1", n)
 	}
@@ -1002,7 +1002,10 @@ func dupThenAcceptRelay(t *testing.T, n int) (addr string, rejected *atomic.Int3
 					c.Close()
 					return
 				}
-				sessCh <- sess
+				select {
+				case sessCh <- sess:
+				default:
+				}
 			}()
 		}
 	}()
@@ -1158,7 +1161,10 @@ func bootRaceRelay(t *testing.T) (addr string, rejected *atomic.Int32, sessCh ch
 					c.Close()
 					return
 				}
-				sessCh <- sess
+				select {
+				case sessCh <- sess:
+				default:
+				}
 			}()
 		}
 	}()
