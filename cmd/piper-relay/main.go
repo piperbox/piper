@@ -167,10 +167,6 @@ func main() {
 		fmt.Println(version.String())
 		return
 	}
-	dataDir := env("PIPER_RELAY_DATA_DIR", "./relay-data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		log.Fatalf("data dir: %v", err)
-	}
 	dsn := os.Getenv("PIPER_RELAY_DB_URL")
 	if dsn == "" {
 		log.Fatal("PIPER_RELAY_DB_URL is required (postgres://user:password@host/dbname)")

@@ -8,7 +8,5 @@
 FROM gcr.io/distroless/static-debian12
 ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/piper-relay /usr/local/bin/piper-relay
-ENV PIPER_RELAY_DATA_DIR=/var/lib/piper-relay
-VOLUME /var/lib/piper-relay
 EXPOSE 443 80 7000 8080
 ENTRYPOINT ["/usr/local/bin/piper-relay"]

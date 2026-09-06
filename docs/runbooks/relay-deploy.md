@@ -341,8 +341,10 @@ volumes:
   relay_pg:
 ```
 
-- **State** lives in Postgres. On K8s/ECS point `PIPER_RELAY_DB_URL` at a
-  managed instance and give the relay no volume at all beyond its certs.
+- **State** lives in Postgres; the relay writes nothing to disk. On K8s/ECS
+  point `PIPER_RELAY_DB_URL` at a managed instance and mount only the cert
+  pair (and the GitHub App key) read-only; `readOnlyRootFilesystem: true`
+  is fine.
 - **Certs and the GitHub App key** are file mounts, as before; the key must
   not be world-readable (mount `0600`).
 - **Admin/enroll** run in the relay container against the same database:
@@ -560,10 +562,6 @@ this section explains it and walks the cutover from the systemd unit.
    15 3 * * * root docker compose -f /opt/piper-relay/docker-compose.yml exec -T postgres \
      pg_dump -U piper_relay piper_relay | gzip > /var/backups/piper-relay-$(date +\%F).sql.gz
    ```
-
-`PIPER_RELAY_DATA_DIR` needs no mount: the image declares it as a volume and
-the relay only creates it. Everything it used to hold is addressed by the env
-vars above.
 
 **Cutover from the systemd unit**
 

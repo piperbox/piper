@@ -13,7 +13,6 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/piper-relay
-Environment=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay
 EnvironmentFile=-/etc/piper-relay.env
 DynamicUser=yes
 StateDirectory=piper-relay
