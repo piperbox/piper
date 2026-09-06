@@ -49,6 +49,8 @@ Both the agent and relay stores apply `schema.sql` with `CREATE TABLE IF NOT EXI
 
 Check `git diff <last-release-tag>..main -- '*/schema.sql'` and classify before writing upgrade notes.
 
+**A relay `schema.sql` change is always at least a minor bump.** The hosted relay is rolled by Flux with an image policy pinned to the current minor (`>=0.23.1 <0.24.0` style), so a patch tag goes live there unattended within ~10 minutes — onto a Postgres that still has the old table shape. A minor tag waits for the operator to run the `ALTER`/`DROP` and widen the policy; see the runbook's [Rolling out with Flux](../../../docs/runbooks/relay-deploy.md#rolling-out-with-flux).
+
 ### RC or straight to final?
 
 Use an RC when the release carries risk the tests can't cover — infrastructure changes, publishing-pipeline changes, or anything needing real-hardware validation. Otherwise tag final directly off green `main`.
@@ -147,7 +149,7 @@ Notes should cover, when applicable:
 
 - Any **manual upgrade step**, stated up front — not buried under a feature list
 - Whether a **fresh DB / re-enrollment** is needed (see the schema rule above)
-- **Relay-before-agents ordering**, whenever the agent↔relay wire protocol or a broker path changed. Deploying the hosted relay is a separate operator task, outside this skill.
+- **Relay-before-agents ordering**, whenever the agent↔relay wire protocol or a broker path changed. The hosted relay rolls itself for a patch (Flux, within ~10 minutes of the tag); a minor is rolled by the operator per the runbook. Either way, tell users to upgrade agents only once the relay they use is on the new version.
 - Known issues shipped open, with issue links — this project has a precedent of disclosing them rather than staying silent
 
 Verify the pointers landed:
@@ -161,3 +163,12 @@ gh release list --limit 5 --json tagName,isLatest,isPrerelease
 ## 7. Afterwards
 
 Update `PROGRESS.md` if the release completes anything tracked there, and leave issues to be closed by their PRs rather than by hand.
+
+**Hosted relay.** For a **patch** tag, confirm Flux rolled it (kubectl context `seedbox`):
+
+```sh
+flux get images all
+kubectl -n piper rollout status deployment/relay deployment/edge
+```
+
+For a **minor** tag the hosted relay stays on the old version until the operator applies the schema change and widens the image-policy ranges in `piperbox/relay-ops` — do that as a separate step per the runbook. Colocated and remote agents are upgraded afterwards (`apt-get install piperd piper` on the box, `brew upgrade` on the Mac).
