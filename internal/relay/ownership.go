@@ -138,6 +138,26 @@ func (s *Store) SetOwner(baseDomain, instanceID string) error {
 	return notify(s.db, chanOwners, baseDomain)
 }
 
+// SetOwners is SetOwner over every base in one round-trip, for the heartbeat
+// re-assert (#540): rows already there are left alone, missing ones are
+// inserted, and piper_owners fires once per inserted row from inside the
+// statement, so the announce-only-on-insert rule holds without a second
+// query. Bases the store does not know are skipped rather than reported —
+// a deleted agent's session is the watchdog's to evict.
+func (s *Store) SetOwners(baseDomains []string, instanceID string) error {
+	_, err := s.db.Exec(
+		`WITH want AS (
+		    SELECT name, base_domain FROM agents WHERE base_domain = ANY($1)),
+		 ins AS (
+		    INSERT INTO agent_owners(agent_name, instance_id, since)
+		    SELECT name, $2, now() FROM want
+		    ON CONFLICT DO NOTHING
+		    RETURNING agent_name)
+		 SELECT pg_notify($3, w.base_domain) FROM ins JOIN want w ON w.name = ins.agent_name`,
+		baseDomains, instanceID, chanOwners)
+	return err
+}
+
 // ClearOwner drops baseDomain's owner row only while instanceID still holds
 // it, so a relay whose half-open session dies late never removes the new
 // owner's row. Clearing a row someone else holds is a silent no-op.

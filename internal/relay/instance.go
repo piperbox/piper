@@ -123,17 +123,20 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 }
 
 // reassertOwnership records this instance as an owner of every base its
-// router holds. SetOwner is idempotent and silent when the row exists, so
-// this is one cheap insert per base per beat, and a relay whose row was
-// cascaded away — by an edge that found it undialable for one dial, say —
-// gets every owner row back on the next beat instead of staying dark until
-// each agent reconnects. It runs inside the beat, after the upsert, so our
-// own row is live before the owner rows point at it.
+// router holds. SetOwners is idempotent and silent for rows that exist, so
+// this is one statement per beat however many agents are held (#540), and
+// a relay whose rows were cascaded away — by an edge that found it
+// undialable for one dial, say — gets every owner row back on the next
+// beat instead of staying dark until each agent reconnects. It runs inside
+// the beat, after the upsert, so our own row is live before the owner rows
+// point at it.
 func (i *Instance) reassertOwnership(st *Store, router *Router) {
-	for _, base := range router.Bases() {
-		if err := st.SetOwner(base, i.ID); err != nil {
-			log.Printf("agent %s: re-record owner: %v", base, err)
-		}
+	bases := router.Bases()
+	if len(bases) == 0 {
+		return
+	}
+	if err := st.SetOwners(bases, i.ID); err != nil {
+		log.Printf("re-record %d owner rows: %v", len(bases), err)
 	}
 }
 

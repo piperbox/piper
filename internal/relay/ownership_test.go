@@ -3,6 +3,7 @@ package relay
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -177,6 +178,62 @@ func TestSetOwnerIsIdempotentAndNotifiesOnce(t *testing.T) {
 			if nt.payload == en.BaseDomain {
 				seen++
 			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("probe NOTIFY never arrived")
+		}
+	}
+}
+
+// The heartbeat re-asserts every held base in one statement (#540): rows
+// already there are left alone, missing ones are inserted, and only the
+// inserted ones are announced. An unknown base is skipped, not an error —
+// the watchdog evicts a deleted agent's session on its own.
+func TestSetOwnersInsertsMissingRowsAndNotifiesOnlyThose(t *testing.T) {
+	st := openTestStore(t)
+	en1 := enrollTestAgent(t, st)
+	acc, err := st.UpsertAccount("sub-1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	en2, err := st.EnrollForAccount(acc.ID, "box-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	en3, err := st.EnrollForAccount(acc.ID, "box-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stampInstance(t, st, "a", "127.0.0.1:1", time.Now())
+	if err := st.SetOwner(en1.BaseDomain, "a"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := startListener(t, st, chanOwners)
+
+	if err := st.SetOwners([]string{en1.BaseDomain, en2.BaseDomain, en3.BaseDomain, "nobody.example"}, "a"); err != nil {
+		t.Fatalf("SetOwners: %v", err)
+	}
+	for _, base := range []string{en1.BaseDomain, en2.BaseDomain, en3.BaseDomain} {
+		if ids := ownerIDs(t, st, base); strings.Join(ids, ",") != "a" {
+			t.Fatalf("owners of %s = %v, want [a]", base, ids)
+		}
+	}
+	if err := notify(st.db, chanOwners, "probe"); err != nil {
+		t.Fatal(err)
+	}
+	var fired []string
+	for {
+		select {
+		case nt := <-got:
+			if nt.payload == "probe" {
+				slices.Sort(fired)
+				want := []string{en2.BaseDomain, en3.BaseDomain}
+				slices.Sort(want)
+				if !slices.Equal(fired, want) {
+					t.Fatalf("piper_owners fired for %v, want exactly the inserted %v", fired, want)
+				}
+				return
+			}
+			fired = append(fired, nt.payload)
 		case <-time.After(3 * time.Second):
 			t.Fatal("probe NOTIFY never arrived")
 		}
