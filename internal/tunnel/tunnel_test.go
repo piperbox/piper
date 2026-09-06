@@ -694,3 +694,37 @@ func TestSessionPingFailsWithinTimeoutWhenPeerNeverAnswers(t *testing.T) {
 		t.Fatalf("Ping took %v, want it bounded by the 200ms timeout", elapsed)
 	}
 }
+
+// A preface that names no base is a misconfigured agent (an empty
+// PIPER_BASE_DOMAIN), not an attacker; it deserves the same undifferentiated
+// rejection a bad token gets instead of a bare EOF that only says the relay
+// hung up (#543). TCP, not net.Pipe: both handshake frames must land in the
+// relay's buffer so the agent reaches its ack read while the relay answers.
+func TestServeNamesTheRejectionOnAnEmptyBase(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = Serve(conn, func(string, string) error { return nil })
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	_, err = Dial(conn, "tok", "")
+	if err == nil {
+		t.Fatal("Dial accepted a handshake with no base domain")
+	}
+	if !strings.Contains(err.Error(), rejectedReason) {
+		t.Fatalf("Dial error = %q, want the undifferentiated reason %q", err, rejectedReason)
+	}
+}
