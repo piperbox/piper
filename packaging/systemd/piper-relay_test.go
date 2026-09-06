@@ -26,7 +26,6 @@ func TestPiperRelayServiceContract(t *testing.T) {
 		// slow to come up on boot leaves the unit permanently failed.
 		"StartLimitIntervalSec=0",
 		"ExecStart=/usr/local/bin/piper-relay",
-		"Environment=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay",
 		"EnvironmentFile=-/etc/piper-relay.env",
 		"DynamicUser=yes",
 		"StateDirectory=piper-relay",
@@ -70,7 +69,6 @@ func TestServiceDocumentation(t *testing.T) {
 	runbook := repositoryFile(t, "docs", "runbooks", "git-deploy-e2e.md")
 	for _, text := range []string{
 		"systemd-run",
-		"PIPER_RELAY_DATA_DIR=/var/lib/piper-relay",
 		"systemctl enable --now piper-relay",
 		"systemctl clean --what=state piper-relay",
 		"journalctl -u piper-relay",

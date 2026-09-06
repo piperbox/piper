@@ -371,3 +371,28 @@ func TestBasesToResyncNamesOnlyTheAffectedAgents(t *testing.T) {
 		}
 	}
 }
+
+// /readyz follows the pool row: 503 until the first heartbeat upsert lands
+// (an edge cannot see the relay before that), 200 until MarkDraining, then
+// 503 for good (#552).
+func TestHeartbeatFlipsReadiness(t *testing.T) {
+	st := openTestStore(t)
+	router := NewRouter()
+	inst, err := NewInstance("127.0.0.1", ":443", ":80", ":7000", ":8080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Ready == nil || inst.Ready.Ready() {
+		t.Fatal("fresh instance is ready before any heartbeat")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { inst.heartbeat(ctx, st, router); close(done) }()
+	waitCond(t, 3*time.Second, "ready after first heartbeat", inst.Ready.Ready)
+	inst.MarkDraining()
+	if inst.Ready.Ready() {
+		t.Fatal("still ready after MarkDraining")
+	}
+	cancel()
+	<-done
+}

@@ -100,7 +100,6 @@ type cluster struct {
 	opts clusterOpts
 	dsn  string
 	bin  string
-	dirs [2]string
 	proc [2]*exec.Cmd
 	st   *relay.Store
 }
@@ -111,9 +110,6 @@ type cluster struct {
 func startCluster(t *testing.T, ctx context.Context, o clusterOpts) *cluster {
 	t.Helper()
 	c := &cluster{t: t, ctx: ctx, opts: o, dsn: relaytest.DSN(t), bin: bins(t)}
-	for i := range c.dirs {
-		c.dirs[i] = t.TempDir()
-	}
 	for i := range relayLayout {
 		c.startRelay(i)
 	}
@@ -121,15 +117,13 @@ func startCluster(t *testing.T, ctx context.Context, o clusterOpts) *cluster {
 	return c
 }
 
-// startRelay starts (or restarts) relay i. A restart keeps the ports and the
-// data dir but mints a fresh instance id, which is what a rolling replace
-// does.
+// startRelay starts (or restarts) relay i. A restart keeps the ports but
+// mints a fresh instance id, which is what a rolling replace does.
 func (c *cluster) startRelay(i int) {
 	c.t.Helper()
 	a := relayLayout[i]
 	cmd := exec.CommandContext(c.ctx, filepath.Join(c.bin, "piper-relay"))
 	cmd.Env = append(os.Environ(),
-		"PIPER_RELAY_DATA_DIR="+c.dirs[i],
 		"PIPER_RELAY_DB_URL="+c.dsn,
 		"PIPER_RELAY_TLS_ADDR="+a.tls,
 		"PIPER_RELAY_HTTP_ADDR="+a.http,
@@ -202,7 +196,7 @@ func (c *cluster) relayAPI() string { return "http://" + relayLayout[0].api }
 func (c *cluster) enroll(name, baseDomain string) string {
 	c.t.Helper()
 	cmd := exec.Command(filepath.Join(c.bin, "piper-relay"), "enroll", name, "--domain", baseDomain)
-	cmd.Env = append(os.Environ(), "PIPER_RELAY_DATA_DIR="+c.dirs[0], "PIPER_RELAY_DB_URL="+c.dsn)
+	cmd.Env = append(os.Environ(), "PIPER_RELAY_DB_URL="+c.dsn)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		c.t.Fatalf("enroll: %v\n%s", err, out)

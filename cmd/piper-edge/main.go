@@ -73,8 +73,13 @@ func main() {
 	}
 	defer st.Close()
 
-	// Infra-only ops surface, same shape and defaults as the relay's.
-	opsAddr := env("PIPER_EDGE_OPS_ADDR", "127.0.0.1:9090")
+	// Infra-only ops surface, same shape, defaults and bind rule as the
+	// relay's: metrics and logs by toggle, /readyz + /livez whenever the
+	// listener binds — which it does when its address is set or a toggle is on.
+	opsAddr, opsAddrSet := os.LookupEnv("PIPER_EDGE_OPS_ADDR")
+	if opsAddr == "" {
+		opsAddr, opsAddrSet = "127.0.0.1:9090", false
+	}
 	metricsOn := os.Getenv("PIPER_EDGE_METRICS") == "1"
 	logsOn := os.Getenv("PIPER_EDGE_LOGS") == "1"
 	var metrics *relay.Metrics
@@ -86,10 +91,11 @@ func main() {
 		ring = relay.NewLogRing(1000)
 		log.SetOutput(io.MultiWriter(os.Stderr, ring))
 	}
-	if metricsOn || logsOn {
-		opsHandler := relay.NewOpsHandler(metrics, ring)
+	ready := &relay.Readiness{}
+	if opsAddrSet || metricsOn || logsOn {
+		opsHandler := relay.NewOpsHandler(metrics, ring, ready)
 		go func() {
-			log.Printf("piper-edge: ops endpoint %s (metrics=%v logs=%v)", opsAddr, metricsOn, logsOn)
+			log.Printf("piper-edge: ops endpoint %s (metrics=%v logs=%v probes=/readyz,/livez)", opsAddr, metricsOn, logsOn)
 			srv := &http.Server{Addr: opsAddr, Handler: opsHandler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 			if err := srv.ListenAndServe(); err != nil {
 				log.Fatalf("ops endpoint: %v", err)
@@ -100,7 +106,7 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	log.Printf("piper-edge: TLS %s, HTTP %s, tunnel %s, apex %s", cfg.TLSAddr, cfg.HTTPAddr, cfg.TunnelAddr, cfg.Apex)
-	if err := relay.ServeEdge(ctx, cfg, st, metrics); err != nil && !errors.Is(err, context.Canceled) {
+	if err := relay.ServeEdge(ctx, cfg, st, metrics, ready); err != nil {
 		log.Fatal(err)
 	}
 	log.Print("piper-edge: stopped")

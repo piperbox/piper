@@ -3,6 +3,7 @@ package relay
 import (
 	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
@@ -139,11 +140,59 @@ func (m *Metrics) StreamEnd() {
 	m.activeStreams.Dec()
 }
 
-// NewOpsHandler serves the relay's infra-only ops surface: /metrics when m is
-// non-nil, /logs when ring is non-nil. A nil argument means that endpoint is
+// Readiness is the probe state an orchestrator reads: starting until the
+// process can take new work, ready while it should, draining once it has
+// been told to stop and forever after (#552, #534). It says nothing about
+// Postgres: a relay whose database is down still splices every tunnel it
+// holds, and the edge's 15 s instance TTL — not a restart — is what retires
+// a relay that stopped heartbeating.
+type Readiness struct{ state atomic.Int32 }
+
+const (
+	readyStarting int32 = iota
+	readyReady
+	readyDraining
+)
+
+// The methods are nil-safe, like Metrics: an Instance built as a literal in
+// a test has no Readiness, and its transitions must not matter.
+
+// SetReady moves starting → ready. A draining instance stays draining.
+func (r *Readiness) SetReady() {
+	if r != nil {
+		r.state.CompareAndSwap(readyStarting, readyReady)
+	}
+}
+
+// SetDraining is final: from here /readyz is 503 until the process exits.
+func (r *Readiness) SetDraining() {
+	if r != nil {
+		r.state.Store(readyDraining)
+	}
+}
+
+// Ready reports whether /readyz answers 200.
+func (r *Readiness) Ready() bool { return r != nil && r.state.Load() == readyReady }
+
+func (r *Readiness) String() string {
+	if r == nil {
+		return "starting"
+	}
+	switch r.state.Load() {
+	case readyReady:
+		return "ready"
+	case readyDraining:
+		return "draining"
+	}
+	return "starting"
+}
+
+// NewOpsHandler serves the infra-only ops surface: /metrics when m is
+// non-nil, /logs when ring is non-nil, and the kubelet-shaped probes /livez
+// and /readyz when r is non-nil. A nil argument means that endpoint is
 // toggled off and 404s — the caller decides exposure purely by what it
 // constructs, so there is no config to consult here.
-func NewOpsHandler(m *Metrics, ring *LogRing) http.Handler {
+func NewOpsHandler(m *Metrics, ring *LogRing, r *Readiness) http.Handler {
 	mux := http.NewServeMux()
 	if m != nil {
 		mux.Handle("GET /metrics", promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{}))
@@ -154,6 +203,19 @@ func NewOpsHandler(m *Metrics, ring *LogRing) http.Handler {
 			for _, line := range ring.Lines() {
 				fmt.Fprintln(w, line)
 			}
+		})
+	}
+	if r != nil {
+		mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			fmt.Fprintln(w, "ok")
+		})
+		mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			if !r.Ready() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
+			fmt.Fprintln(w, r.String())
 		})
 	}
 	return mux

@@ -33,6 +33,14 @@ var edgeDialTimeout = 2 * time.Second
 // also evicts rows that expired silently, which no NOTIFY announces.
 var edgePollInterval = 15 * time.Second
 
+// edgeDrainTimeout bounds how long a cancelled edge keeps carrying the
+// connections it already accepted before returning and letting process exit
+// cut them (#534). Splices end on their own; :7000 forwards never do and
+// always take the whole grace, which is intended — HTTP through them still
+// works meanwhile and the relays behind are untouched. The runbook's edge
+// stop timeout is sized to this plus a margin.
+var edgeDrainTimeout = 20 * time.Second
+
 // errBackendDial marks a backend that could not be reached. forward has
 // already evicted it when this is returned.
 var errBackendDial = errors.New("edge: backend dial failed")
@@ -47,6 +55,8 @@ type edge struct {
 	m       *Metrics
 	apiHost string
 	dbDown  atomic.Bool
+	ready   *Readiness
+	live    atomic.Int64 // connections currently inside a handle*
 	// syncMu serializes a whole resync against a whole onNotify. Both write
 	// the same maps from two goroutines (poll and the listener), and without
 	// it a poll's snapshot, read before a NOTIFY and applied after it, would
@@ -56,13 +66,15 @@ type edge struct {
 
 // ServeEdge runs the public entrypoint: :443 by SNI, :80 by Host, :7000 by
 // load, each spliced to the owning relay behind a PROXY v2 header that
-// carries the client's address. Blocks until a listener fails or ctx is done.
-func ServeEdge(ctx context.Context, cfg EdgeConfig, st *Store, m *Metrics) error {
-	return newEdge(cfg, st, m).serve(ctx)
+// carries the client's address. Blocks until a listener fails or ctx is done;
+// on cancel it drains (#534) and returns nil once nothing is carried or the
+// deadline passes.
+func ServeEdge(ctx context.Context, cfg EdgeConfig, st *Store, m *Metrics, r *Readiness) error {
+	return newEdge(cfg, st, m, r).serve(ctx)
 }
 
-func newEdge(cfg EdgeConfig, st *Store, m *Metrics) *edge {
-	return &edge{cfg: cfg, st: st, state: newEdgeState(), m: m, apiHost: "api." + cfg.Apex}
+func newEdge(cfg EdgeConfig, st *Store, m *Metrics, r *Readiness) *edge {
+	return &edge{cfg: cfg, st: st, state: newEdgeState(), m: m, apiHost: "api." + cfg.Apex, ready: r}
 }
 
 // serve is ServeEdge's body, split off so a test can hold the edge and wait
@@ -103,21 +115,43 @@ func (e *edge) serve(ctx context.Context) error {
 					return
 				}
 				e.m.ConnAccepted(name)
-				go handle(conn)
+				e.live.Add(1)
+				go func() {
+					defer e.live.Add(-1)
+					handle(conn)
+				}()
 			}
 		}(ln, l.name, l.handle)
 	}
-	defer func() {
+	e.ready.SetReady()
+	select {
+	case err := <-errc:
 		for _, ln := range lns {
 			ln.Close()
 		}
-	}()
-	select {
-	case err := <-errc:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
 	}
+	// Drain (#534): stop being a target, stop accepting, then let what we
+	// carry finish — bounded, because :7000 forwards never end by themselves.
+	e.ready.SetDraining()
+	for _, ln := range lns {
+		ln.Close()
+	}
+	deadline := time.NewTimer(edgeDrainTimeout)
+	defer deadline.Stop()
+	tick := time.NewTicker(drainTick)
+	defer tick.Stop()
+	for e.live.Load() > 0 {
+		select {
+		case <-deadline.C:
+			log.Printf("edge: drain deadline %s reached; cutting %d connection(s)", edgeDrainTimeout, e.live.Load())
+			return nil
+		case <-tick.C:
+		}
+	}
+	log.Print("edge: drained; no connections left")
+	return nil
 }
 
 // resync reloads the pool and the owner map. dropNames also empties the

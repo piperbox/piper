@@ -115,7 +115,7 @@ func startRelayBehindEdge(t *testing.T, st *Store, tlsCfg *tls.Config) *edgeRela
 func startEdge(t *testing.T, st *Store) (EdgeConfig, *edge) {
 	t.Helper()
 	cfg := EdgeConfig{Apex: "public.getpiper.co", TLSAddr: freeTCPAddr(t), HTTPAddr: freeTCPAddr(t), TunnelAddr: freeTCPAddr(t)}
-	e := newEdge(cfg, st, NewEdgeMetrics())
+	e := newEdge(cfg, st, NewEdgeMetrics(), &Readiness{})
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	errc := make(chan error, 1)
@@ -695,4 +695,90 @@ func counterValue(t *testing.T, m *Metrics, series string) float64 {
 		}
 	}
 	return 0
+}
+
+// serveEdgeForDrain runs the edge like startEdge but hands back the cancel
+// and the serve result channel, which the drain tests need.
+func serveEdgeForDrain(t *testing.T, st *Store) (EdgeConfig, *edge, context.CancelFunc, <-chan error) {
+	t.Helper()
+	cfg := EdgeConfig{Apex: "public.getpiper.co", TLSAddr: freeTCPAddr(t), HTTPAddr: freeTCPAddr(t), TunnelAddr: freeTCPAddr(t)}
+	e := newEdge(cfg, st, NewEdgeMetrics(), &Readiness{})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	errc := make(chan error, 1)
+	go func() { errc <- e.serve(ctx) }()
+	waitCond(t, 5*time.Second, "edge ready", e.ready.Ready)
+	return cfg, e, cancel, errc
+}
+
+// On cancel the edge flips /readyz, refuses new dials, and waits for the
+// connections it is carrying — an idle :80 conn here — until they end (#534).
+func TestEdgeDrainWaitsForLiveConnections(t *testing.T) {
+	old := edgeDrainTimeout
+	edgeDrainTimeout = 5 * time.Second
+	t.Cleanup(func() { edgeDrainTimeout = old })
+
+	st := openTestStore(t)
+	cfg, e, cancel, errc := serveEdgeForDrain(t, st)
+
+	held, err := net.Dial("tcp", cfg.HTTPAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 2*time.Second, "edge sees the held conn", func() bool { return e.live.Load() == 1 })
+
+	cancel()
+	waitCond(t, 2*time.Second, "readiness flipped", func() bool { return !e.ready.Ready() })
+	if c, err := net.DialTimeout("tcp", cfg.TLSAddr, 300*time.Millisecond); err == nil {
+		c.Close()
+		t.Fatal("new dial accepted after cancel")
+	}
+	select {
+	case err := <-errc:
+		t.Fatalf("serve returned %v while a connection was still open", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	held.Close()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("serve returned %v after a clean drain, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not return once the last connection closed")
+	}
+}
+
+// A :7000 forward never ends on its own; the drain cuts it at the deadline
+// and serve still returns nil (#534).
+func TestEdgeDrainCutsForwardsAtTheDeadline(t *testing.T) {
+	old := edgeDrainTimeout
+	edgeDrainTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { edgeDrainTimeout = old })
+
+	st := openTestStore(t)
+	cfg, e, cancel, errc := serveEdgeForDrain(t, st)
+	r := startRelayBehindEdge(t, st, nil)
+	en := enrollTestAgent(t, st)
+	sess, _ := dialAgentThroughEdge(t, cfg, en)
+	waitEdgeSessions(t, e, r.inst.ID, 1)
+
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("serve returned %v, want nil", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("serve did not return at the drain deadline")
+	}
+	if took := time.Since(start); took < edgeDrainTimeout {
+		t.Fatalf("serve returned after %s, before the %s deadline", took, edgeDrainTimeout)
+	}
+	// serve returning is the process-exit point in cmd/piper-edge; in-process
+	// the forward is still spliced, so close the agent side and make sure
+	// the handler goroutine ends (live drops to 0) rather than leaking.
+	sess.Close()
+	waitCond(t, 3*time.Second, "handler goroutines gone", func() bool { return e.live.Load() == 0 })
 }

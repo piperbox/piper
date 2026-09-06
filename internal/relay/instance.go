@@ -27,6 +27,9 @@ type Instance struct {
 	APIAddr    string
 	// Zone is the failure zone from PIPER_RELAY_ZONE; "" when unset (#531).
 	Zone string
+	// Ready is what /readyz reports: set on the first successful heartbeat
+	// upsert, cleared for good by MarkDraining (#552).
+	Ready *Readiness
 	// draining is set once, on SIGTERM, and never cleared: from then on the
 	// heartbeat row says so and acceptTunnels refuses new sessions (#523).
 	draining atomic.Bool
@@ -34,7 +37,10 @@ type Instance struct {
 
 // MarkDraining flips this instance into its final state: every heartbeat
 // from now on carries draining=true and acceptTunnels refuses new sessions.
-func (i *Instance) MarkDraining() { i.draining.Store(true) }
+func (i *Instance) MarkDraining() {
+	i.draining.Store(true)
+	i.Ready.SetDraining()
+}
 
 // Draining reports whether MarkDraining has been called.
 func (i *Instance) Draining() bool { return i.draining.Load() }
@@ -55,7 +61,7 @@ func NewInstance(advertiseHost, tlsAddr, httpAddr, tunnelAddr, apiAddr string) (
 	if _, err := rand.Read(raw[:]); err != nil {
 		return nil, err
 	}
-	inst := &Instance{ID: hex.EncodeToString(raw[:]), StartedAt: time.Now().UTC()}
+	inst := &Instance{ID: hex.EncodeToString(raw[:]), StartedAt: time.Now().UTC(), Ready: &Readiness{}}
 	for _, a := range []struct {
 		dst  *string
 		addr string
@@ -103,6 +109,8 @@ func (i *Instance) heartbeat(ctx context.Context, st *Store, router *Router) {
 		agents, _, _ := router.Counts()
 		if err := st.UpsertInstance(i.row(agents)); err != nil {
 			log.Printf("relay: heartbeat: %v", err)
+		} else {
+			i.Ready.SetReady()
 		}
 		i.reassertOwnership(st, router)
 	}

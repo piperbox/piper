@@ -123,7 +123,6 @@ Enroll the box before starting the service, then enable it at boot:
 sudo systemd-run --pipe --wait --collect \
   --property=DynamicUser=yes \
   --property=StateDirectory=piper-relay \
-  --setenv=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay \
   --setenv=PIPER_RELAY_DB_URL=postgres://… \
   /usr/local/bin/piper-relay enroll <name> --domain <base-domain>
 sudo systemctl enable --now piper-relay

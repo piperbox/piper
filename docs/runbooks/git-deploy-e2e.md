@@ -114,7 +114,6 @@ service:
 sudo systemd-run --pipe --wait --collect \
   --property=DynamicUser=yes \
   --property=StateDirectory=piper-relay \
-  --setenv=PIPER_RELAY_DATA_DIR=/var/lib/piper-relay \
   --setenv=PIPER_RELAY_DB_URL=postgres://… \
   /usr/local/bin/piper-relay enroll alice --domain <base>
 #   enrolled alice for <base>
