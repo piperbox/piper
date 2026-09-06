@@ -167,6 +167,8 @@ the row is deleted and in-flight webhook deliveries park (up to 35 s more).
 Give it a 60 s stop timeout: systemd's default `TimeoutStopSec` (90 s)
 already covers it; on compose that is `stop_grace_period: 60s`, on ECS
 `stopTimeout: 60`, on Kubernetes `terminationGracePeriodSeconds: 60`.
+The edge's own drain is 20 s; give it 30 s (compose `stop_grace_period: 30s`,
+Kubernetes `terminationGracePeriodSeconds: 30`).
 The relay reads the signal channel once, so a second SIGTERM (another
 `docker stop` or Ctrl-C) during the drain changes nothing — the only
 escalation is SIGKILL, which the orchestrator sends once the stop timeout
@@ -294,9 +296,10 @@ re-enrolled against the new DB must `piper login --re-enroll` once more.
 - Logs: `journalctl -u piper-relay -f`
 - Admin CLI (runs against the same `PIPER_RELAY_DB_URL`): `piper-relay admin …`
   via the same transient-unit pattern as `enroll`
-- Optional ops listener on `127.0.0.1:9090` (`PIPER_RELAY_OPS_ADDR`);
-  `PIPER_RELAY_METRICS=1` / `PIPER_RELAY_LOGS=1` to enable metrics/log
-  endpoints
+- Optional ops listener on `127.0.0.1:9090` (`PIPER_RELAY_OPS_ADDR`; binds
+  when set or when either toggle is on); `PIPER_RELAY_METRICS=1` /
+  `PIPER_RELAY_LOGS=1` enable metrics/log endpoints; `/readyz` and `/livez`
+  are always served on it
 
 ---
 
@@ -476,30 +479,80 @@ snippet above and the Hetzner file both do). Add capacity with
 relies on. Each relay's ops endpoint is on its own container IP; scrape it
 there or publish it per replica.
 
-**Kubernetes.** `piper-edge` as a Deployment behind a TCP Service that holds
-the public IP (or a cloud NLB with PROXY protocol and
-`PIPER_EDGE_PROXY_PROTOCOL=1`; otherwise `externalTrafficPolicy: Local`).
-`piper-relay` as a Deployment with `PIPER_RELAY_ADVERTISE_HOST` from the
-downward API (`status.podIP`), `PIPER_RELAY_PROXY_PROTOCOL=1`, and a
-NetworkPolicy admitting only edge pods and other relays.
-`PIPER_RELAY_ZONE` comes from the node's `topology.kubernetes.io/zone`
-label: the downward API cannot read node labels, so either run one relay
-Deployment per zone with the value hard-coded and a node selector, or have
-an init step copy the label in. On ECS the task metadata endpoint
-(`${ECS_CONTAINER_METADATA_URI_V4}/task`, field `AvailabilityZone`) reports
-the zone; an entrypoint exports it before `exec`ing `piper-relay`. An L7 ingress may
-terminate `api.<apex>` with a cert-manager certificate and route it to the
-relays' `:8080` Service — that port is plain HTTP written to be fronted with
-TLS — with DNS pointing `api.<apex>` at the ingress and the wildcard at the
-edge. The ingress must never take the wildcard: per-hostname routing to the
-owning pod is the dynamic map the edge exists to hold, and box-held
-certificates need L4 passthrough anyway.
+### Kubernetes
+
+`piper-edge` is a Deployment behind a TCP Service that holds the public IP
+(or a cloud NLB speaking PROXY protocol, with `PIPER_EDGE_PROXY_PROTOCOL=1`;
+otherwise `externalTrafficPolicy: Local`). `piper-relay` is a Deployment
+with `PIPER_RELAY_PROXY_PROTOCOL=1` and a NetworkPolicy admitting only edge
+pods and other relays (the `:8080` control hop). The knobs each needs:
+
+```yaml
+# relay Deployment — the parts that are not just env from this runbook
+strategy:
+  rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }   # replacement in the pool before the old one drains
+template:
+  spec:
+    terminationGracePeriodSeconds: 60                  # drain 20s + leave 5s + webhooks 35s
+    securityContext:
+      runAsNonRoot: true
+      fsGroup: 65532
+      sysctls: [{ name: net.ipv4.ip_unprivileged_port_start, value: "0" }]  # :443/:80 as uid 65532
+    containers:
+      - name: relay
+        image: ghcr.io/piperbox/piper-relay:<version>  # runs as uid 65532
+        env:
+          - { name: PIPER_RELAY_ADVERTISE_HOST, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
+          - { name: PIPER_RELAY_OPS_ADDR, value: ":9090" }  # kubelet + Prometheus; default is loopback
+          - { name: PIPER_RELAY_PROXY_PROTOCOL, value: "1" }
+        readinessProbe: { httpGet: { path: /readyz, port: 9090 }, periodSeconds: 2 }
+        livenessProbe:  { httpGet: { path: /livez,  port: 9090 }, periodSeconds: 10 }
+        securityContext: { readOnlyRootFilesystem: true }
+        volumeMounts:
+          - { name: app-key, mountPath: /etc/piper-relay, readOnly: true }
+    volumes:
+      - name: app-key
+        secret: { secretName: piper-relay-github-app, defaultMode: 0400 }  # the 0644 default is refused as world-readable
+```
+
+- **`/readyz`** is 503 until the relay's first heartbeat row lands (an edge
+  cannot route to it before that) and from SIGTERM onward; **`/livez`** is
+  200 whenever the process answers. Neither depends on Postgres: a relay
+  with its database down still serves every tunnel it holds, and the edge's
+  15 s instance TTL is what retires one that stopped heartbeating. Both
+  probes live on the ops listener, which binds when `PIPER_RELAY_OPS_ADDR`
+  is set or metrics/logs are on.
+- **Edge:** `terminationGracePeriodSeconds: 30` and a
+  `lifecycle.preStop.exec.command: ["sleep", "5"]` so the Service has
+  removed the endpoint before the edge stops accepting; on SIGTERM it flips
+  `/readyz`, refuses new connections and carries existing ones for up to
+  20 s (#534). Its `PIPER_EDGE_OPS_ADDR=:9090` serves the same probes. The
+  edge image runs as root because it binds `:443/:80/:7000`; to run it
+  non-root use the same `ip_unprivileged_port_start` sysctl (safe since
+  1.22) with `runAsUser: 65532`.
+- **Zone:** `PIPER_RELAY_ZONE` should carry the node's
+  `topology.kubernetes.io/zone`; the downward API cannot read node labels,
+  so run one relay Deployment per zone with the value hard-coded and a node
+  selector, or have an init step copy the label in. On ECS the task metadata
+  endpoint (`${ECS_CONTAINER_METADATA_URI_V4}/task`, field
+  `AvailabilityZone`) reports the zone; an entrypoint exports it before
+  `exec`ing `piper-relay`.
+- **Postgres:** a direct connection or a session-mode pooler. Both binaries
+  hold a `LISTEN` connection, which a transaction-mode PgBouncer silently
+  breaks. Concurrent first start against an empty database is safe (#555).
+- **`api.<apex>`** may be terminated by an L7 ingress with a cert-manager
+  certificate and routed to the relays' `:8080` Service — that port is plain
+  HTTP written to be fronted with TLS — with DNS pointing `api.<apex>` at the
+  ingress and the wildcard at the edge. The ingress must never take the
+  wildcard: per-hostname routing to the owning pod is the dynamic map the
+  edge exists to hold, and box-held certificates need L4 passthrough anyway.
 
 **What still drops.** A relay restart closes one of each agent's two
 sessions, and the edge routes through the other while the lost slot redials
 onto the replacement (#530); nothing is unrouted. Restarting the edge on a
-single host drops every tunnel through it (on Kubernetes the Service holds
-the port across a rolling restart). Both relays drain at once if they are
+single host still drops every tunnel through it — a replacement cannot bind
+the ports until the old one exits; behind a Service the edge drains (#534)
+and only `:7000` forwards are cut, at the 20 s deadline. Both relays drain at once if they are
 recreated together, and a plain `docker compose up -d` does that: it
 recreates every replica of a scaled service within the same second, and
 `COMPOSE_PARALLEL_LIMIT=1` does not change it (it bounds concurrent engine
