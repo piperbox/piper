@@ -5,13 +5,13 @@
 # compile stage here, so a bare `docker build -f Dockerfile.relay .` from a
 # checkout will not work. Use `goreleaser release --snapshot` instead.
 
-# :nonroot (uid 65532). Docker 20.10+ lets a bridge-networked container bind
-# :443/:80 unprivileged, so the compose relays are unaffected; a Kubernetes
-# pod needs the net.ipv4.ip_unprivileged_port_start=0 sysctl or high listener
-# ports (runbook). readAppKey only checks world bits, so a 0400 Secret mount
-# still loads. Dockerfile.edge stays root — on a host-networked compose edge
-# no sysctl applies and a non-root process cannot bind :443 (#554).
-FROM gcr.io/distroless/static-debian12:nonroot
+# Root, not :nonroot (#554): the compose layout bind-mounts certbot's tree
+# (live/ and archive/ are 0700 root, privkey 0600 root) and a 0600 root
+# GitHub App key, which uid 65532 cannot read — the relay would crash-loop on
+# the next version bump. On Kubernetes run it as 65532 with runAsUser +
+# fsGroup and the ip_unprivileged_port_start sysctl; the runbook has the
+# snippet. The image flips once the host layout has a non-root recipe.
+FROM gcr.io/distroless/static-debian12
 ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/piper-relay /usr/local/bin/piper-relay
 EXPOSE 443 80 7000 8080

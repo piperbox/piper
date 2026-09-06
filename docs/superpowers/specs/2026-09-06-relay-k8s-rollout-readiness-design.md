@@ -102,6 +102,16 @@ dir. No compatibility for the removed env var (pre-1.0 policy).
 
 ## Non-root image, relay only (#554)
 
+> **Amended after review, 2026-09-06.** Not shipped. The compose layout
+> bind-mounts certbot's `/etc/letsencrypt` (0700 root directories, 0600
+> root private key) and a 0600 root GitHub App key; uid 65532 cannot read
+> either, and both `LoadWildcardConfig` and `readAppKey` are fatal, so the
+> Hetzner relays would crash-loop on the next version bump. Both images
+> stay root. Non-root on Kubernetes is a `runAsUser: 65532` + `fsGroup` +
+> sysctl recipe in the runbook, which works because Secret mounts honour
+> `fsGroup`. #554 stays open for both halves, blocked on a host-side
+> recipe for the compose mounts.
+
 `Dockerfile.relay` moves to `gcr.io/distroless/static-debian12:nonroot`
 (uid 65532). Behind an edge the relay has no privileged-port need, and the
 GitHub App key check looks only at world bits, so a `0400` Secret mount

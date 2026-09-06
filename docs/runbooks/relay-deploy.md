@@ -495,12 +495,13 @@ template:
   spec:
     terminationGracePeriodSeconds: 60                  # drain 20s + leave 5s + webhooks 35s
     securityContext:
+      runAsUser: 65532                                 # image is root by default (#554)
       runAsNonRoot: true
-      fsGroup: 65532
+      fsGroup: 65532                                   # Secret files readable by 65532
       sysctls: [{ name: net.ipv4.ip_unprivileged_port_start, value: "0" }]  # :443/:80 as uid 65532
     containers:
       - name: relay
-        image: ghcr.io/piperbox/piper-relay:<version>  # runs as uid 65532
+        image: ghcr.io/piperbox/piper-relay:<version>
         env:
           - { name: PIPER_RELAY_ADVERTISE_HOST, valueFrom: { fieldRef: { fieldPath: status.podIP } } }
           - { name: PIPER_RELAY_OPS_ADDR, value: ":9090" }  # kubelet + Prometheus; default is loopback
@@ -526,10 +527,10 @@ template:
   `lifecycle.preStop.exec.command: ["sleep", "5"]` so the Service has
   removed the endpoint before the edge stops accepting; on SIGTERM it flips
   `/readyz`, refuses new connections and carries existing ones for up to
-  20 s (#534). Its `PIPER_EDGE_OPS_ADDR=:9090` serves the same probes. The
-  edge image runs as root because it binds `:443/:80/:7000`; to run it
-  non-root use the same `ip_unprivileged_port_start` sysctl (safe since
-  1.22) with `runAsUser: 65532`.
+  20 s (#534). Its `PIPER_EDGE_OPS_ADDR=:9090` serves the same probes. Both
+  images run as root by default (#554: the compose layout's cert and key
+  mounts are root-owned); the same `runAsUser: 65532` plus the sysctl (safe
+  since 1.22) makes the edge non-root too.
 - **Zone:** `PIPER_RELAY_ZONE` should carry the node's
   `topology.kubernetes.io/zone`; the downward API cannot read node labels,
   so run one relay Deployment per zone with the value hard-coded and a node
