@@ -207,3 +207,20 @@ func TestZoneEnvIsOptional(t *testing.T) {
 		t.Fatalf("zone = %q, want eu-central-1a", inst.Zone)
 	}
 }
+
+func TestOpsWanted(t *testing.T) {
+	cases := []struct {
+		addrSet, metrics, logs, want bool
+	}{
+		{false, false, false, false},
+		{true, false, false, true},
+		{false, true, false, true},
+		{false, false, true, true},
+		{true, true, true, true},
+	}
+	for _, c := range cases {
+		if got := opsWanted(c.addrSet, c.metrics, c.logs); got != c.want {
+			t.Errorf("opsWanted(%v,%v,%v) = %v, want %v", c.addrSet, c.metrics, c.logs, got, c.want)
+		}
+	}
+}

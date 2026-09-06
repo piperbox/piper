@@ -76,6 +76,13 @@ func readAppKey(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
+// opsWanted decides whether the ops listener binds at all: when its address
+// was set explicitly, or when either endpoint toggle is on. Default-address
+// binding would clash where several relays share a host (the e2e harness),
+// so probes come for free only once an operator has pointed the listener
+// somewhere — which a Kubernetes manifest must do for the kubelet anyway.
+func opsWanted(addrSet, metrics, logs bool) bool { return addrSet || metrics || logs }
+
 func atoiOr(s string, def int) int {
 	if n, err := strconv.Atoi(s); err == nil {
 		return n
@@ -283,11 +290,15 @@ func main() {
 
 	router := relay.NewRouter()
 
-	// Infra-only ops surface (metrics + log export). Isolation is the bind
-	// address — loopback by default, a private VPC IP in production — never
-	// the SNI dispatcher, so no public hostname can route here. Each endpoint
-	// is off unless its toggle is set; with neither, nothing binds at all.
-	opsAddr := env("PIPER_RELAY_OPS_ADDR", "127.0.0.1:9090")
+	// Infra-only ops surface (metrics, log export, /readyz + /livez).
+	// Isolation is the bind address — loopback by default, a private VPC IP
+	// or the pod IP in production — never the SNI dispatcher, so no public
+	// hostname can route here. Metrics and logs are off unless toggled; the
+	// probes ride along whenever the listener binds (see opsWanted).
+	opsAddr, opsAddrSet := os.LookupEnv("PIPER_RELAY_OPS_ADDR")
+	if opsAddr == "" {
+		opsAddr, opsAddrSet = "127.0.0.1:9090", false
+	}
 	metricsOn := os.Getenv("PIPER_RELAY_METRICS") == "1"
 	logsOn := os.Getenv("PIPER_RELAY_LOGS") == "1"
 	var metrics *relay.Metrics
@@ -299,10 +310,10 @@ func main() {
 		ring = relay.NewLogRing(1000)
 		log.SetOutput(io.MultiWriter(os.Stderr, ring))
 	}
-	if metricsOn || logsOn {
-		opsHandler := relay.NewOpsHandler(metrics, ring, nil)
+	if opsWanted(opsAddrSet, metricsOn, logsOn) {
+		opsHandler := relay.NewOpsHandler(metrics, ring, inst.Ready)
 		go func() {
-			log.Printf("piper-relay: ops endpoint %s (metrics=%v logs=%v)", opsAddr, metricsOn, logsOn)
+			log.Printf("piper-relay: ops endpoint %s (metrics=%v logs=%v probes=/readyz,/livez)", opsAddr, metricsOn, logsOn)
 			srv := &http.Server{Addr: opsAddr, Handler: opsHandler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 			if err := srv.ListenAndServe(); err != nil {
 				log.Fatalf("ops endpoint: %v", err)
