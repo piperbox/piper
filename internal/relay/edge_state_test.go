@@ -6,6 +6,16 @@ import (
 	"time"
 )
 
+// ownerOf is the first choice among ownersOf; production routes through
+// ownersOf with retry, so only tests want the single answer.
+func (s *edgeState) ownerOf(agent string) (InstanceRow, bool) {
+	owners := s.ownersOf(agent)
+	if len(owners) == 0 {
+		return InstanceRow{}, false
+	}
+	return owners[0], true
+}
+
 func instRow(id string, started time.Time, sessions int) InstanceRow {
 	return InstanceRow{ID: id, StartedAt: started, Sessions: sessions,
 		TLSAddr: id + ":443", HTTPAddr: id + ":80", TunnelAddr: id + ":7000", APIAddr: id + ":8080"}

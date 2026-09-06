@@ -664,12 +664,14 @@ func TestServeTunnelNeverClearsAnotherRelaysOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	sess.Close()
-	waitCond(t, 3*time.Second, "stale session unregistered", func() bool {
-		_, ok := router.Lookup(en.BaseDomain)
-		return !ok
+	// Teardown unregisters first and clears the owner row after, so wait on
+	// the rows: ours goes, theirs stays. A clear that took theirs too would
+	// never reach this state.
+	waitCond(t, 3*time.Second, "only the other relay's owner row left", func() bool {
+		return strings.Join(ownerIDs(t, st, en.BaseDomain), ",") == other.ID
 	})
-	if got := ownerIDs(t, st, en.BaseDomain); strings.Join(got, ",") != other.ID {
-		t.Fatalf("owners after stale unregister = %v, want [%s]", got, other.ID)
+	if _, ok := router.Lookup(en.BaseDomain); ok {
+		t.Fatal("stale session still registered after its owner row was cleared")
 	}
 }
 

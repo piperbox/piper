@@ -321,17 +321,21 @@ func clearOwner(st *Store, router *Router, baseDomain string, inst *Instance) {
 // where both already write. Expired pending custom domains are filtered by
 // the store, so a squat dies here even if never contested (#227). A read
 // failure leaves the current entries in place; the next NOTIFY or beat
-// retries.
+// retries. A store closed by shutdown fails the same way and is not logged.
 func syncRoutes(st *Store, router *Router, base string, sess *tunnel.Session) {
 	hosts, err := st.HostnamesFor(base)
 	if err != nil {
-		log.Printf("agent %s: derive hostnames: %v", base, err)
+		if !st.Closed() {
+			log.Printf("agent %s: derive hostnames: %v", base, err)
+		}
 	} else {
 		router.SetHosts(sess, hosts)
 	}
 	domains, err := st.CustomDomains(base)
 	if err != nil {
-		log.Printf("agent %s: derive custom domains: %v", base, err)
+		if !st.Closed() {
+			log.Printf("agent %s: derive custom domains: %v", base, err)
+		}
 	} else {
 		router.SetCustom(sess, domains)
 	}

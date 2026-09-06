@@ -209,8 +209,9 @@ so a release that changes either is dropped with
 The drop is mandatory and is the only thing that matters for this release:
 both `piper-relay` and `piper-edge` apply the same `schema.sql`, so after
 the drop whichever binary opens the store first re-creates the tables with
-the new column. Skip the drop and every new relay's heartbeat fails,
-leaving the whole pool unplaceable regardless of roll order. The #530
+the new column. For #523 a skipped drop is loud: every new relay's
+heartbeat fails, leaving the whole pool unplaceable regardless of roll
+order. The #530
 release changes `agent_owners`' primary key and needs this drop; it also
 changes the tunnel handshake, so agents on the previous release cannot
 connect until they are upgraded — roll relays and edge first, then every

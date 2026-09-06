@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -90,6 +91,19 @@ func scanInstance(sc interface{ Scan(...any) error }) (InstanceRow, error) {
 	return r, err
 }
 
+// ownerCols is instanceCols qualified for the agent_owners join, preceded
+// by the agent's base domain; scanOwnerRow reads exactly this projection.
+var ownerCols = "a.base_domain, i." + strings.ReplaceAll(instanceCols, ", ", ", i.")
+
+func scanOwnerRow(sc interface{ Scan(...any) error }) (string, InstanceRow, error) {
+	var base string
+	var r InstanceRow
+	var zone sql.NullString
+	err := sc.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining, &zone)
+	r.Zone = zone.String
+	return base, r, err
+}
+
 // LiveInstances lists the instances heard from within instanceTTL, earliest
 // started first (ties by id, so the order is total).
 func (s *Store) LiveInstances() ([]InstanceRow, error) {
@@ -157,7 +171,7 @@ func (s *Store) ClearOwner(baseDomain, instanceID string) error {
 
 // ownerSelect is the instance projection OwnerOf and Owners share, with the
 // same total order LiveInstances uses so callers can tie-break the same way.
-var ownerSelect = `SELECT a.base_domain, i.id, i.started_at, i.sessions, i.tls_addr, i.http_addr, i.tunnel_addr, i.api_addr, i.draining, i.zone
+var ownerSelect = `SELECT ` + ownerCols + `
 	   FROM agent_owners o
 	   JOIN agents a ON a.name = o.agent_name
 	   JOIN relay_instances i ON i.id = o.instance_id
@@ -174,13 +188,10 @@ func (s *Store) OwnerOf(baseDomain string) ([]InstanceRow, error) {
 	defer rows.Close()
 	var out []InstanceRow
 	for rows.Next() {
-		var base string
-		var r InstanceRow
-		var zone sql.NullString
-		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining, &zone); err != nil {
+		_, r, err := scanOwnerRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		r.Zone = zone.String
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -196,10 +207,8 @@ func (s *Store) Owners() (map[string][]string, error) {
 	defer rows.Close()
 	out := map[string][]string{}
 	for rows.Next() {
-		var base string
-		var r InstanceRow
-		var zone sql.NullString
-		if err := rows.Scan(&base, &r.ID, &r.StartedAt, &r.Sessions, &r.TLSAddr, &r.HTTPAddr, &r.TunnelAddr, &r.APIAddr, &r.Draining, &zone); err != nil {
+		base, r, err := scanOwnerRow(rows)
+		if err != nil {
 			return nil, err
 		}
 		out[base] = append(out[base], r.ID)
