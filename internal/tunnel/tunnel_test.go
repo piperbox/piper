@@ -558,7 +558,11 @@ func TestNumStreamsFollowsOpenAndClose(t *testing.T) {
 func TestReadPrefaceReturnsBaseAndLeavesCredentialUnread(t *testing.T) {
 	c, s := net.Pipe()
 	t.Cleanup(func() { c.Close(); s.Close() })
-	go Dial(c, "tok-123", "alice.example.com")
+	dialErr := make(chan error, 1)
+	go func() {
+		_, err := Dial(c, "tok-123", "alice.example.com")
+		dialErr <- err
+	}()
 
 	base, raw, err := ReadPreface(s)
 	if err != nil {
@@ -583,6 +587,12 @@ func TestReadPrefaceReturnsBaseAndLeavesCredentialUnread(t *testing.T) {
 	if err := json.Unmarshal(next, &cred); err != nil || cred.Token != "tok-123" {
 		t.Fatalf("credential frame = %q (%v), want the token", next, err)
 	}
+	// Dial got both frames out and is waiting on the ack: hanging up now
+	// must fail it there, not earlier in the handshake write.
+	s.Close()
+	if err := <-dialErr; err == nil || !strings.Contains(err.Error(), "awaiting relay handshake ack") {
+		t.Fatalf("Dial error = %v, want it to fail at the ack wait", err)
+	}
 }
 
 func TestReadPrefaceRejectsAnEmptyBase(t *testing.T) {
@@ -594,6 +604,17 @@ func TestReadPrefaceRejectsAnEmptyBase(t *testing.T) {
 	}()
 	if _, _, err := ReadPreface(s); err == nil {
 		t.Fatal("ReadPreface accepted a preface with no base domain")
+	}
+}
+
+// A short read carries frame context the way Dial's and Serve's own errors do.
+func TestReadPrefaceWrapsAShortRead(t *testing.T) {
+	c, s := net.Pipe()
+	c.Close()
+	t.Cleanup(func() { s.Close() })
+	_, _, err := ReadPreface(s)
+	if err == nil || !strings.Contains(err.Error(), "reading preface frame") {
+		t.Fatalf("ReadPreface error = %v, want frame context", err)
 	}
 }
 
@@ -692,5 +713,39 @@ func TestSessionPingFailsWithinTimeoutWhenPeerNeverAnswers(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("Ping took %v, want it bounded by the 200ms timeout", elapsed)
+	}
+}
+
+// A preface that names no base is a misconfigured agent (an empty
+// PIPER_BASE_DOMAIN), not an attacker; it deserves the same undifferentiated
+// rejection a bad token gets instead of a bare EOF that only says the relay
+// hung up (#543). TCP, not net.Pipe: both handshake frames must land in the
+// relay's buffer so the agent reaches its ack read while the relay answers.
+func TestServeNamesTheRejectionOnAnEmptyBase(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = Serve(conn, func(string, string) error { return nil })
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	_, err = Dial(conn, "tok", "")
+	if err == nil {
+		t.Fatal("Dial accepted a handshake with no base domain")
+	}
+	if !strings.Contains(err.Error(), rejectedReason) {
+		t.Fatalf("Dial error = %q, want the undifferentiated reason %q", err, rejectedReason)
 	}
 }

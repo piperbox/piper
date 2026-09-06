@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -58,7 +59,8 @@ func (s *edgeState) setOwners(m map[string][]string) {
 	}
 }
 
-// setOwner replaces one agent's owner set; an empty set clears it.
+// setOwner replaces one agent's owner set; an empty set clears it. ids is
+// retained, so the caller hands over a slice it will not touch again.
 func (s *edgeState) setOwner(agent string, ids []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -66,7 +68,7 @@ func (s *edgeState) setOwner(agent string, ids []string) {
 		delete(s.owners, agent)
 		return
 	}
-	s.owners[agent] = append([]string(nil), ids...)
+	s.owners[agent] = ids
 }
 
 // evict drops an instance the edge found dead on dial, out of every owner
@@ -76,6 +78,9 @@ func (s *edgeState) evict(id string) {
 	defer s.mu.Unlock()
 	delete(s.instances, id)
 	for agent, ids := range s.owners {
+		if !slices.Contains(ids, id) {
+			continue
+		}
 		kept := make([]string, 0, len(ids))
 		for _, o := range ids {
 			if o != id {
@@ -117,15 +122,6 @@ func (s *edgeState) ownersOf(agent string) []InstanceRow {
 	return out
 }
 
-// ownerOf is the first choice among ownersOf.
-func (s *edgeState) ownerOf(agent string) (InstanceRow, bool) {
-	owners := s.ownersOf(agent)
-	if len(owners) == 0 {
-		return InstanceRow{}, false
-	}
-	return owners[0], true
-}
-
 // pickAPI spreads api.<apex> across the live pool. Login-flow state lives in
 // Postgres (#522), so any relay answers any control-plane request; a stable
 // order plus a cursor gives each relay its turn. Eviction or a resync just
@@ -156,8 +152,9 @@ func (s *edgeState) pickAPI() (InstanceRow, bool) {
 // Zone is a preference — a relay with no zone never clashes, and a pool
 // entirely in the owner's zone just falls through to the load order. The
 // owner exclusion is soft: if it empties the pool the pick runs again over
-// every relay and the one dialled rejects the duplicate after auth, so a
-// claimed base never changes what an unauthenticated peer can observe.
+// every relay and the one dialled rejects the duplicate after auth. The
+// claimed base steers which relay is dialled, but every refusal reads the
+// same, so an unauthenticated peer learns nothing about who owns what.
 func (s *edgeState) pickTunnel(base string, exclude map[string]bool) (InstanceRow, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

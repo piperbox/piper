@@ -157,17 +157,22 @@ func readFrame(r io.Reader) ([]byte, error) {
 func ReadPreface(r io.Reader) (string, []byte, error) {
 	payload, raw, err := readFrameRaw(r)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("reading preface frame: %w", err)
 	}
 	var p preface
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return "", nil, fmt.Errorf("malformed preface: %w", err)
+		return "", nil, fmt.Errorf("%w: %v", errBadPreface, err)
 	}
 	if p.BaseDomain == "" {
-		return "", nil, errors.New("preface names no base domain")
+		return "", nil, fmt.Errorf("%w: names no base domain", errBadPreface)
 	}
 	return p.BaseDomain, raw, nil
 }
+
+// errBadPreface marks a preface frame that arrived whole but is unusable, as
+// opposed to a read that timed out or hit EOF: a peer that sent one is there
+// to be answered, a silent one is not.
+var errBadPreface = errors.New("malformed preface")
 
 // rejectedReason is the single reason the relay reports for any failed
 // handshake. It is deliberately undifferentiated: the peer is unauthenticated
@@ -331,6 +336,17 @@ func ReadMsg(r io.Reader, v any) error {
 	return json.Unmarshal(b, v)
 }
 
+// reject is the best-effort "tell the agent *why* before dropping it" write,
+// so a stranded enrollment is self-diagnosing instead of an invisible
+// reconnect loop (#400). A failed write changes nothing — the connection is
+// going away.
+func reject(conn net.Conn, reason string) {
+	_ = conn.SetWriteDeadline(time.Now().Add(ackReadTimeout))
+	ackPayload, _ := json.Marshal(handshakeAck{Error: reason})
+	_ = writeFrame(conn, ackPayload)
+	_ = conn.SetWriteDeadline(time.Time{})
+}
+
 // Serve reads the client handshake over conn, authorizes it, then starts a
 // yamux server. On auth failure it returns the auth error (caller closes conn).
 func Serve(conn net.Conn, auth Auth) (*Session, error) {
@@ -338,6 +354,17 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 	// hand so the established yamux session isn't killed mid-traffic.
 	_ = conn.SetReadDeadline(time.Now().Add(preAuthReadTimeout))
 	base, _, err := ReadPreface(conn)
+	if errors.Is(err, errBadPreface) {
+		// A bad preface is a misconfigured agent (an empty base), which
+		// deserves the same named rejection a bad token gets instead of a
+		// bare EOF (#543). Drain the credential frame first: closing with it
+		// unread makes the kernel RST the connection and the peer may never
+		// see the frame we wrote. A silent or vanished peer skips this.
+		_, _ = readFrame(conn)
+		_ = conn.SetReadDeadline(time.Time{})
+		reject(conn, rejectedReason)
+		return nil, err
+	}
 	if err != nil {
 		_ = conn.SetReadDeadline(time.Time{})
 		return nil, err
@@ -352,19 +379,13 @@ func Serve(conn net.Conn, auth Auth) (*Session, error) {
 		return nil, err
 	}
 	if err := auth(cred.Token, base); err != nil {
-		// Best-effort: tell the agent *why* before dropping it, so a stranded
-		// enrollment is self-diagnosing instead of an invisible reconnect loop
-		// (#400). A failed write changes nothing — the connection is going away.
 		// Only a duplicate is named: it is raised after the token was
 		// validated, so it confirms nothing to an unauthenticated peer.
 		reason := rejectedReason
 		if errors.Is(err, ErrDuplicateSession) {
 			reason = duplicateReason
 		}
-		_ = conn.SetWriteDeadline(time.Now().Add(ackReadTimeout))
-		ackPayload, _ := json.Marshal(handshakeAck{Error: reason})
-		_ = writeFrame(conn, ackPayload)
-		_ = conn.SetWriteDeadline(time.Time{})
+		reject(conn, reason)
 		return nil, err
 	}
 	// Bound the ack write the way the rejection path above already is: an agent

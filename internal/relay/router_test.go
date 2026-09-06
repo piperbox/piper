@@ -202,6 +202,9 @@ func TestRegisterRefusesAHeldBase(t *testing.T) {
 	if s, ok := r.Lookup(base); !ok || s != first {
 		t.Fatalf("Lookup after refused duplicate = %v (%p), want the first session %p", ok, s, first)
 	}
+	if s, ok := r.LookupHost("blog-alice.public.getpiper.co"); !ok || s != first {
+		t.Fatalf("LookupHost after refused duplicate = %v (%p), want the first session's hostname kept", ok, s)
+	}
 	if err := r.Register(first); err != nil {
 		t.Fatalf("re-registering the same session = %v, want nil (idempotent)", err)
 	}

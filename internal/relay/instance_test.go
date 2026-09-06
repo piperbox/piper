@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"log"
 	"net/http"
 	"slices"
 	"strings"
@@ -273,6 +274,47 @@ func TestRunInstanceRederivesRoutesOnHostnameNotify(t *testing.T) {
 		_, ok := router.LookupHost(host)
 		return !ok
 	})
+	if err := st.RemoveCustomDomain(en.BaseDomain, "shop.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	waitCond(t, 5*time.Second, "custom domain dropped after NOTIFY", func() bool {
+		_, ok := router.LookupCustom("shop.example.com")
+		return !ok
+	})
+}
+
+// A store read that fails mid-sync must not unroute the agent: the entries
+// stay as they were and the next NOTIFY or beat retries. A closed store is
+// the cheapest way to make every read fail.
+func TestSyncRoutesKeepsRoutesOnReadError(t *testing.T) {
+	st := openTestStore(t)
+	router := NewRouter()
+	sess := &tunnel.Session{BaseDomain: "alice.example.com"}
+	if err := router.Register(sess); err != nil {
+		t.Fatal(err)
+	}
+	router.SetHosts(sess, []string{"blog-alice.public.getpiper.co"})
+	router.SetCustom(sess, []string{"shop.example.com"})
+	var logged syncLogBuffer
+	prevOut, prevFlags := log.Writer(), log.Flags()
+	log.SetOutput(&logged)
+	log.SetFlags(0)
+	t.Cleanup(func() { log.SetOutput(prevOut); log.SetFlags(prevFlags) })
+	st.Close()
+
+	syncRoutes(st, router, sess.BaseDomain, sess)
+	if _, ok := router.LookupHost("blog-alice.public.getpiper.co"); !ok {
+		t.Fatal("hostname dropped after a failed store read")
+	}
+	if _, ok := router.LookupCustom("shop.example.com"); !ok {
+		t.Fatal("custom domain dropped after a failed store read")
+	}
+	// A store closed by shutdown is not an error worth a line: a clean
+	// relay stop and every test teardown would otherwise print one per
+	// held agent.
+	if got := logged.String(); got != "" {
+		t.Fatalf("closed-store read logged:\n%s", got)
+	}
 }
 
 // A piper_hostnames payload names one hostname or custom domain, so only
