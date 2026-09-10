@@ -46,8 +46,10 @@ sudo systemctl enable --now piperd
 
 The unit runs as a `DynamicUser` in the `docker` group (so piperd can drive the host
 Docker daemon), keeps state under `PIPER_DATA_DIR=/var/lib/piper`, and binds `:80`/`:443`
-via `CAP_NET_BIND_SERVICE` — no root. Edit `/etc/piper/piperd.env` to override defaults
-or switch on relay mode. `apt install piperd piper` does all of the above for you;
+via `CAP_NET_BIND_SERVICE` — no root. Edit `/etc/piper/piperd.env` to override defaults,
+switch on relay mode, or — for a public box with its own domain and no relay — set
+`PIPER_BASE_DOMAIN` + DNS-01 creds + `PIPER_SERVE=direct`
+([direct serve](custom-domains.md#direct-serve)). `apt install piperd piper` does all of the above for you;
 use the manual steps only when you need to wire it yourself. See the
 [end-to-end runbook](runbooks/git-deploy-e2e.md) for verification, logs, and teardown.
 
