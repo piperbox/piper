@@ -102,9 +102,11 @@ depends on them, and pre-1.0 policy allows the break.
 - No frontmatter.
 - Cross-links are relative `.md` paths with GitHub-slug anchors:
   `install.md#homebrew-macos` within a folder, `../reference/cli.md` across.
-- A published page links only to published pages or to repo files that are
-  not docs (a unit file, a script). It never links into `self-host/` or
-  `ops/`; those readers arrive from GitHub, not the site.
+- Relative links resolve the way GitHub resolves them: against the page's
+  own directory. A published page may link to other published pages, to
+  `self-host/` pages (the site renders those as GitHub links, since a diet
+  installer must be able to find the service instructions), and to repo
+  files such as a unit file. It never links into `ops/`.
 - Headings inside fenced or indented code do not count as headings (the
   dashboard's TOC extractor already enforces this; authors just need to know).
 
@@ -169,8 +171,8 @@ helper serves all three drift tests: parse a package directory with
 
 - **Manifest contract** — `docs/manifest.json` parses; every `file` exists;
   slugs are unique; every listed file has an H1 then a lead paragraph; every
-  relative `.md` link in a listed file resolves to another listed file, and
-  no listed file links into `self-host/` or `ops/`.
+  relative link in a listed file resolves to an existing file, and no
+  listed file links into `ops/`.
 - **CLI drift** — every literal in `cmd/piper` beginning with `usage: piper`
   appears, minus the `usage: ` prefix, verbatim in `reference/cli.md`.
 - **Env drift** — every literal matching `^PIPER_[A-Z_]+$` in
@@ -259,7 +261,7 @@ lands.
    `/docs/<slug>.md` returns the same bytes the sync wrote.
 3. Adding a guide upstream is one markdown file plus one manifest line.
 4. Each drift test fails on an undocumented verb, env var, or route.
-5. No published page links into `self-host/` or `ops/`.
+5. No published page links into `ops/`; every relative link resolves.
 
 ## Rejected alternatives
 
