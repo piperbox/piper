@@ -1,4 +1,8 @@
-# Custom domains (BYO)
+# Custom domains
+
+Serve every app under a domain you own with one wildcard cert, or attach one
+domain to one app with a single CNAME. TLS ends on the box either way; the
+relay only splices bytes by SNI.
 
 Two kinds:
 
@@ -29,29 +33,6 @@ starts immediately — records are needed for traffic, not for the cert.
 `dns_ok` flips true once the wildcard resolves to the same address as the base
 domain.
 
-### Direct serve
-
-`"serve"` on `PUT /v1/domain` picks how traffic reaches the box: `"relay"`
-(default, above) or `"direct"`. In direct mode the box terminates traffic
-itself — point `<domain>` and `*.<domain>` A/AAAA records straight at the
-box's public IP, which `GET /v1/domain` fills in from the relay-observed
-address (override with `PIPER_PUBLIC_IP` for split-horizon or NAT setups, and
-the only source on a box that was never enrolled). On an enrolled box the
-relay claim is kept regardless, so both paths serve the same cert while
-your DNS still points at the relay — the flip to direct is gradual and
-reversible, not a cutover. A box behind CGNAT will never show `dns_ok: true`
-in direct mode (nothing can dial it); port-forwarded boxes should confirm
-with a real request to the domain rather than trust `dns_ok` alone.
-
-Flipping `serve` alone on an otherwise-unchanged config re-sends the same
-`domain`/`dns_provider`/`dns_token` — the row updates in place and issuance is
-left alone. Change the token too and it's treated as a config replacement:
-issuance restarts from scratch.
-
-Secrets never leave the box: the DNS token is write-only (`dns_token_set`
-signals presence), and the cert's private key and ACME account key live in
-piperd's data dir with 0600 permissions.
-
 ### Via environment variables — self-managed boxes
 
 `PIPER_BASE_DOMAIN` + `PIPER_DNS_PROVIDER` (creds via the provider's own env
@@ -59,17 +40,8 @@ vars, e.g. `CLOUDFLARE_DNS_API_TOKEN`), or a static `PIPER_TLS_CERT_FILE` /
 `PIPER_TLS_KEY_FILE` pair. Unchanged from before. Add `PIPER_SERVE=direct`
 alongside `PIPER_BASE_DOMAIN` for the env-managed equivalent of direct serve.
 
-**A box that has never been enrolled can do this too.** `PIPER_BASE_DOMAIN`
-(anything but the built-in `piper.localhost`) plus `PIPER_SERVE=direct` and a
-cert source is the whole configuration: the box obtains its own wildcard,
-serves `PIPER_HTTPS_ADDR` itself, and renews on its own schedule, with no
-relay anywhere. `PIPER_SERVE=direct` is the opt-in — a base domain alone keeps
-today's plain-HTTP behaviour, so nothing changes for a LAN box that just wanted
-a nicer hostname. One thing a never-enrolled box does not get: `dns_ok` and
-the filled-in A-record values, which come from the relay-observed public IP
-unless you set `PIPER_PUBLIC_IP` (serving is unaffected either way). Per-app
-domains work — they issue via DNS-01 with the same token source (see
-[Direct-served boxes](#direct-served-boxes) below).
+A box with a public IP can skip the relay entirely and serve its own `:443`:
+see [Direct serve](direct-serve.md).
 
 ### Precedence
 
@@ -83,16 +55,13 @@ at all and answers `409` to every `/v1/domain` call.
 ## Per-app domains (`piper domains`)
 
 Attach a domain you own to **one specific app**. How its cert issues follows
-the box-wide serve mode — there is no per-domain choice:
+the box-wide serve mode — there is no per-domain choice.
 
-- **Relay-served box** (the default): no DNS-provider API token needed. Per-app
-  domains are exact hosts, so the box issues each cert via ACME
-  **TLS-ALPN-01** — the challenge rides the same relay splice as your traffic.
-- **Direct-served box** (`"serve":"direct"` or `PIPER_SERVE=direct`, including
-  a never-enrolled box): the cert issues via **DNS-01** with the box-wide token
-  source and is served from the box's own `:443`, no relay involved. Same
-  commands, three differences — see
-  [Direct-served boxes](#direct-served-boxes) below.
+On a relay-served box (the default), no DNS-provider API token needed. Per-app
+domains are exact hosts, so the box issues each cert via ACME
+**TLS-ALPN-01** — the challenge rides the same relay splice as your traffic.
+On a box that serves direct the same commands print an A record instead: see
+[Direct serve](direct-serve.md#per-app-domains-on-a-direct-box).
 
     piper domains add myshop.com --app shop   # prints the record to create
     piper domains list [--app shop]           # domain, app, status, cert expiry, dns_ok
@@ -127,27 +96,3 @@ Notes:
 - Same surface for dashboards: `GET`/`POST /v1/apps/<app>/domains`,
   `DELETE /v1/apps/<app>/domains/<domain>`.
 - Deleting the app detaches its domains and releases the relay claims.
-
-### Direct-served boxes
-
-On a box whose serve mode is `direct`, `piper domains` and the API are the
-same, with three differences:
-
-- **The record is an `A`/`AAAA`, not a CNAME.** `add` prints the box's public
-  IP (`myshop.com  A  203.0.113.7`) — the relay-observed address, or
-  `PIPER_PUBLIC_IP`. Until an IP is known the status carries a note and
-  `dns_ok` stays false; serving is unaffected. Apex domains need no special
-  DNS host.
-- **No DNS wait.** DNS-01 proves control through the token, not through
-  resolution, so issuance starts immediately and the cert can be ready before
-  the record exists. `dns_ok` reports whether the name resolves to that IP.
-- **The box-wide DNS token is required.** `add` answers `409` on a direct box
-  with no DNS-01 source — no box-wide domain, or a static
-  `PIPER_TLS_CERT_FILE`/`PIPER_TLS_KEY_FILE` pair. The per-app domain must sit
-  in a zone that token can edit; a mismatch surfaces at issuance, naming the
-  token.
-
-On an enrolled direct box the relay claim is still made whenever the relay is
-connected, so flipping `serve` back to `relay` keeps the domain reachable.
-Renewal follows whichever mode is current at renew time; flipping modes
-re-issues nothing.

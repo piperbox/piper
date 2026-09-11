@@ -43,7 +43,7 @@ no port forwarding, no domain required. Prefer to point and click? Run bare
 `piper` in a terminal for the full-screen TUI — monitor, deploy, logs,
 lifecycle, box switcher, and the login/GitHub wizards, all interactive. LAN-only
 use, driving a box from your laptop, and self-hosted relays are all covered in
-the full walkthrough: [`docs/getting-started.md`](docs/getting-started.md).
+the guides: [`docs/guides/`](docs/guides/), starting at [Install](docs/guides/install.md).
 
 ## How it works
 
@@ -68,7 +68,7 @@ One Go module, three binaries:
 Apps on your own domain stay **end-to-end encrypted**: the box holds the cert
 and the relay just splices bytes by SNI. On the shared
 `public.getpiper.dev` domain the relay terminates TLS with its wildcard cert
-instead. See [`docs/custom-domains.md`](docs/custom-domains.md).
+instead. See [Custom domains](docs/guides/custom-domains.md) and [Direct serve](docs/guides/direct-serve.md).
 
 ## Git deploys
 
@@ -92,10 +92,9 @@ tunnel as your traffic; nothing else on the box is exposed.
 
 | Doc | Covers |
 | --- | --- |
-| [Getting started](docs/getting-started.md) | install → TUI → LAN control → public relay → remote control → git deploys |
-| [Manual setup](docs/manual-setup.md) | build from source, piperd in Docker, run the relay as a service |
-| [Custom domains](docs/custom-domains.md) | BYO domain with end-to-end TLS |
-| [E2E runbook](docs/runbooks/git-deploy-e2e.md) | stand up relay + domain + GitHub App from scratch |
+| [Guides](docs/guides/install.md) | install → first deploy → TUI → relay → remote control → git deploys → domains |
+| [Self-host](docs/self-host/piperd.md) | run piperd from source or in Docker; run your own relay |
+| [Docs map](docs/README.md) | which folder serves whom, how to add a page |
 | [PROGRESS.md](PROGRESS.md) | built vs. stubbed map, linked to issues |
 | [Design](docs/superpowers/specs/2026-07-04-piper-design.md) | the full design rationale |
 

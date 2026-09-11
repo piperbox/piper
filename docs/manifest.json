@@ -1,0 +1,15 @@
+{
+  "sections": [
+    { "title": "Guides", "pages": [
+      { "slug": "install", "file": "guides/install.md", "title": "Install" },
+      { "slug": "first-deploy", "file": "guides/first-deploy.md", "title": "First deploy" },
+      { "slug": "tui", "file": "guides/tui.md", "title": "The TUI" },
+      { "slug": "lan-control", "file": "guides/lan-control.md", "title": "LAN control" },
+      { "slug": "relay-login", "file": "guides/relay-login.md", "title": "Join the public relay" },
+      { "slug": "remote-control", "file": "guides/remote-control.md", "title": "Remote control" },
+      { "slug": "git-deploys", "file": "guides/git-deploys.md", "title": "Git deploys" },
+      { "slug": "custom-domains", "file": "guides/custom-domains.md", "title": "Custom domains" },
+      { "slug": "direct-serve", "file": "guides/direct-serve.md", "title": "Direct serve" }
+    ]}
+  ]
+}

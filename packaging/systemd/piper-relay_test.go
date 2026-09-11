@@ -56,17 +56,17 @@ func repositoryFile(t *testing.T, parts ...string) string {
 }
 
 func TestServiceDocumentation(t *testing.T) {
-	manual := repositoryFile(t, "docs", "manual-setup.md")
+	manual := repositoryFile(t, "docs", "self-host", "relay.md")
 	for _, text := range []string{
 		"packaging/systemd/piper-relay.service",
 		"systemctl enable --now piper-relay",
 	} {
 		if !strings.Contains(manual, text) {
-			t.Errorf("docs/manual-setup.md missing %q", text)
+			t.Errorf("docs/self-host/relay.md missing %q", text)
 		}
 	}
 
-	runbook := repositoryFile(t, "docs", "runbooks", "git-deploy-e2e.md")
+	runbook := repositoryFile(t, "docs", "ops", "e2e-runbook.md")
 	for _, text := range []string{
 		"systemd-run",
 		"systemctl enable --now piper-relay",

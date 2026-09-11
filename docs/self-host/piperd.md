@@ -1,11 +1,10 @@
-# Manual setup (building from source)
+# Run piperd yourself
 
-`apt install piperd piper` (Linux) / `brew install piperbox/tap/piper` (macOS)
-in [getting started](getting-started.md#install) already do everything below
-for you. Use this instead if you're building `piperd`/`piper-relay` from
-source, on a non-Debian distro, or wiring your own automation.
+`apt install piperd piper` and `brew install piperbox/tap/piper` do everything
+on this page for you. Use it when you build from source, run a non-Debian
+distro, run piperd in Docker, or wire your own automation.
 
-## Run the agent as a service (manual / from source)
+## Linux: systemd from source
 
 On the box that runs your apps (a Pi, a VPS, a laptop), install the static
 `piperd` binary and the shipped systemd unit so the agent runs headless and comes back
@@ -49,11 +48,10 @@ Docker daemon), keeps state under `PIPER_DATA_DIR=/var/lib/piper`, and binds `:8
 via `CAP_NET_BIND_SERVICE` — no root. Edit `/etc/piper/piperd.env` to override defaults,
 switch on relay mode, or — for a public box with its own domain and no relay — set
 `PIPER_BASE_DOMAIN` + DNS-01 creds + `PIPER_SERVE=direct`
-([direct serve](custom-domains.md#direct-serve)). `apt install piperd piper` does all of the above for you;
-use the manual steps only when you need to wire it yourself. See the
-[end-to-end runbook](runbooks/git-deploy-e2e.md) for verification, logs, and teardown.
+([direct serve](../guides/direct-serve.md)). `apt install piperd piper` does all of the above for you;
+use the manual steps only when you need to wire it yourself. Verification, logs, and teardown are walked through in the repo's [e2e runbook](../ops/e2e-runbook.md).
 
-## Run the agent on macOS (dev box)
+## macOS dev box
 
 macOS is a **development** target: install via Homebrew and let `brew services`
 manage it — no manual unit to write:
@@ -68,7 +66,7 @@ lives at `~/.piper/piperd`, and it serves apps at
 `http://<name>.piper.localhost`. This path is LAN-only; the relay/public-URL
 flow is Linux/Pi (systemd) only.
 
-## Run piperd in Docker (Compose)
+## Docker Compose
 
 Prefer to run `piperd` itself as a container instead of a systemd service? Build and
 start it with Compose from the repo root:
@@ -102,34 +100,3 @@ matching the rest of the service-install path.
 the host's Docker daemon — the same trust boundary the systemd unit already accepts
 via its `docker` group membership (see the previous section). Only run this on a
 box you already trust with root.
-
-## Run the relay as a service
-
-On a Linux relay host, build or download the static `piper-relay` binary, then install
-the binary and the shipped systemd unit:
-
-```bash
-sudo install -m 0755 bin/piper-relay /usr/local/bin/piper-relay
-sudo install -m 0644 packaging/systemd/piper-relay.service \
-  /etc/systemd/system/piper-relay.service
-sudo systemctl daemon-reload
-```
-
-The relay stores everything in Postgres; create a database and put its URL in
-`/etc/piper-relay.env` as `PIPER_RELAY_DB_URL` first (see the
-[relay runbook](runbooks/relay-deploy.md#2-configure)).
-
-Enroll the box before starting the service, then enable it at boot:
-
-```bash
-sudo systemd-run --pipe --wait --collect \
-  --property=DynamicUser=yes \
-  --property=StateDirectory=piper-relay \
-  --setenv=PIPER_RELAY_DB_URL=postgres://… \
-  /usr/local/bin/piper-relay enroll <name> --domain <base-domain>
-sudo systemctl enable --now piper-relay
-```
-
-Open inbound TCP ports `443` and `7000`. See the
-[end-to-end runbook](runbooks/git-deploy-e2e.md#part-b--relay) for verification,
-address overrides, logs, and teardown.

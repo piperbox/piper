@@ -674,7 +674,7 @@ func TestDietLinuxPrintsServiceCommands(t *testing.T) {
 	for _, want := range []string{
 		"piperd.service",
 		"systemctl enable --now piperd",
-		"docs/manual-setup.md",
+		"docs/self-host/piperd.md",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("diet next-steps missing %q:\n%s", want, out)
@@ -690,21 +690,23 @@ func repoRoot(t *testing.T) string {
 func TestInstallDocumentation(t *testing.T) {
 	// The README leads with the universal curl front door; the per-channel
 	// detail (apt lines, brew, diet flags, source builds) lives in
-	// docs/getting-started.md (#181, #447).
+	// docs/guides/install.md (#181, #447).
 	docs := map[string][]string{
 		"README.md": {
 			"install.sh | sh",
 			"sudo apt install piperd piper",
 			"brew install piperbox/tap/piper",
 		},
-		filepath.Join("docs", "getting-started.md"): {
+		filepath.Join("docs", "guides", "install.md"): {
 			"apt.piperbox.dev",
 			"brew services start piper",
 			"--cli-only",
 			"--rc",
+		},
+		filepath.Join("docs", "guides", "lan-control.md"): {
 			"PIPER_ADDR",
 		},
-		filepath.Join("docs", "manual-setup.md"): {
+		filepath.Join("docs", "self-host", "piperd.md"): {
 			"systemctl enable --now piperd",
 			"piperd.service",
 		},

@@ -1,5 +1,5 @@
 # piper-edge + N piper-relay + Postgres on one host that owns a public IP (the
-# hosted relay's Hetzner layout). Documented in docs/runbooks/relay-deploy.md,
+# hosted relay's Hetzner layout). Documented in docs/self-host/relay.md,
 # "Scale out".
 #
 # The edge owns the public ports (:443/:80/:7000) on the host network and

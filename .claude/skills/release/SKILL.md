@@ -49,7 +49,7 @@ Both the agent and relay stores apply `schema.sql` with `CREATE TABLE IF NOT EXI
 
 Check `git diff <last-release-tag>..main -- '*/schema.sql'` and classify before writing upgrade notes.
 
-**A relay `schema.sql` change is always at least a minor bump.** The hosted relay is rolled by Flux with an image policy pinned to the current minor (`>=0.23.1 <0.24.0` style), so a patch tag goes live there unattended within ~10 minutes — onto a Postgres that still has the old table shape. A minor tag waits for the operator to run the `ALTER`/`DROP` and widen the policy; see the runbook's [Rolling out with Flux](../../../docs/runbooks/relay-deploy.md#rolling-out-with-flux).
+**A relay `schema.sql` change is always at least a minor bump.** The hosted relay is rolled by Flux with an image policy pinned to the current minor (`>=0.23.1 <0.24.0` style), so a patch tag goes live there unattended within ~10 minutes — onto a Postgres that still has the old table shape. A minor tag waits for the operator to run the `ALTER`/`DROP` and widen the policy; see the runbook's [Rolling out with Flux](../../../docs/ops/hosted-relay.md#rolling-out-with-flux).
 
 ### RC or straight to final?
 
