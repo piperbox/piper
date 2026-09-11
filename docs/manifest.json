@@ -1,7 +1,8 @@
 {
   "sections": [
     { "title": "Guides", "pages": [
-      { "slug": "install", "file": "guides/install.md", "title": "Install" }
+      { "slug": "install", "file": "guides/install.md", "title": "Install" },
+      { "slug": "first-deploy", "file": "guides/first-deploy.md", "title": "First deploy" }
     ]}
   ]
 }
