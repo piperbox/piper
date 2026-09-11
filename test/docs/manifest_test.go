@@ -98,8 +98,31 @@ func TestPublishedPagesOpenWithH1AndLead(t *testing.T) {
 			t.Errorf("%s: first line must be an H1", p.File)
 			continue
 		}
+		// Count H1 headings outside code fences to ensure exactly one.
+		inFence := false
+		h1Count := 0
+		h1LineNum := 0
+		for n, line := range lines {
+			if strings.HasPrefix(strings.TrimSpace(line), "```") {
+				inFence = !inFence
+				continue
+			}
+			if !inFence && strings.HasPrefix(line, "# ") {
+				h1Count++
+				if h1Count > 1 {
+					t.Errorf("%s:%d: second H1 found, must have exactly one per page", p.File, n+1)
+				}
+				if h1Count == 1 {
+					h1LineNum = n
+				}
+			}
+		}
+		if h1Count == 0 {
+			t.Errorf("%s: no H1 heading found", p.File)
+			continue
+		}
 		lead := ""
-		for _, l := range lines[1:] {
+		for _, l := range lines[h1LineNum+1:] {
 			if strings.TrimSpace(l) != "" {
 				lead = l
 				break
