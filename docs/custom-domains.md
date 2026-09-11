@@ -4,8 +4,9 @@ Two kinds:
 
 - a **box-wide base domain** — every app served as `<app>.<yourdomain>` under
   one wildcard cert (needs a DNS-provider API token for DNS-01);
-- **per-app domains** — `myshop.com` pointed at one specific app, tokenless
-  (see [Per-app domains](#per-app-domains-piper-domains--no-dns-token) below).
+- **per-app domains** — `myshop.com` pointed at one specific app; tokenless on
+  a relay-served box (see [Per-app domains](#per-app-domains-piper-domains)
+  below).
 
 ## Box-wide base domain
 
@@ -64,10 +65,11 @@ cert source is the whole configuration: the box obtains its own wildcard,
 serves `PIPER_HTTPS_ADDR` itself, and renews on its own schedule, with no
 relay anywhere. `PIPER_SERVE=direct` is the opt-in — a base domain alone keeps
 today's plain-HTTP behaviour, so nothing changes for a LAN box that just wanted
-a nicer hostname. Two things a never-enrolled box does not get: `dns_ok` and
+a nicer hostname. One thing a never-enrolled box does not get: `dns_ok` and
 the filled-in A-record values, which come from the relay-observed public IP
-unless you set `PIPER_PUBLIC_IP` (serving is unaffected either way); and per-app
-domains, whose TLS-ALPN-01 challenges only arrive over a relay splice.
+unless you set `PIPER_PUBLIC_IP` (serving is unaffected either way). Per-app
+domains work — they issue via DNS-01 with the same token source (see
+[Direct-served boxes](#direct-served-boxes) below).
 
 ### Precedence
 
@@ -78,20 +80,28 @@ remotely. That includes a never-enrolled direct box, which is env-managed by
 construction. A box with neither a relay nor direct serve has no domain config
 at all and answers `409` to every `/v1/domain` call.
 
-## Per-app domains (`piper domains`) — no DNS token
+## Per-app domains (`piper domains`)
 
-Attach a domain you own to **one specific app**. Unlike the box-wide domain
-this needs no DNS-provider API token: per-app domains are exact hosts, so the
-box issues each cert via ACME **TLS-ALPN-01** — the challenge rides the same
-relay splice as your traffic.
+Attach a domain you own to **one specific app**. How its cert issues follows
+the box-wide serve mode — there is no per-domain choice:
 
-    piper domains add myshop.com --app shop   # prints the CNAME to create
+- **Relay-served box** (the default): no DNS-provider API token needed. Per-app
+  domains are exact hosts, so the box issues each cert via ACME
+  **TLS-ALPN-01** — the challenge rides the same relay splice as your traffic.
+- **Direct-served box** (`"serve":"direct"` or `PIPER_SERVE=direct`, including
+  a never-enrolled box): the cert issues via **DNS-01** with the box-wide token
+  source and is served from the box's own `:443`, no relay involved. Same
+  commands, three differences — see
+  [Direct-served boxes](#direct-served-boxes) below.
+
+    piper domains add myshop.com --app shop   # prints the record to create
     piper domains list [--app shop]           # domain, app, status, cert expiry, dns_ok
     piper domains remove myshop.com
 
-Create the record `add` prints at your DNS host. The target is the box's base
-domain, or the relay host when the box has no base domain — for a relay-mode
-box the base domain is under the relay apex, e.g. `<box>.public.getpiper.dev`:
+Create the record `add` prints at your DNS host. On a relay-served box the
+target is the box's base domain, or the relay host when the box has no base
+domain — the base domain is under the relay apex, e.g.
+`<box>.public.getpiper.dev`:
 
     myshop.com  CNAME  <box>.public.getpiper.dev
 
@@ -105,8 +115,8 @@ alongside. Renewal is automatic.
 
 Notes:
 
-- **Apex domains** need a DNS host that supports CNAME at the apex
-  (Cloudflare, or ALIAS/ANAME on others). Otherwise use a subdomain
+- **Apex domains** on a relay-served box need a DNS host that supports CNAME
+  at the apex (Cloudflare, or ALIAS/ANAME on others). Otherwise use a subdomain
   (`www.myshop.com`), or point an A/AAAA record at the address the printed
   target resolves to — accepting it may change.
 - `www.myshop.com` is its own domain — attach it separately if you want both.
@@ -117,3 +127,27 @@ Notes:
 - Same surface for dashboards: `GET`/`POST /v1/apps/<app>/domains`,
   `DELETE /v1/apps/<app>/domains/<domain>`.
 - Deleting the app detaches its domains and releases the relay claims.
+
+### Direct-served boxes
+
+On a box whose serve mode is `direct`, `piper domains` and the API are the
+same, with three differences:
+
+- **The record is an `A`/`AAAA`, not a CNAME.** `add` prints the box's public
+  IP (`myshop.com  A  203.0.113.7`) — the relay-observed address, or
+  `PIPER_PUBLIC_IP`. Until an IP is known the status carries a note and
+  `dns_ok` stays false; serving is unaffected. Apex domains need no special
+  DNS host.
+- **No DNS wait.** DNS-01 proves control through the token, not through
+  resolution, so issuance starts immediately and the cert can be ready before
+  the record exists. `dns_ok` reports whether the name resolves to that IP.
+- **The box-wide DNS token is required.** `add` answers `409` on a direct box
+  with no DNS-01 source — no box-wide domain, or a static
+  `PIPER_TLS_CERT_FILE`/`PIPER_TLS_KEY_FILE` pair. The per-app domain must sit
+  in a zone that token can edit; a mismatch surfaces at issuance, naming the
+  token.
+
+On an enrolled direct box the relay claim is still made whenever the relay is
+connected, so flipping `serve` back to `relay` keeps the domain reachable.
+Renewal follows whichever mode is current at renew time; flipping modes
+re-issues nothing.

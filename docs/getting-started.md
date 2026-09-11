@@ -246,6 +246,8 @@ it.
 Bring-your-own-domain apps stay **end-to-end** (the box terminates TLS; the relay
 only splices SNI) — set `PIPER_BASE_DOMAIN` + cert/DNS config instead of
 claiming through `piper login`; see [`custom-domains.md`](custom-domains.md).
+Add `PIPER_SERVE=direct` and the box serves `:443` itself with no relay at all
+([direct serve](custom-domains.md#direct-serve)).
 Self-hosters run the relay passthrough-only by leaving
 `PIPER_RELAY_TLS_CERT`/`KEY` unset.
 
@@ -295,8 +297,10 @@ piper domains list                        # myshop.com  app=shop  status=active 
 
 The cert issues through the relay tunnel (ACME TLS-ALPN-01) once the name
 resolves to the relay; the box terminates TLS itself, and the app's
-shared-domain URL keeps working alongside. Apex-domain caveats and the API
-shape: [`custom-domains.md`](custom-domains.md).
+shared-domain URL keeps working alongside. On a box that serves direct the
+same commands print an `A` record at the box's public IP instead, and the cert
+issues via DNS-01 with the box-wide token. Apex-domain caveats, direct mode,
+and the API shape: [`custom-domains.md`](custom-domains.md).
 
 ## Git deploys
 
