@@ -5,7 +5,7 @@ Who each folder is for, what the website publishes, and how to add a page.
 | Folder | For | Published |
 | --- | --- | --- |
 | [`guides/`](guides/) | people using Piper: install → first deploy → relay → domains | yes |
-| [`reference/`](reference/) | CLI verbs, env vars, control API — pinned to code by `test/docs` | yes (PR 2) |
+| [`reference/`](reference/) | CLI verbs, env vars, control API — pinned to code by `test/docs` | yes |
 | [`self-host/`](self-host/) | running piperd or a relay yourself, from source or containers | not yet — one manifest line away |
 | [`ops/`](ops/) | piperbox's own hosted relay and the e2e verification runbook | never |
 | [`superpowers/specs/`](superpowers/specs/), [`superpowers/plans/`](superpowers/plans/) | design rationale and task-by-task plans; a fresh session reads the spec before non-trivial work | no |

@@ -10,6 +10,11 @@
       { "slug": "git-deploys", "file": "guides/git-deploys.md", "title": "Git deploys" },
       { "slug": "custom-domains", "file": "guides/custom-domains.md", "title": "Custom domains" },
       { "slug": "direct-serve", "file": "guides/direct-serve.md", "title": "Direct serve" }
+    ]},
+    { "title": "Reference", "pages": [
+      { "slug": "cli", "file": "reference/cli.md", "title": "CLI" },
+      { "slug": "env", "file": "reference/env.md", "title": "Environment variables" },
+      { "slug": "api", "file": "reference/api.md", "title": "Control API" }
     ]}
   ]
 }
