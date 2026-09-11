@@ -74,7 +74,7 @@ docs/
 | Today | Becomes |
 | --- | --- |
 | `getting-started.md` § Install (all channels) | `guides/install.md` |
-| `getting-started.md` § Install → first deploy, plus README quick start | `guides/first-deploy.md` |
+| README § quick start (`create` → `deploy` → `list`/`status`/`stop`/`delete` on `piper.localhost`), which no doc page covers today | `guides/first-deploy.md`, new |
 | `getting-started.md` § The interactive TUI | `guides/tui.md` |
 | `getting-started.md` § Drive piperd from another machine on the LAN | `guides/lan-control.md` |
 | `getting-started.md` § Join the public relay, § List and remove boxes | `guides/relay-login.md` |
@@ -223,7 +223,9 @@ All changes sit inside the existing docs machinery.
 
 ## Rollout
 
-Three PRs, in order. Memory notes on the maintainers' machines that point at
+Three PRs, in order, each with its own implementation plan under
+`superpowers/plans/` (the dashboard plan lives in the dashboard repo and
+links here). Memory notes on the maintainers' machines that point at
 `runbooks/relay-deploy.md` are repointed to `ops/hosted-relay.md` when PR 1
 lands.
 
