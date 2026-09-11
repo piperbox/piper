@@ -4,7 +4,8 @@
       { "slug": "install", "file": "guides/install.md", "title": "Install" },
       { "slug": "first-deploy", "file": "guides/first-deploy.md", "title": "First deploy" },
       { "slug": "tui", "file": "guides/tui.md", "title": "The TUI" },
-      { "slug": "lan-control", "file": "guides/lan-control.md", "title": "LAN control" }
+      { "slug": "lan-control", "file": "guides/lan-control.md", "title": "LAN control" },
+      { "slug": "relay-login", "file": "guides/relay-login.md", "title": "Join the public relay" }
     ]}
   ]
 }
