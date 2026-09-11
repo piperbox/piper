@@ -7,7 +7,7 @@ import (
 )
 
 // Route patterns as registered on the mux: "METHOD /v1/...".
-var routeRE = regexp.MustCompile(`^(GET|POST|PUT|DELETE) /v1/`)
+var routeRE = regexp.MustCompile(`^([A-Z]+ )?/v1/`)
 
 // Every route internal/api registers has its own "### METHOD /v1/path"
 // heading in reference/api.md. Bodies and status lists are not checked; they
