@@ -214,7 +214,7 @@ else
 	download_verify piper "$tag" "$os" "$arch" "$prefix"
 	echo "installed piper + piperd $tag -> $prefix"
 	if [ "$os" = linux ]; then
-		echo "next — run piperd as a durable service (details: docs/manual-setup.md):"
+		echo "next — run piperd as a durable service (details: docs/self-host/piperd.md):"
 		[ "$prefix" = /usr/local/bin ] || echo "  sudo install -m 0755 \"$prefix/piperd\" /usr/local/bin/piperd"
 		echo "  sudo curl -fsSL $PIPER_BASE_URL/$PIPER_REPO/releases/download/$tag/piperd.service -o /etc/systemd/system/piperd.service"
 		echo "  sudo systemctl daemon-reload && sudo systemctl enable --now piperd"

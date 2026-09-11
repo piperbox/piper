@@ -268,7 +268,7 @@ The fresh tables materialize on first start after (b). Then, per box:
 - **Self-service boxes:** upgrade piperd, then `piper login --re-enroll`
   (re-claims the box; base domain is re-minted).
 - **Operator-enrolled boxes:** re-run the `piper-relay enroll` transient-unit
-  command from [manual-setup.md](#install-as-a-service)
+  command from [Install as a service](#install-as-a-service)
   and hand the new `rlyt_…` token to the box's `PIPER_RELAY_TOKEN`.
 
 ### What comes back on its own

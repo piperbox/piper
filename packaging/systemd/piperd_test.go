@@ -62,11 +62,11 @@ func TestPiperdEnvExample(t *testing.T) {
 // deleted daemonize/rootless verbs must not resurface, and each platform's
 // managed path is named.
 func TestPiperdDocumentation(t *testing.T) {
-	gettingStarted := repositoryFile(t, "docs", "getting-started.md")
-	manualSetup := repositoryFile(t, "docs", "manual-setup.md")
+	install := repositoryFile(t, "docs", "guides", "install.md")
+	selfHost := repositoryFile(t, "docs", "self-host", "piperd.md")
 	readme := repositoryFile(t, "README.md")
 
-	for name, doc := range map[string]string{"getting-started": gettingStarted, "manual-setup": manualSetup, "README": readme} {
+	for name, doc := range map[string]string{"guides/install": install, "self-host/piperd": selfHost, "README": readme} {
 		if strings.Contains(doc, "daemonize") {
 			t.Errorf("%s still mentions daemonize", name)
 		}
@@ -75,11 +75,11 @@ func TestPiperdDocumentation(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"apt install piperd", "brew services start piper"} {
-		if !strings.Contains(gettingStarted, want) {
-			t.Errorf("getting-started.md missing %q", want)
+		if !strings.Contains(install, want) {
+			t.Errorf("guides/install.md missing %q", want)
 		}
 	}
-	if !strings.Contains(manualSetup, "systemctl enable --now piperd") {
-		t.Errorf("manual-setup.md missing the manual unit-install command")
+	if !strings.Contains(selfHost, "systemctl enable --now piperd") {
+		t.Errorf("self-host/piperd.md missing the manual unit-install command")
 	}
 }

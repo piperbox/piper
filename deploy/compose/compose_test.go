@@ -61,22 +61,22 @@ func TestComposeContract(t *testing.T) {
 }
 
 func TestDockerDocumentation(t *testing.T) {
-	manual := repositoryFile(t, "docs", "manual-setup.md")
+	manual := repositoryFile(t, "docs", "self-host", "piperd.md")
 	for _, text := range []string{
 		"docker compose -f deploy/compose/docker-compose.yml up -d --build",
 		"network_mode: host",
 		"root-equivalent",
 	} {
 		if !strings.Contains(manual, text) {
-			t.Errorf("docs/manual-setup.md missing %q", text)
+			t.Errorf("docs/self-host/piperd.md missing %q", text)
 		}
 	}
 
 	// The Compose pointer moved from the README into the getting-started
 	// guide when the README was slimmed to a quick start (see #181).
-	guide := repositoryFile(t, "docs", "getting-started.md")
+	guide := repositoryFile(t, "docs", "guides", "install.md")
 	if !strings.Contains(guide, "run piperd in Docker via Compose") {
-		t.Errorf("docs/getting-started.md missing pointer phrase %q", "run piperd in Docker via Compose")
+		t.Errorf("docs/guides/install.md missing pointer phrase %q", "run piperd in Docker via Compose")
 	}
 }
 
