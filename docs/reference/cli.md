@@ -21,7 +21,7 @@ Per-verb flags come after the positional arguments: `piper delete blog --yes`, n
 
 Exit codes are the same everywhere: 0 on success, 1 on error (piperd unreachable, the request rejected, a deploy that did not end `running`), 2 on usage (bad flags or arguments). Declining a confirmation prompt prints `aborted` and exits 0.
 
-Every verb except `login`, `box`, and `agent` talks to piperd's control API at the address `piper login` saved, `http://127.0.0.1:8088` when nothing is saved. `PIPER_ADDR` and `PIPER_TOKEN` override the saved address and token.
+Every verb except `login`, `box`, and `agent` talks to piperd's [control API](api.md) at the address `piper login` saved, `http://127.0.0.1:8088` when nothing is saved. `PIPER_ADDR` and `PIPER_TOKEN` override the saved address and token; see [Environment variables](env.md#piper-cli).
 
 ## version
 

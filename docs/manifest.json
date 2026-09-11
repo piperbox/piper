@@ -13,6 +13,7 @@
     ]},
     { "title": "Reference", "pages": [
       { "slug": "cli", "file": "reference/cli.md", "title": "CLI" },
+      { "slug": "env", "file": "reference/env.md", "title": "Environment variables" },
       { "slug": "api", "file": "reference/api.md", "title": "Control API" }
     ]}
   ]
