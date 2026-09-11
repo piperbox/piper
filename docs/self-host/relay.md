@@ -194,11 +194,13 @@ The relay reads the signal channel once, so a second SIGTERM (another
 `docker stop` or Ctrl-C) during the drain changes nothing — the only
 escalation is SIGKILL, which the orchestrator sends once the stop timeout
 elapses.
-Tunnels still drop when their session closes and agents reconnect on their
-own (piperd's tunnel client retries in the background) until #530 gives
-each agent a second session. Verify: `journalctl -u piper-relay -f` shows
-agents re-registering within a minute, and `piper box ls` from an enrolled
-account shows `connected`.
+On a single relay, tunnels drop when their session closes and agents
+reconnect on their own (piperd's tunnel client retries in the background);
+with two relays behind an edge, each agent's second session (#530) keeps it
+reachable through the other relay during the drain — see
+[Scale out](#scale-out). Verify: `journalctl -u piper-relay -f` shows agents
+re-registering within a minute, and `piper box ls` from an enrolled account
+shows `connected`.
 
 Keep the previous binary around (`/usr/local/bin/piper-relay.prev`) — rollback
 is reinstall + restart.
