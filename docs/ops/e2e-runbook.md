@@ -104,7 +104,7 @@ sudo systemctl daemon-reload
 
 The relay stores everything in Postgres; create a database and put its URL in
 `/etc/piper-relay.env` as `PIPER_RELAY_DB_URL` before enrolling or starting the
-service (see [relay runbook §2 Configure](../self-host/relay.md#configure)).
+service (see [relay guide, Configure](../self-host/relay.md#configure)).
 
 Enrollment is a separate one-shot command, not the service. Run it through a
 transient unit so it writes to the same systemd-managed state directory as the
@@ -327,7 +327,7 @@ its own GitHub App. **Brokered mode** is the alternative — the relay operator
 registers *one* App under the `piperbox` org and holds its key; every account's
 `piper login` installs that shared App and the relay re-signs and forwards webhooks
 to the right box over the tunnel. This is what the public hosted relay runs, and
-it's the default flow in [the install guide](../guides/install.md).
+it's the default flow in [the git deploys guide](../guides/git-deploys.md).
 
 **Prerequisites differ from BYO in exactly these ways:**
 
@@ -529,7 +529,7 @@ sudo systemctl clean --what=state piper-relay
 ## macOS (dev box, via Homebrew)
 
 On a Mac dev box the agent runs via `brew services` (see
-[manual setup](../self-host/piperd.md#macos-dev-box)):
+[Run piperd yourself](../self-host/piperd.md#macos-dev-box)):
 
 ```bash
 piper agent status          # running / stopped

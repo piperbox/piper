@@ -90,7 +90,7 @@ tunnel as your traffic; nothing else on the box is exposed.
 
 ## Docs
 
-| | |
+| Doc | Covers |
 | --- | --- |
 | [Guides](docs/guides/install.md) | install → first deploy → TUI → relay → remote control → git deploys → domains |
 | [Self-host](docs/self-host/piperd.md) | run piperd from source or in Docker; run your own relay |

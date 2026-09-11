@@ -13,7 +13,7 @@ one exists, so every install lands on a real upgrade channel. Everywhere else
 it falls back to verified binaries plus printed next steps. The sections below
 cover what each channel actually does, and how to skip straight to it by hand.
 
-### apt (Debian-family, e.g. Raspberry Pi OS)
+## apt (Debian-family, e.g. Raspberry Pi OS)
 
 The curl installer runs exactly this on Debian, Ubuntu, and Raspberry Pi OS:
 
@@ -44,7 +44,7 @@ lives at `PIPER_DATA_DIR=/var/lib/piper`, and it binds `:80`/`:443` via
 Apps are served at `http://<name>.piper.localhost`. Your user must be able to
 reach a Docker socket — be in the `docker` group, or set `DOCKER_HOST`.
 
-### Homebrew (macOS)
+## Homebrew (macOS)
 
 ```bash
 brew install piperbox/tap/piper
@@ -62,7 +62,7 @@ restart needed. After `brew upgrade`, run `brew services restart piper` to pick
 up the new binary. See
 [Run piperd yourself](../self-host/piperd.md#macos-dev-box).
 
-### Anywhere else (diet)
+## Anywhere else (diet)
 
 Not on a Debian-family distro, no Homebrew, or want just the CLI (e.g. to
 drive a box from your laptop)? The same curl command falls back to placing
@@ -81,7 +81,7 @@ the latest stable release, `--version vX.Y.Z` to pin a specific release, or
 `--cli-only` for just `piper`. Then install the systemd unit by hand: see
 [Run piperd yourself](../self-host/piperd.md).
 
-### From source
+## From source
 
 Prefer to build `piperd`/`piper-relay` from source, run piperd in Docker via Compose,
 run the relay as a service, or wire your own automation instead of the

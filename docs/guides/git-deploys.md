@@ -47,5 +47,4 @@ The live URL shows up on GitHub as a Deployment status. Webhooks ride the same
 tunnel as your traffic (delivered to `hooks.<your-domain>`); nothing else on the
 box is exposed.
 
-Standing either path up against a real relay, domain, and GitHub App end to end
-is covered by the repo's [self-host docs](../self-host/relay.md).
+Running the relay yourself is covered in [Run your own relay](../self-host/relay.md).

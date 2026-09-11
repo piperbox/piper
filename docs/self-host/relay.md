@@ -17,8 +17,7 @@ sudo systemctl daemon-reload
 ```
 
 The relay stores everything in Postgres; create a database and put its URL in
-`/etc/piper-relay.env` as `PIPER_RELAY_DB_URL` first (see the
-[relay runbook](#configure)).
+`/etc/piper-relay.env` as `PIPER_RELAY_DB_URL` first (see [Configure](#configure) below).
 
 Enroll the box before starting the service, then enable it at boot:
 
@@ -149,7 +148,7 @@ by itself: the relay converges to the new pair as soon as both files land.
 
 Without `PIPER_RELAY_GITHUB_CLIENT_ID` the relay logs
 `self-service login disabled` — boxes can then only be operator-enrolled
-(`piper-relay enroll`, see manual-setup). `PIPER_RELAY_FAKE_APPROVE=1` is for
+(`piper-relay enroll`, see [Install as a service](#install-as-a-service)). `PIPER_RELAY_FAKE_APPROVE=1` is for
 tests only; never set it on a public relay.
 
 ### Start and verify

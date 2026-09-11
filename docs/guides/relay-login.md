@@ -91,5 +91,5 @@ only splices SNI) — set `PIPER_BASE_DOMAIN` + cert/DNS config instead of
 claiming through `piper login`; see [Custom domains](custom-domains.md).
 Add `PIPER_SERVE=direct` and the box serves `:443` itself with no relay at all
 ([Direct serve](direct-serve.md)).
-[Run your own relay](../self-host/relay.md) passthrough-only by leaving
-`PIPER_RELAY_TLS_CERT`/`KEY` unset.
+A self-hosted relay ([Run your own relay](../self-host/relay.md)) runs passthrough-only when
+`PIPER_RELAY_TLS_CERT`/`KEY` are unset.
