@@ -1,3 +1,7 @@
 {
-  "sections": []
+  "sections": [
+    { "title": "Guides", "pages": [
+      { "slug": "install", "file": "guides/install.md", "title": "Install" }
+    ]}
+  ]
 }
