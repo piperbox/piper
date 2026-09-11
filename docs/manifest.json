@@ -7,7 +7,8 @@
       { "slug": "lan-control", "file": "guides/lan-control.md", "title": "LAN control" },
       { "slug": "relay-login", "file": "guides/relay-login.md", "title": "Join the public relay" },
       { "slug": "remote-control", "file": "guides/remote-control.md", "title": "Remote control" },
-      { "slug": "git-deploys", "file": "guides/git-deploys.md", "title": "Git deploys" }
+      { "slug": "git-deploys", "file": "guides/git-deploys.md", "title": "Git deploys" },
+      { "slug": "custom-domains", "file": "guides/custom-domains.md", "title": "Custom domains" }
     ]}
   ]
 }
