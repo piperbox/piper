@@ -11,7 +11,7 @@ An open-source, developer-first PaaS that gives you `git push → live HTTPS URL
 - `piper-edge` — the L4 entrypoint in front of N relays: routes each connection to the relay that owns the agent's tunnel (container-only, like the relay).
 - `piper` — the CLI, a thin HTTP client to `piperd`.
 
-Full design rationale lives in [`docs/superpowers/specs/`](docs/superpowers/specs/) — read it before non-trivial work. Implementation *plans* live in [`docs/superpowers/plans/`](docs/superpowers/plans/); work is delivered plan-by-plan, task-by-task, TDD-style. **Plan 1 of 3** is the agent core, LAN-only (build a Dockerfile → run a container → health-check → serve at `http://<app>.piper.localhost` via managed Caddy, SQLite state). Plan 2 = relay + outbound tunnel + DNS-01 TLS. Plan 3 = GitHub webhook + PR-preview URLs.
+Full design rationale lives in [`docs/superpowers/specs/`](docs/superpowers/specs/) — read it before non-trivial work. Implementation *plans* live in [`docs/superpowers/plans/`](docs/superpowers/plans/); work is delivered plan-by-plan, task-by-task, TDD-style. **Plan 1 of 3** is the agent core, LAN-only (build a Dockerfile → run a container → health-check → serve at `http://<app>.piper.localhost` via managed Caddy, SQLite state). Plan 2 = relay + outbound tunnel + DNS-01 TLS. Plan 3 = GitHub webhook + PR-preview URLs. User-facing docs are organized by audience under [`docs/`](docs/README.md); read that map before adding or moving a doc.
 
 ## Coding Principles
 
