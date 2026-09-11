@@ -93,6 +93,7 @@ tunnel as your traffic; nothing else on the box is exposed.
 | Doc | Covers |
 | --- | --- |
 | [Guides](docs/guides/install.md) | install → first deploy → TUI → relay → remote control → git deploys → domains |
+| [Reference](docs/reference/cli.md) | every CLI verb, env var, and control-API route, pinned to code by `test/docs` |
 | [Self-host](docs/self-host/piperd.md) | run piperd from source or in Docker; run your own relay |
 | [Docs map](docs/README.md) | which folder serves whom, how to add a page |
 | [PROGRESS.md](PROGRESS.md) | built vs. stubbed map, linked to issues |
