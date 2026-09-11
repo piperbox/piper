@@ -2,7 +2,8 @@
   "sections": [
     { "title": "Guides", "pages": [
       { "slug": "install", "file": "guides/install.md", "title": "Install" },
-      { "slug": "first-deploy", "file": "guides/first-deploy.md", "title": "First deploy" }
+      { "slug": "first-deploy", "file": "guides/first-deploy.md", "title": "First deploy" },
+      { "slug": "tui", "file": "guides/tui.md", "title": "The TUI" }
     ]}
   ]
 }
