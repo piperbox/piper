@@ -76,13 +76,14 @@ Through the relay the same routes are reachable at `https://api.<apex>/agents/<b
   "serve": "relay",
   "status": "active",
   "error": "",
+  "note": "",
   "cert_not_after": "2026-12-10T10:00:00Z",
   "dns_records": [{ "type": "A", "name": "example.com", "value": "203.0.113.7" }],
   "dns_ok": true
 }
 ```
 
-`source` is `api` or `env` (`PIPER_BASE_DOMAIN` set); `serve` is `relay` or `direct`; `status` is `""`, `issuing`, `active`, or `failed`. The DNS token itself is never returned.
+`source` is `api` or `env` (`PIPER_BASE_DOMAIN` set); `serve` is `relay` or `direct`; `status` is `""`, `issuing`, `active`, or `failed`. The DNS token itself is never returned. `note` is omitted when empty; when set (a direct-served box before its public IP is known) it explains why the domain isn't reachable yet.
 
 ## Daemon
 
