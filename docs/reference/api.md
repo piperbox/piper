@@ -2,7 +2,7 @@
 
 piperd's HTTP control plane: every route the `piper` CLI, the TUI, and the dashboard use, with request and response shapes and the error statuses each handler returns. `test/docs` fails when a route is registered without a heading here.
 
-All responses are JSON (`Content-Type: application/json`) except deployment logs, which are plain text. Errors are plain-text bodies with the status codes listed per route; a `500` carries only `internal server error`, the detail goes to piperd's log. Every route may also answer `500` on a store failure, so it is not repeated below.
+All responses are JSON (`Content-Type: application/json`) except deployment logs, which are plain text. Errors are plain-text bodies with the status codes listed per route. Every route may also answer `500` on an internal failure (store, temp directory, manifest build, domain manager); the body is generic — `internal server error`, or `internal error` from the auth check — and the detail goes to piperd's log, so it is not repeated below.
 
 ## Authentication
 

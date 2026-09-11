@@ -14,14 +14,14 @@ Global flags come before the verb:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--remote <base-domain>` | `$PIPER_REMOTE` | Drive a relay-connected box through the relay instead of the local piperd; see [Remote control](../guides/remote-control.md). Rejected with `version`, `login`, and `agent` (exit 2). |
+| `--remote <base-domain>` | `$PIPER_REMOTE` | Drive a relay-connected box through the relay instead of the local piperd; see [Remote control](../guides/remote-control.md). Rejected with `version`, `login`, and `agent` (exit 2) — the rejection applies only to the explicit flag; a `PIPER_REMOTE` default is silently ignored by those verbs. |
 | `--version` | | Print the build version and exit 0. |
 
 Per-verb flags come after the positional arguments: `piper delete blog --yes`, never `piper delete --yes blog`. Go's flag parser stops at the first positional, so a flag placed before the name is taken as the name.
 
 Exit codes are the same everywhere: 0 on success, 1 on error (piperd unreachable, the request rejected, a deploy that did not end `running`), 2 on usage (bad flags or arguments). Declining a confirmation prompt prints `aborted` and exits 0.
 
-Every verb except `login`, `box`, and `agent` talks to piperd's [control API](api.md) at the address `piper login` saved, `http://127.0.0.1:8088` when nothing is saved. `PIPER_ADDR` and `PIPER_TOKEN` override the saved address and token; see [Environment variables](env.md#piper-cli).
+Every verb except `version`, `login`, `agent`, `box`, and `github repos` talks to piperd's [control API](api.md) at the address `piper login` saved, `http://127.0.0.1:8088` when nothing is saved. `PIPER_ADDR` and `PIPER_TOKEN` override the saved address and token; see [Environment variables](env.md#piper-cli).
 
 ## version
 
@@ -61,7 +61,7 @@ Exit 1 when the token is rejected, piperd is unreachable, or the claim fails out
 piper agent <up|down|status>
 ```
 
-No flags. Starts, stops, or reports the piperd service on this machine: `brew services` on macOS, the `piperd` systemd unit on Linux. `status` prints whether the daemon is running, the control API address, the build the running daemon reports, and the listen addresses and data directory it loaded. Exit 0 whether or not piperd is installed (`status` says `not installed`), 1 when `brew services` or `systemctl` fails, 2 on any other OS.
+No flags. Starts, stops, or reports the piperd service on this machine: `brew services` on macOS, the `piperd` systemd unit on Linux. `status` prints whether the daemon is running, the control API address, the build the running daemon reports, and the listen addresses and data directory it loaded. `status` exits 0 whether or not piperd is installed; `up` and `down` exit 1 when it is not installed or when `brew services`/`systemctl` fails; 2 on any other OS.
 
 ## create
 

@@ -30,7 +30,7 @@ Read by `internal/config` and `cmd/piperd`. The systemd unit sets `PIPER_DATA_DI
 | `PIPER_TLS_KEY_FILE` | unset | Static key path, paired with `PIPER_TLS_CERT_FILE`. |
 | `PIPER_PUBLIC_IP` | learned from the relay | Public IP the direct-serve DNS guidance names; needed on a never-enrolled box or behind split-horizon NAT. Ignored with a log line when not an IP. |
 | `PIPER_SERVE` | `relay` | `direct` serves `PIPER_BASE_DOMAIN` from this box's own `:443` instead of through the relay; see [Direct serve](../guides/direct-serve.md). Any other value is ignored with a log line. |
-| `PIPER_SKIP_CADDY` | unset | Any value: do not start or manage a Caddy, because one is already running (the e2e suite). |
+| `PIPER_SKIP_CADDY` | unset | **Test only.** Any value: do not start or manage a Caddy, because one is already running (the e2e suite). |
 | `PIPER_TEST_ISSUER` | unset | **Test only.** `selfsigned` replaces ACME with a self-signed issuer so the e2e suite can serve TLS without real DNS. Never set it on a real box. |
 
 ## piper-relay
