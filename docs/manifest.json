@@ -3,7 +3,8 @@
     { "title": "Guides", "pages": [
       { "slug": "install", "file": "guides/install.md", "title": "Install" },
       { "slug": "first-deploy", "file": "guides/first-deploy.md", "title": "First deploy" },
-      { "slug": "tui", "file": "guides/tui.md", "title": "The TUI" }
+      { "slug": "tui", "file": "guides/tui.md", "title": "The TUI" },
+      { "slug": "lan-control", "file": "guides/lan-control.md", "title": "LAN control" }
     ]}
   ]
 }
