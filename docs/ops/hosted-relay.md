@@ -85,8 +85,9 @@ recreated together, and a plain `docker compose up -d` does that: it
 recreates every replica of a scaled service within the same second, and
 `COMPOSE_PARALLEL_LIMIT=1` does not change it (it bounds concurrent engine
 calls, not replica order). Replace the replicas one at a time instead, as
-in "Single host with compose" below (#535); on Kubernetes or ECS the
-orchestrator's rolling update already provides it.
+in [Single host with compose](../self-host/relay.md#single-host-with-compose)
+(#535); on Kubernetes or ECS the orchestrator's rolling update already
+provides it.
 
 ## Rolling out with Flux
 

@@ -9,7 +9,7 @@ or run with no relay at all.
 `"serve"` on [the box-wide domain
 API](custom-domains.md#via-the-control-api-dashboard--curl--relay-free-tier-boxes)
 picks how traffic reaches the box: `"relay"`
-(default, above) or `"direct"`. In direct mode the box terminates traffic
+(the default there) or `"direct"`. In direct mode the box terminates traffic
 itself — point `<domain>` and `*.<domain>` A/AAAA records straight at the
 box's public IP, which `GET /v1/domain` fills in from the relay-observed
 address (override with `PIPER_PUBLIC_IP` for split-horizon or NAT setups, and
@@ -41,11 +41,13 @@ a nicer hostname. One thing a never-enrolled box does not get: `dns_ok` and
 the filled-in A-record values, which come from the relay-observed public IP
 unless you set `PIPER_PUBLIC_IP` (serving is unaffected either way). Per-app
 domains work — they issue via DNS-01 with the same token source (see
-[Direct-served boxes](#per-app-domains-on-a-direct-box) below).
+[Per-app domains on a direct box](#per-app-domains-on-a-direct-box) below).
 
 ## Per-app domains on a direct box
 
-On a box whose serve mode is `direct`, [`piper domains`](custom-domains.md#per-app-domains-piper-domains) and the API are the same as in relay mode, with three differences:
+On a box whose serve mode is `direct`,
+[`piper domains`](custom-domains.md#per-app-domains-piper-domains) and the API
+are the same as in relay mode, with three differences:
 
 - **The record is an `A`/`AAAA`, not a CNAME.** `add` prints the box's public
   IP (`myshop.com  A  203.0.113.7`) — the relay-observed address, or
