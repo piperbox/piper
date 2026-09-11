@@ -12,7 +12,8 @@
       { "slug": "direct-serve", "file": "guides/direct-serve.md", "title": "Direct serve" }
     ]},
     { "title": "Reference", "pages": [
-      { "slug": "cli", "file": "reference/cli.md", "title": "CLI" }
+      { "slug": "cli", "file": "reference/cli.md", "title": "CLI" },
+      { "slug": "api", "file": "reference/api.md", "title": "Control API" }
     ]}
   ]
 }
